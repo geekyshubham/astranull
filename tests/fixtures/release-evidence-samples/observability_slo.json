@@ -1,0 +1,51 @@
+{
+  "kind": "observability_slo",
+  "evidence": {
+    "schema_version": 1,
+    "artifact_type": "observability_slo_release_evidence",
+    "created_at": "2026-07-02T00:00:00.000Z",
+    "validation": {
+      "ok": true,
+      "missing_controls": [],
+      "missing_critical_controls": [],
+      "invalid_fields": [],
+      "forbidden_fields": []
+    },
+    "environment": "staging",
+    "incident_drill_id": "incident-drill-2026-07-02",
+    "metric_scrape_auth": {
+      "auth_mechanism": "gateway-oidc",
+      "gateway_reference": "gateway://metrics/staging",
+      "evidence_uri": "evidence://observability/scrape-auth",
+      "validated_at": "2026-07-02T00:00:00.000Z"
+    },
+    "dashboard_ids": [
+      "dash-readiness",
+      "dash-soc"
+    ],
+    "alert_routes": [
+      {
+        "route_id": "pager-primary",
+        "alert_name": "slo_burn_rate",
+        "destination_reference": "pager://primary"
+      }
+    ],
+    "slo_targets": [
+      {
+        "slo_id": "api-availability",
+        "target": "99.9",
+        "measurement_window": "30d"
+      }
+    ],
+    "on_call": {
+      "owner": "ops-lead",
+      "rotation_reference": "rotation://primary",
+      "evidence_uri": "evidence://ops/rotation"
+    },
+    "redaction_policy": {
+      "policy_reference": "policy://redaction/v1",
+      "summary": "metadata-only logs and traces"
+    },
+    "evidence_uri": "evidence://observability/slo"
+  }
+}

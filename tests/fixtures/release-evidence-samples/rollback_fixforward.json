@@ -1,0 +1,24 @@
+{
+  "kind": "rollback_fixforward",
+  "evidence": {
+    "schema_version": 1,
+    "artifact_type": "rollback_fixforward_release_evidence",
+    "created_at": "2026-07-02T00:00:00.000Z",
+    "validation": {
+      "ok": true,
+      "missing_fields": [],
+      "forbidden_fields": [],
+      "missing_signoff": false
+    },
+    "plan_summary": {
+      "release_id": "rel-2026-07-02",
+      "environment": "staging",
+      "owner": "release-manager",
+      "migration_strategy": "forward_fix",
+      "migration_version": "0007_production_release_evidence",
+      "tested_command_count": 2,
+      "signoff_count": 2
+    },
+    "evidence_uri": "evidence://release/rollback-fixforward-plan"
+  }
+}

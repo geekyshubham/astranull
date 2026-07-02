@@ -1,0 +1,7 @@
+helm/
+install.sh
+uninstall.sh
+systemd/
+*.md
+.git
+.gitignore

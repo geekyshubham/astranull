@@ -1,0 +1,37 @@
+{
+  "kind": "gateway_load_abuse",
+  "evidence": {
+    "schema_version": 1,
+    "artifact_type": "gateway_load_abuse_evidence",
+    "created_at": "2026-07-02T00:00:00.000Z",
+    "release_id": "rel-2026-07-02",
+    "environment": "staging",
+    "rate_limit_results": [
+      {
+        "control_id": "api-global-rate-limit",
+        "status": "passed",
+        "threshold_metadata": "metadata-only-bounded-test",
+        "evidence_uri": "evidence://edge/rate-limit-api"
+      }
+    ],
+    "abuse_detection_results": [
+      {
+        "control_id": "anomaly-detection",
+        "status": "passed",
+        "alert_fired": true,
+        "evidence_uri": "evidence://edge/abuse-detection"
+      }
+    ],
+    "edge_alerting_summary": {
+      "siem_route_reference": "siem://edge-alerts/staging",
+      "alert_count": 2,
+      "false_positive_rate_metadata": "within-threshold"
+    },
+    "signoff": {
+      "owner": "security-lead",
+      "signed_at": "2026-07-02T00:00:00.000Z",
+      "signoff_reference": "signoff://security/gateway-load-abuse"
+    },
+    "evidence_uri": "evidence://edge/gateway-load-abuse"
+  }
+}

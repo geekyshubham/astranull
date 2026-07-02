@@ -1,0 +1,30 @@
+{
+  "kind": "placement_confidence_staging",
+  "evidence": {
+    "schema_version": 1,
+    "artifact_type": "placement_confidence_staging_evidence",
+    "created_at": "2026-07-02T00:00:00.000Z",
+    "release_id": "rel-2026-07-02",
+    "environment": "staging",
+    "scenarios": [
+      {
+        "scenario_id": "probe-agent-correlation",
+        "status": "passed",
+        "correlation_score": "high",
+        "evidence_uri": "evidence://placement/probe-agent-correlation"
+      }
+    ],
+    "evidence_correlation_summary": {
+      "probe_evidence_count": 12,
+      "agent_evidence_count": 8,
+      "correlated_pairs": 8,
+      "gaps": []
+    },
+    "signoff": {
+      "owner": "detection-lead",
+      "signed_at": "2026-07-02T00:00:00.000Z",
+      "signoff_reference": "signoff://detection/placement-confidence"
+    },
+    "evidence_uri": "evidence://detection/placement-confidence-staging"
+  }
+}

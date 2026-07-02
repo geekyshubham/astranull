@@ -1,0 +1,23 @@
+[Unit]
+Description=AstraNull outbound validation agent (metadata-only observation)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=astranull
+Group=astranull
+EnvironmentFile=-/etc/astranull/agent.env
+Environment=ASTRANULL_AGENT_IDENTITY=/var/lib/astranull/identity.json
+ExecStart=/usr/local/bin/astranull-agent.mjs
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/astranull
+# Outbound-only — no inbound management port required by default.
+
+[Install]
+WantedBy=multi-user.target

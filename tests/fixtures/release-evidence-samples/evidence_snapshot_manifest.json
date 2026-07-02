@@ -1,0 +1,25 @@
+{
+  "kind": "evidence_snapshot_manifest",
+  "evidence": {
+    "schema_version": 1,
+    "artifact_type": "immutable_evidence_snapshot_manifest",
+    "created_at": "2026-07-02T00:00:00.000Z",
+    "validation": {
+      "ok": true,
+      "gaps": [],
+      "forbidden_fields": [],
+      "snapshot_count": 2
+    },
+    "summary": {
+      "tenant_id": "ten_demo",
+      "batch_id": "snapshot-batch-2026-07-02",
+      "snapshots": [
+        {
+          "snapshot_id": "snap-001",
+          "snapshot_hash": "sha256:snapshot-digest"
+        }
+      ]
+    },
+    "evidence_uri": "evidence://custody/snapshot-manifest"
+  }
+}

@@ -1,0 +1,61 @@
+export const ROLES = ['owner', 'admin', 'engineer', 'soc', 'auditor', 'viewer'];
+
+/** Roles allowed when minting automation service accounts (no owner/SOC). */
+export const SERVICE_ACCOUNT_ROLES = ['admin', 'engineer', 'auditor', 'viewer'];
+
+export const PERMISSIONS = {
+  'target_group:read': ['owner', 'admin', 'engineer', 'soc', 'auditor', 'viewer'],
+  'target_group:write': ['owner', 'admin', 'engineer'],
+  'bootstrap_token:create': ['owner', 'admin', 'engineer'],
+  'bootstrap_token:read': ['owner', 'admin', 'engineer', 'auditor'],
+  'bootstrap_token:revoke': ['owner', 'admin'],
+  'service_account:create': ['owner', 'admin'],
+  'service_account:read': ['owner', 'admin', 'auditor'],
+  'service_account:revoke': ['owner', 'admin'],
+  'service_account:rotate': ['owner', 'admin'],
+  'secret:read': ['owner', 'admin', 'auditor'],
+  'secret:write': ['owner', 'admin'],
+  'secret:rotate': ['owner', 'admin'],
+  'agent:read': ['owner', 'admin', 'engineer', 'soc', 'auditor', 'viewer'],
+  'agent:revoke': ['owner', 'admin'],
+  'test_run:start': ['owner', 'admin', 'engineer'],
+  'test_run:read': ['owner', 'admin', 'engineer', 'soc', 'auditor', 'viewer'],
+  'finding:read': ['owner', 'admin', 'engineer', 'soc', 'auditor', 'viewer'],
+  'finding:write': ['owner', 'admin', 'engineer'],
+  'report:create': ['owner', 'admin', 'engineer', 'soc', 'auditor'],
+  'audit:read': ['owner', 'admin', 'soc', 'auditor'],
+  'high_scale:request': ['owner', 'admin', 'engineer'],
+  'high_scale:read': ['owner', 'admin', 'engineer', 'soc', 'auditor', 'viewer'],
+  'soc:high_scale': ['soc'],
+  'soc:kill_switch': ['soc'],
+  'tenant:read': ['owner', 'admin', 'engineer', 'soc', 'auditor', 'viewer'],
+  'tenant:write': ['owner', 'admin'],
+  'environment:read': ['owner', 'admin', 'engineer', 'soc', 'auditor', 'viewer'],
+  'environment:write': ['owner', 'admin', 'engineer'],
+  'evidence:read': ['owner', 'admin', 'engineer', 'soc', 'auditor', 'viewer'],
+  'release_evidence:read': ['owner', 'admin', 'soc', 'auditor'],
+  'release_evidence:write': ['owner', 'admin', 'soc'],
+  'event:ingest': ['owner', 'admin', 'engineer', 'soc'],
+  'notification:read': ['owner', 'admin', 'engineer', 'soc', 'auditor'],
+  'notification:write': ['owner', 'admin'],
+  'agent_update:read': ['owner', 'admin', 'engineer', 'auditor'],
+  'agent_update:write': ['owner', 'admin'],
+  'agent_update:rollback': ['owner', 'admin'],
+  'waf:read': ['owner', 'admin', 'engineer', 'soc', 'auditor', 'viewer'],
+  'waf:write': ['owner', 'admin', 'engineer'],
+  'waf:run': ['owner', 'admin', 'engineer'],
+  'waf:connector_read': ['owner', 'admin', 'engineer', 'auditor'],
+  'waf:connector_write': ['owner', 'admin'],
+  'waf:recommendation_review': ['owner', 'admin', 'engineer'],
+  'discovery:read': ['owner', 'admin', 'engineer', 'soc', 'auditor', 'viewer'],
+  'discovery:write': ['owner', 'admin', 'engineer'],
+  'discovery:approve': ['owner', 'admin'],
+  'cve_pipeline:read': ['owner', 'admin', 'engineer', 'soc', 'auditor', 'viewer'],
+  'cve_pipeline:write': ['owner', 'admin', 'engineer'],
+};
+
+export function roleHasPermission(role, permission) {
+  const allowed = PERMISSIONS[permission];
+  if (!allowed) return false;
+  return allowed.includes(role);
+}

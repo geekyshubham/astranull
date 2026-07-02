@@ -1,0 +1,6 @@
+apiVersion: v2
+name: astranull-agent
+description: Outbound-only AstraNull observation agent (canary optional, customer-approved)
+type: application
+version: 0.2.0-production-readiness
+appVersion: "0.2.0-production-readiness"

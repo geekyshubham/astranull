@@ -1,0 +1,13 @@
+.git
+.data
+node_modules
+.playwright-cli
+output
+.codex
+coverage
+*.log
+npm-debug.log*
+.DS_Store
+tmp
+temp
+*.tmp

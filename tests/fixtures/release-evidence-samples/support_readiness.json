@@ -1,0 +1,20 @@
+{
+  "kind": "support_readiness",
+  "evidence": {
+    "schema_version": 1,
+    "artifact_type": "support_on_call_readiness_evidence",
+    "created_at": "2026-07-02T00:00:00.000Z",
+    "validation": {
+      "ok": true,
+      "missing_fields": [],
+      "forbidden_fields": [],
+      "missing_owner": false
+    },
+    "readiness_summary": {
+      "readiness_id": "support-readiness-2026-07-02",
+      "environment": "staging",
+      "support_signoff_owner": "support-lead"
+    },
+    "evidence_uri": "evidence://support/readiness"
+  }
+}

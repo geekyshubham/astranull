@@ -1,0 +1,35 @@
+image:
+  repository: astranull/agent
+  tag: 0.2.0-production-readiness
+  pullPolicy: IfNotPresent
+# HTTPS control plane required; terminate TLS at ingress/service mesh or set a trusted HTTPS API URL.
+apiUrl: https://api.astranull.example
+# Optional tenant hint for developer validation; prefer identity after registration.
+tenantId: ""
+agent:
+  name: ""
+mode: daemonset
+# Set bootstrapToken for quick installs only; production should use a pre-created Secret.
+bootstrapToken: ""
+bootstrapTokenSecretName: astranull-bootstrap-token
+bootstrapTokenSecretKey: token
+# Persist /var/lib/astranull so identity.json survives pod restarts. Use pvc with
+# existingClaim for managed storage, or emptyDir only for disposable developer validation.
+persistence:
+  type: hostPath # hostPath | pvc | emptyDir
+  hostPath: /var/lib/astranull
+  existingClaim: ""
+# Opt-in customer-approved canary listener (observation traffic, not management)
+canaryListen:
+  enabled: false
+  port: 18080
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi
+securityContext:
+  privileged: false
+  capabilities: []

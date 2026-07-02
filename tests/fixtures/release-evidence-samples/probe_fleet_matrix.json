@@ -1,0 +1,25 @@
+{
+  "kind": "probe_fleet_matrix",
+  "evidence": {
+    "schema_version": 1,
+    "artifact_type": "probe_fleet_matrix_evidence",
+    "created_at": "2026-07-02T00:00:00.000Z",
+    "fleet_id": "probe-fleet-staging-001",
+    "overall_status": "passed",
+    "coverage_gaps": {
+      "missing_regions": [],
+      "missing_probe_profiles": [],
+      "failed_controls": []
+    },
+    "rows": [
+      {
+        "region": "us-east-1",
+        "status": "passed",
+        "controls": {
+          "signed_jobs_only": "passed"
+        }
+      }
+    ],
+    "evidence_uri": "evidence://probe/fleet-matrix"
+  }
+}

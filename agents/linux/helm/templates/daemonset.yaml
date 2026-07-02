@@ -1,0 +1,98 @@
+{{- if eq .Values.mode "daemonset" }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ .Release.Name }}-astranull-agent
+spec:
+  selector:
+    matchLabels:
+      app: astranull-agent
+  template:
+    metadata:
+      labels:
+        app: astranull-agent
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      initContainers:
+        - name: prepare-bootstrap-token
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              cp /bootstrap-source/bootstrap-token /var/lib/astranull/bootstrap-token
+              chmod 0600 /var/lib/astranull/bootstrap-token
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: astranull-data
+              mountPath: /var/lib/astranull
+            - name: bootstrap-token-source
+              mountPath: /bootstrap-source
+              readOnly: true
+      containers:
+        - name: agent
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+          args:
+            - "--api"
+            - "{{ .Values.apiUrl }}"
+            {{- if .Values.tenantId }}
+            - "--tenant"
+            - "{{ .Values.tenantId }}"
+            {{- end }}
+            {{- if .Values.agent.name }}
+            - "--name"
+            - "{{ .Values.agent.name }}"
+            {{- end }}
+            {{- if .Values.canaryListen.enabled }}
+            - "--canary-listen"
+            - "{{ .Values.canaryListen.port }}"
+            {{- end }}
+          env:
+            - name: ASTRANULL_AGENT_IDENTITY
+              value: /var/lib/astranull/identity.json
+            - name: ASTRANULL_BOOTSTRAP_TOKEN_FILE
+              value: /var/lib/astranull/bootstrap-token
+            {{- if .Values.agent.name }}
+            - name: ASTRANULL_AGENT_NAME
+              value: "{{ .Values.agent.name }}"
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: astranull-data
+              mountPath: /var/lib/astranull
+          {{- if .Values.canaryListen.enabled }}
+          ports:
+            - containerPort: {{ .Values.canaryListen.port }}
+          {{- end }}
+      volumes:
+        - name: astranull-data
+          {{- if eq .Values.persistence.type "pvc" }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim }}
+          {{- else if eq .Values.persistence.type "emptyDir" }}
+          emptyDir: {}
+          {{- else }}
+          hostPath:
+            path: {{ .Values.persistence.hostPath }}
+            type: DirectoryOrCreate
+          {{- end }}
+        - name: bootstrap-token-source
+          secret:
+            secretName: {{ .Values.bootstrapTokenSecretName }}
+            items:
+              - key: {{ .Values.bootstrapTokenSecretKey }}
+                path: bootstrap-token
+{{- end }}

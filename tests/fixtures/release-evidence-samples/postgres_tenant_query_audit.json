@@ -1,0 +1,13 @@
+{
+  "kind": "postgres_tenant_query_audit",
+  "evidence": {
+    "schema_version": 1,
+    "artifact_type": "postgres_tenant_query_audit",
+    "scanned_files": [
+      "src/persistence/postgres/testRunRepository.mjs"
+    ],
+    "finding_count": 0,
+    "findings": [],
+    "evidence_uri": "evidence://db/tenant-query-audit"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "kind": "vector_safety_policy",
+  "evidence": {
+    "schema_version": 1,
+    "artifact_type": "vector_safety_policy_catalog",
+    "created_at": "2026-07-02T00:00:00.000Z",
+    "validation": {
+      "ok": true,
+      "total_checks": 45,
+      "customer_runnable_count": 36,
+      "soc_request_only_count": 9,
+      "gaps": []
+    },
+    "customer_runnable_policies": [
+      {
+        "check_id": "direct_origin_bypass",
+        "probe_profile": "http_head_only"
+      }
+    ],
+    "soc_request_only_markers": [
+      {
+        "check_id": "high_scale_provider_exercise",
+        "customer_runnable": false
+      }
+    ],
+    "evidence_uri": "evidence://detection/vector-safety-policy"
+  }
+}

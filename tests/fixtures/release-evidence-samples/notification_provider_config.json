@@ -1,0 +1,32 @@
+{
+  "kind": "notification_provider_config",
+  "evidence": {
+    "schema_version": 1,
+    "artifact_type": "notification_provider_config_evidence",
+    "created_at": "2026-07-02T00:00:00.000Z",
+    "release_id": "rel-2026-07-02",
+    "validation": {
+      "ok": true,
+      "missing_fields": [],
+      "invalid_fields": [],
+      "forbidden_fields": [],
+      "coverage_gaps": []
+    },
+    "providers": [
+      {
+        "provider_id": "email-primary",
+        "channel": "email",
+        "delivery_mode": "metadata-only"
+      }
+    ],
+    "signoff": {
+      "soc": {
+        "reference": "signoff://soc/notifications"
+      },
+      "security": {
+        "reference": "signoff://sec/notifications"
+      }
+    },
+    "evidence_uri": "evidence://notifications/provider-config"
+  }
+}

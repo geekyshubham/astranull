@@ -1,0 +1,4 @@
+interface:
+  display_name: "Grok Orchestrator"
+  short_description: "Orchestrate Composer 2.5 Grok workers"
+  default_prompt: "Use $grok-orchestrator to implement this coding task with Composer 2.5 Grok workers while you orchestrate, review, and loop until issues are resolved."

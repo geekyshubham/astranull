@@ -1,0 +1,32 @@
+{
+  "kind": "control_plane_container_release",
+  "evidence": {
+    "schema_version": 1,
+    "artifact_type": "control_plane_container_release_evidence",
+    "created_at": "2026-07-02T00:00:00.000Z",
+    "release_id": "rel-control-plane-2026-07-02",
+    "image": {
+      "repository": "registry.example/astranull-control-plane",
+      "digest_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "tag": "2026-07-02-staging"
+    },
+    "scan_summary": {
+      "scanner": "container-scan-metadata",
+      "critical_count": 0,
+      "high_count": 0,
+      "report_uri": "evidence://release/container-scan"
+    },
+    "signing_summary": {
+      "signer_reference": "cosign://release-signer",
+      "signature_verified": true,
+      "provenance_uri": "evidence://release/slsa-provenance"
+    },
+    "promotion_summary": {
+      "source_environment": "staging",
+      "promotion_approved_by": "release-manager",
+      "promoted_at": "2026-07-02T00:00:00.000Z"
+    },
+    "rollback_reference": "rollback://control-plane/rel-2026-07-01",
+    "evidence_uri": "evidence://release/control-plane-container"
+  }
+}

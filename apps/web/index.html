@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AstraNull</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">AstraNull</div>
+      <div class="context">
+        <label>Tenant</label>
+        <input id="tenantId" value="ten_demo" />
+        <label>Role</label>
+        <select id="role">
+          <option>admin</option>
+          <option>engineer</option>
+          <option>soc</option>
+          <option>viewer</option>
+          <option>auditor</option>
+          <option>owner</option>
+        </select>
+      </div>
+      <nav id="nav"></nav>
+    </aside>
+    <main class="content">
+      <header class="topbar">
+        <h1 id="pageTitle">Dashboard</h1>
+        <span class="badge" id="envBadge">Developer validation · Safe checks only</span>
+      </header>
+      <section id="view"></section>
+    </main>
+  </div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

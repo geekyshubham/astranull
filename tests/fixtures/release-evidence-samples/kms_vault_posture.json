@@ -1,0 +1,35 @@
+{
+  "kind": "kms_vault_posture",
+  "evidence": {
+    "schema_version": 1,
+    "artifact_type": "kms_vault_posture_evidence",
+    "created_at": "2026-07-02T00:00:00.000Z",
+    "validation": {
+      "ok": true,
+      "missing_fields": [],
+      "forbidden_fields": []
+    },
+    "environment": "staging",
+    "vault_summary": {
+      "vault_reference": "vault://staging/secrets",
+      "kms_provider": "cloud-kms-metadata",
+      "encryption_at_rest": "enabled"
+    },
+    "key_rotation_policy": {
+      "policy_reference": "policy://kms/rotation/v1",
+      "rotation_interval_days": 90,
+      "last_rotation_drill_reference": "drill://kms/rotation-2026-07-02"
+    },
+    "access_control_summary": {
+      "break_glass_procedure_reference": "runbook://security/break-glass",
+      "least_privilege_attested": true
+    },
+    "drill_reference": "drill://kms/vault-access-2026-07-02",
+    "security_signoff": {
+      "owner": "security-lead",
+      "signed_at": "2026-07-02T00:00:00.000Z",
+      "signoff_reference": "signoff://security/kms-vault"
+    },
+    "evidence_uri": "evidence://security/kms-vault-posture"
+  }
+}

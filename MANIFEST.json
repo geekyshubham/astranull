@@ -1,0 +1,415 @@
+{
+  "project": "AstraNull",
+  "type": "No-access-first DDoS readiness validation platform",
+  "generated": "2026-06-30",
+  "notes": [
+    "No automatic IP inventory discovery in core scope.",
+    "Customer-declared target groups only.",
+    "Agent uses outbound-only control channel.",
+    "High-scale DDoS simulation is SOC-gated and authorization-gated only.",
+    "Docs are intended for AI/software agents building the product."
+  ],
+  "file_count": 80,
+  "files": [
+    {
+      "path": "AGENTS.md",
+      "bytes": 3915,
+      "sha256_16": "f40201476231fcd0"
+    },
+    {
+      "path": "MANIFEST.json",
+      "bytes": 3606,
+      "sha256_16": "1bb1404fede23f81"
+    },
+    {
+      "path": "PROGRESS.md",
+      "bytes": 17366,
+      "sha256_16": "58371c3835c86640"
+    },
+    {
+      "path": "README.md",
+      "bytes": 3754,
+      "sha256_16": "012020d0fe229ada"
+    },
+    {
+      "path": "agents.md",
+      "bytes": 3915,
+      "sha256_16": "f40201476231fcd0"
+    },
+    {
+      "path": "docs/adr/0001-no-ip-inventory-discovery.md",
+      "bytes": 856,
+      "sha256_16": "5853b76ba9fa47b5"
+    },
+    {
+      "path": "docs/adr/0002-outbound-agent-control.md",
+      "bytes": 819,
+      "sha256_16": "75fa77cd5cd874a1"
+    },
+    {
+      "path": "docs/adr/0003-soc-gated-high-scale.md",
+      "bytes": 780,
+      "sha256_16": "913745410e885a8b"
+    },
+    {
+      "path": "docs/adr/0004-target-groups-as-core-scope.md",
+      "bytes": 652,
+      "sha256_16": "67843636f1efaad1"
+    },
+    {
+      "path": "docs/agent/01-agent-architecture.md",
+      "bytes": 3138,
+      "sha256_16": "11bc23ca834c7f6b"
+    },
+    {
+      "path": "docs/agent/02-installation-and-packaging.md",
+      "bytes": 4233,
+      "sha256_16": "8582efbae603dfa3"
+    },
+    {
+      "path": "docs/agent/03-api-key-and-token-lifecycle.md",
+      "bytes": 1882,
+      "sha256_16": "0115e005b18fa26b"
+    },
+    {
+      "path": "docs/agent/04-detection-modes.md",
+      "bytes": 2789,
+      "sha256_16": "cc2eee708d0f050d"
+    },
+    {
+      "path": "docs/agent/05-kubernetes-agent.md",
+      "bytes": 1719,
+      "sha256_16": "8efc7859657bab94"
+    },
+    {
+      "path": "docs/agent/06-placement-guide.md",
+      "bytes": 3559,
+      "sha256_16": "c506c59be966c8ab"
+    },
+    {
+      "path": "docs/agent/07-agent-lifecycle.md",
+      "bytes": 1144,
+      "sha256_16": "d39a89b3cca42477"
+    },
+    {
+      "path": "docs/backend/01-backend-architecture.md",
+      "bytes": 4331,
+      "sha256_16": "084e76a4b17bde10"
+    },
+    {
+      "path": "docs/backend/02-test-orchestration.md",
+      "bytes": 2497,
+      "sha256_16": "38189fb7d7582f9d"
+    },
+    {
+      "path": "docs/backend/03-api-design.md",
+      "bytes": 3502,
+      "sha256_16": "710fdd54beea645a"
+    },
+    {
+      "path": "docs/backend/04-control-plane.md",
+      "bytes": 1775,
+      "sha256_16": "72a3a7e6e00fe4c3"
+    },
+    {
+      "path": "docs/backend/05-test-strategy.md",
+      "bytes": 1458,
+      "sha256_16": "9642e797d4fd34d3"
+    },
+    {
+      "path": "docs/backend/06-events-and-queues.md",
+      "bytes": 1716,
+      "sha256_16": "45f1f498bd92c6ad"
+    },
+    {
+      "path": "docs/backend/07-notifications.md",
+      "bytes": 1038,
+      "sha256_16": "7ec7e3c8b63ed11e"
+    },
+    {
+      "path": "docs/backend/08-observability.md",
+      "bytes": 1235,
+      "sha256_16": "9a4141e54fc5d687"
+    },
+    {
+      "path": "docs/backend/09-database-schema.md",
+      "bytes": 8344,
+      "sha256_16": "da3efcf15383066d"
+    },
+    {
+      "path": "docs/backend/10-agent-probe-detection-blueprint.md",
+      "bytes": 8054,
+      "sha256_16": "d848edae2f928696"
+    },
+    {
+      "path": "docs/detection/01-vector-catalog.md",
+      "bytes": 3008,
+      "sha256_16": "61196436503cee49"
+    },
+    {
+      "path": "docs/detection/02-check-library.md",
+      "bytes": 2958,
+      "sha256_16": "4d4391dbbb25578c"
+    },
+    {
+      "path": "docs/detection/03-correlation-engine.md",
+      "bytes": 3094,
+      "sha256_16": "dfdc6e4a153155b6"
+    },
+    {
+      "path": "docs/detection/04-evidence-and-scoring.md",
+      "bytes": 2095,
+      "sha256_16": "598957be1a08d956"
+    },
+    {
+      "path": "docs/detection/05-origin-bypass.md",
+      "bytes": 2267,
+      "sha256_16": "62f19c0566750d09"
+    },
+    {
+      "path": "docs/detection/06-l3-l4-vectors.md",
+      "bytes": 2346,
+      "sha256_16": "da385bbbdcf11fc8"
+    },
+    {
+      "path": "docs/detection/07-dns-vectors.md",
+      "bytes": 1692,
+      "sha256_16": "4fb3c737599d7c61"
+    },
+    {
+      "path": "docs/detection/08-l7-api-vectors.md",
+      "bytes": 2938,
+      "sha256_16": "d2601fd1870c1dc2"
+    },
+    {
+      "path": "docs/detection/09-tls-connection-vectors.md",
+      "bytes": 1271,
+      "sha256_16": "1ccc9370f51cf505"
+    },
+    {
+      "path": "docs/detection/10-protocol-vectors.md",
+      "bytes": 1197,
+      "sha256_16": "5e24ccc7cecb67a7"
+    },
+    {
+      "path": "docs/detection/11-high-scale-ddos-detection.md",
+      "bytes": 2721,
+      "sha256_16": "0a3a9e82e32cf38d"
+    },
+    {
+      "path": "docs/detection/12-vector-test-matrix.md",
+      "bytes": 8018,
+      "sha256_16": "4c5a9d871a8c97c0"
+    },
+    {
+      "path": "docs/flows/01-customer-onboarding.md",
+      "bytes": 1898,
+      "sha256_16": "79e42383cfac7844"
+    },
+    {
+      "path": "docs/flows/02-agent-registration.md",
+      "bytes": 3552,
+      "sha256_16": "5533897e85594276"
+    },
+    {
+      "path": "docs/flows/03-safe-check-execution.md",
+      "bytes": 1535,
+      "sha256_16": "857bbd4e5a8ab2cc"
+    },
+    {
+      "path": "docs/flows/04-high-scale-request-and-approval.md",
+      "bytes": 2879,
+      "sha256_16": "bb017aa2f2dcac61"
+    },
+    {
+      "path": "docs/flows/05-soc-operations.md",
+      "bytes": 1528,
+      "sha256_16": "060d4f3dc0e12d67"
+    },
+    {
+      "path": "docs/flows/06-reporting-and-remediation.md",
+      "bytes": 860,
+      "sha256_16": "138a2dbc304b0d9a"
+    },
+    {
+      "path": "docs/index.md",
+      "bytes": 6007,
+      "sha256_16": "e0a4bc70253cfe25"
+    },
+    {
+      "path": "docs/product/01-platform-overview.md",
+      "bytes": 4056,
+      "sha256_16": "34fb174402a0e38d"
+    },
+    {
+      "path": "docs/product/02-scope-and-principles.md",
+      "bytes": 2942,
+      "sha256_16": "8ccb63b27f0c6ff7"
+    },
+    {
+      "path": "docs/product/03-personas-and-roles.md",
+      "bytes": 2448,
+      "sha256_16": "47f2f9717d94bf2f"
+    },
+    {
+      "path": "docs/product/04-target-groups.md",
+      "bytes": 3655,
+      "sha256_16": "24a66e03ac0fd5b0"
+    },
+    {
+      "path": "docs/product/05-platform-roadmap.md",
+      "bytes": 2340,
+      "sha256_16": "cf76cf50e58391e9"
+    },
+    {
+      "path": "docs/product/06-release-plan.md",
+      "bytes": 2081,
+      "sha256_16": "d467c20c98b4d4b2"
+    },
+    {
+      "path": "docs/product/07-end-to-end-platform-spec.md",
+      "bytes": 12454,
+      "sha256_16": "387b6344cffa1b4b"
+    },
+    {
+      "path": "docs/progress-detailed.md",
+      "bytes": 8106,
+      "sha256_16": "896c881eadf611f0"
+    },
+    {
+      "path": "docs/security/01-security-model.md",
+      "bytes": 1932,
+      "sha256_16": "009ae066c8d07a4c"
+    },
+    {
+      "path": "docs/security/02-safe-testing-policy.md",
+      "bytes": 1324,
+      "sha256_16": "df4236b7ab2d188d"
+    },
+    {
+      "path": "docs/security/03-privacy-and-data-retention.md",
+      "bytes": 1162,
+      "sha256_16": "6d8c8f86c74c5fa1"
+    },
+    {
+      "path": "docs/security/04-compliance-and-references.md",
+      "bytes": 3087,
+      "sha256_16": "51345128999f4516"
+    },
+    {
+      "path": "docs/soc/01-high-scale-ddos-workflow.md",
+      "bytes": 2972,
+      "sha256_16": "d7055222ffe11e81"
+    },
+    {
+      "path": "docs/soc/02-authorization-pack.md",
+      "bytes": 1908,
+      "sha256_16": "1515639e82420053"
+    },
+    {
+      "path": "docs/soc/03-execution-adapter.md",
+      "bytes": 1627,
+      "sha256_16": "d08351f365d98c49"
+    },
+    {
+      "path": "docs/soc/04-soc-reporting.md",
+      "bytes": 888,
+      "sha256_16": "f6aa7ef7f7341070"
+    },
+    {
+      "path": "docs/templates/customer-authorization-letter.md",
+      "bytes": 1032,
+      "sha256_16": "89dca91523a0444a"
+    },
+    {
+      "path": "docs/templates/provider-approval-request.md",
+      "bytes": 934,
+      "sha256_16": "d6fcf5b734cdf67a"
+    },
+    {
+      "path": "docs/templates/soc-runbook-template.md",
+      "bytes": 1039,
+      "sha256_16": "c994365f29714a03"
+    },
+    {
+      "path": "docs/templates/test-plan-template.md",
+      "bytes": 753,
+      "sha256_16": "e3b5a22391ad0c38"
+    },
+    {
+      "path": "docs/ux/00-ux-principles.md",
+      "bytes": 2925,
+      "sha256_16": "2c77aa1adc1752c5"
+    },
+    {
+      "path": "docs/ux/01-pages-and-tabs.md",
+      "bytes": 5111,
+      "sha256_16": "4699a51c6c7ac6dd"
+    },
+    {
+      "path": "docs/ux/02-dashboard.md",
+      "bytes": 2704,
+      "sha256_16": "6a7fffae9fe4908d"
+    },
+    {
+      "path": "docs/ux/03-target-groups-page.md",
+      "bytes": 2452,
+      "sha256_16": "9f02dd08a0aff2bd"
+    },
+    {
+      "path": "docs/ux/04-agents-page.md",
+      "bytes": 3019,
+      "sha256_16": "500cc8fb7baa096a"
+    },
+    {
+      "path": "docs/ux/05-checks-library-page.md",
+      "bytes": 1810,
+      "sha256_16": "d1bcbfd22279dcd9"
+    },
+    {
+      "path": "docs/ux/06-test-runs-page.md",
+      "bytes": 2002,
+      "sha256_16": "5704224773719f44"
+    },
+    {
+      "path": "docs/ux/07-findings-page.md",
+      "bytes": 1939,
+      "sha256_16": "82d2f9f78804d108"
+    },
+    {
+      "path": "docs/ux/08-reports-page.md",
+      "bytes": 1577,
+      "sha256_16": "27160c00a7600f04"
+    },
+    {
+      "path": "docs/ux/09-soc-console.md",
+      "bytes": 2015,
+      "sha256_16": "24be7515b5c4cecc"
+    },
+    {
+      "path": "docs/ux/10-settings-page.md",
+      "bytes": 1739,
+      "sha256_16": "c79c7a616aa99231"
+    },
+    {
+      "path": "docs/ux/11-visualization-methods.md",
+      "bytes": 1986,
+      "sha256_16": "6a1f81619b13b0f9"
+    },
+    {
+      "path": "docs/ux/12-full-wireframes-and-interactions.md",
+      "bytes": 8978,
+      "sha256_16": "b70c895f2b004488"
+    },
+    {
+      "path": "docs/ux/12-wireframes-and-user-experience.md",
+      "bytes": 4998,
+      "sha256_16": "edec3e925c4e7c4b"
+    },
+    {
+      "path": "progress.md",
+      "bytes": 17366,
+      "sha256_16": "58371c3835c86640"
+    }
+  ]
+}
