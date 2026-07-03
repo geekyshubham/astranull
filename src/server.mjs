@@ -14,6 +14,7 @@ import * as signupIntake from './services/signupIntake.mjs';
 import * as internalManagement from './services/internalManagement.mjs';
 import * as publicSite from './services/publicSite.mjs';
 import * as bundledStagingAuth from './services/bundledStagingAuth.mjs';
+import { getTenantDeploymentFeatures } from './services/tenantDeploymentFeatures.mjs';
 import { readArtifactUploadBody } from './lib/authorizationArtifactLedger.mjs';
 import { HttpBodyError, json, parseUrl, readBodyText, readJsonBody, serveStatic, text } from './lib/http.mjs';
 import { isProbeWorkerRoute } from './context.mjs';
@@ -556,8 +557,8 @@ export function createServer(options = {}) {
         return;
       }
 
-      if (isInternalAdminPageRoute(url.pathname, req.method)) {
-        const served = await serveStatic(req, res, url);
+      if (isInternalAdminPageRoute(url.pathname, req.method, runtimeConfig)) {
+        const served = await serveStatic(req, res, url, runtimeConfig);
         if (served) return;
       }
 
@@ -580,7 +581,7 @@ export function createServer(options = {}) {
           });
           return;
         }
-        if (isInternalAdminApiRoute(url.pathname, req.method)) {
+        if (isInternalAdminApiRoute(url.pathname, req.method, runtimeConfig)) {
           const staffAuth = await resolveStaffAuth(req.headers, runtimeConfig);
           if (!staffAuth.ok) {
             json(res, staffAuth.status, staffAuth.body);
@@ -620,7 +621,7 @@ export function createServer(options = {}) {
       }
 
       if (req.method === 'GET') {
-        const served = await serveStatic(req, res, url);
+        const served = await serveStatic(req, res, url, runtimeConfig);
         if (served) return;
         text(res, 404, 'Not found');
         return;
@@ -664,6 +665,11 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
     const t = await serviceDeps.tenants.getCurrentTenant(ctx);
     if (!t) return json(res, 404, { error: 'not_found' });
     return json(res, 200, t);
+  }
+  if (method === 'GET' && path === '/v1/tenant/deployment-features') {
+    const gate = requirePermission(ctx, 'tenant:read');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    return json(res, 200, getTenantDeploymentFeatures(ctx, runtimeConfig));
   }
   if (method === 'PATCH' && path === '/v1/tenants/current') {
     const gate = requirePermission(ctx, 'tenant:write');

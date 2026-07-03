@@ -1,21 +1,30 @@
+import { loadRuntimeConfig } from '../config.mjs';
 import { STAFF_ROLES } from '../contracts/staffRoles.mjs';
 import { verifyOidcStaffBearerToken } from './oidc.mjs';
 import { verifySignedSessionToken } from '../context.mjs';
 
-export function isInternalAdminRoute(pathname) {
-  return pathname === '/internal/admin' || pathname.startsWith('/internal/admin/');
+function staffSurfacePaths(runtimeConfig = loadRuntimeConfig()) {
+  const internalAdmin = String(runtimeConfig.internalAdminPath ?? '/internal/admin').trim() || '/internal/admin';
+  const staffLogin = String(runtimeConfig.staffLoginPath ?? '/internal/admin/login').trim() || '/internal/admin/login';
+  return { internalAdmin, staffLogin };
 }
 
-export function isInternalAdminApiRoute(pathname, method) {
-  if (!isInternalAdminRoute(pathname)) return false;
-  if (isInternalAdminPageRoute(pathname, method)) return false;
+export function isInternalAdminRoute(pathname, runtimeConfig) {
+  const { internalAdmin } = staffSurfacePaths(runtimeConfig);
+  return pathname === internalAdmin || pathname.startsWith(`${internalAdmin}/`);
+}
+
+export function isInternalAdminApiRoute(pathname, method, runtimeConfig) {
+  if (!isInternalAdminRoute(pathname, runtimeConfig)) return false;
+  if (isInternalAdminPageRoute(pathname, method, runtimeConfig)) return false;
   return true;
 }
 
-export function isInternalAdminPageRoute(pathname, method) {
+export function isInternalAdminPageRoute(pathname, method, runtimeConfig) {
   if (method !== 'GET') return false;
-  if (pathname === '/internal/admin/login') return true;
-  return pathname === '/internal/admin' || pathname === '/internal/admin/';
+  const { internalAdmin, staffLogin } = staffSurfacePaths(runtimeConfig);
+  if (pathname === staffLogin) return true;
+  return pathname === internalAdmin || pathname === `${internalAdmin}/`;
 }
 
 export function isPublicApiRoute(pathname, method) {

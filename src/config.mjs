@@ -464,6 +464,12 @@ export function loadRuntimeConfig(env = process.env) {
     ?? (bundledStagingOidc ? '/login' : '/app')
   ).trim() || (bundledStagingOidc ? '/login' : '/app');
   const publicSignupEnabled = env.ASTRANULL_PUBLIC_SIGNUP_ENABLED !== '0';
+  const staffLoginPath = (
+    String(env.ASTRANULL_STAFF_LOGIN_PATH ?? '/internal/admin/login').trim() || '/internal/admin/login'
+  );
+  const internalAdminPath = (
+    String(env.ASTRANULL_INTERNAL_ADMIN_PATH ?? '/internal/admin').trim() || '/internal/admin'
+  );
 
   return {
     authMode,
@@ -475,6 +481,8 @@ export function loadRuntimeConfig(env = process.env) {
       loginUrl: publicLoginUrl,
       signupEnabled: publicSignupEnabled,
     },
+    staffLoginPath,
+    internalAdminPath,
     nodeEnv,
     maxJsonBodyBytes,
     shutdownGraceMs,

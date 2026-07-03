@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import { createServer } from '../../src/server.mjs';
-import { request } from '../helpers/http.mjs';
+import { demoHeaders, request } from '../helpers/http.mjs';
 import { freshStore } from '../helpers/reset.mjs';
 import { resetSignupRateLimitsForTests } from '../../src/services/signupIntake.mjs';
 
@@ -39,6 +39,16 @@ describe('customer surface privacy (no staff login exposure)', () => {
     assert.equal(config.json.internal_admin_path, undefined);
     const serialized = JSON.stringify(config.json);
     assert.doesNotMatch(serialized, /\/internal\/admin/);
+  });
+
+  it('returns tenant deployment features for authenticated customers', async () => {
+    const features = await request(baseUrl, 'GET', '/v1/tenant/deployment-features', {
+      headers: demoHeaders('admin'),
+    });
+    assert.equal(features.status, 200);
+    assert.equal(typeof features.json.waf_posture, 'boolean');
+    assert.equal(typeof features.json.external_discovery, 'boolean');
+    assert.equal(typeof features.json.connectors, 'boolean');
   });
 
   it('still serves staff login only via direct URL (unlinked)', async () => {

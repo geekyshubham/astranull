@@ -117,7 +117,9 @@ export async function ensurePortalSession(surface = 'customer') {
     return { config, session, redirectToLogin: false };
   }
 
-  const loginPath = surface === 'staff' ? config.staffLoginPath : config.loginUrl;
+  const loginPath = surface === 'staff'
+    ? (session?.staff_login_path ?? config.staffLoginPath)
+    : config.loginUrl;
   const hasToken = Boolean(session?.access_token);
   const principalOk = surface === 'staff'
     ? session?.principal === 'staff'

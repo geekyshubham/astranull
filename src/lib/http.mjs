@@ -61,19 +61,28 @@ export function parseUrl(req) {
   return new URL(req.url ?? '/', `http://${host}`);
 }
 
-const STATIC_ROUTE_ALIASES = {
+const BASE_STATIC_ROUTE_ALIASES = {
   '/': '/landing.html',
   '/app': '/index.html',
   '/login': '/login.html',
   '/signup': '/signup.html',
-  '/internal/admin': '/internal/admin/index.html',
-  '/internal/admin/login': '/staff-login.html',
 };
 
-export async function serveStatic(req, res, url) {
+export function buildStaticRouteAliases(runtimeConfig) {
+  const internalAdmin = String(runtimeConfig?.internalAdminPath ?? '/internal/admin').trim() || '/internal/admin';
+  const staffLogin = String(runtimeConfig?.staffLoginPath ?? '/internal/admin/login').trim() || '/internal/admin/login';
+  return {
+    ...BASE_STATIC_ROUTE_ALIASES,
+    [internalAdmin]: '/internal/admin/index.html',
+    [staffLogin]: '/staff-login.html',
+  };
+}
+
+export async function serveStatic(req, res, url, runtimeConfig) {
+  const aliases = buildStaticRouteAliases(runtimeConfig);
   let rel = decodeURIComponent(url.pathname);
-  if (STATIC_ROUTE_ALIASES[rel]) {
-    rel = STATIC_ROUTE_ALIASES[rel];
+  if (aliases[rel]) {
+    rel = aliases[rel];
   } else if (rel === '/app/') {
     rel = '/index.html';
   }

@@ -38,12 +38,15 @@ form?.addEventListener('submit', async (event) => {
   const staffId = document.getElementById('staffId')?.value?.trim() ?? 'staff_admin';
   const staffRole = document.getElementById('staffRole')?.value ?? 'internal_admin';
 
+  const staffLoginPath = window.location.pathname;
+
   if (config.authMode === 'dev-headers') {
     saveSession({
       mode: 'dev-headers',
       principal: 'staff',
       staff_id: staffId,
       staff_role: staffRole,
+      staff_login_path: staffLoginPath,
     });
     window.location.replace('/internal/admin');
     return;
@@ -64,7 +67,7 @@ form?.addEventListener('submit', async (event) => {
       showError(data.message ?? data.error ?? 'Staff login failed.');
       return;
     }
-    saveSession(sessionFromLoginResponse(data));
+    saveSession({ ...sessionFromLoginResponse(data), staff_login_path: staffLoginPath });
     window.location.replace('/internal/admin');
   } catch (err) {
     showError(err instanceof Error ? err.message : 'Staff login failed.');

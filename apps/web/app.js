@@ -142,6 +142,7 @@ let selectedWafAssetId = null;
 let lastWafAssetDetail = null;
 let wafFeatureEnabled = true;
 let discoveryFeatureEnabled = false;
+let connectorsFeatureEnabled = false;
 let selectedCveId = null;
 let lastCveDetail = null;
 let showCveIngestForm = false;
@@ -706,15 +707,31 @@ function isDiscoveryFeatureDisabledError(err) {
   return msg === 'discovery_feature_disabled' || msg.includes('discovery_feature_disabled');
 }
 
-function applyFeatureFlagsFromSiteConfig(config) {
-  const flags = config?.siteConfig?.feature_flags;
+function applyDeploymentFeatureFlags(flags) {
   if (!flags || typeof flags !== 'object') return false;
   if (typeof flags.waf_posture === 'boolean') wafFeatureEnabled = flags.waf_posture;
   if (typeof flags.external_discovery === 'boolean') discoveryFeatureEnabled = flags.external_discovery;
+  if (typeof flags.connectors === 'boolean') connectorsFeatureEnabled = flags.connectors;
   return true;
 }
 
+function applyFeatureFlagsFromSiteConfig(config) {
+  const flags = config?.siteConfig?.feature_flags;
+  if (!flags || typeof flags !== 'object') return false;
+  return applyDeploymentFeatureFlags({
+    waf_posture: flags.waf_posture,
+    external_discovery: flags.external_discovery,
+    connectors: flags.connectors_default,
+  });
+}
+
 async function refreshFeatureFlags() {
+  try {
+    const tenantFlags = await api('/v1/tenant/deployment-features');
+    if (applyDeploymentFeatureFlags(tenantFlags)) return;
+  } catch {
+    // fall through to public site-config / legacy probes
+  }
   if (applyFeatureFlagsFromSiteConfig(portalState?.config)) return;
   try {
     await api('/v1/waf/coverage');
@@ -1487,6 +1504,9 @@ async function fetchWafAssetRows(assets) {
 }
 
 async function fetchWafConnectorsPanelData() {
+  if (!connectorsFeatureEnabled) {
+    return { connectors: [], featureDisabled: true };
+  }
   try {
     const payload = await api('/v1/connectors');
     return { connectors: payload.items ?? [] };
