@@ -2,10 +2,20 @@ import {
   buildEvidenceChainExport,
   buildInstallCommands,
   computeOnboardingProgress,
+  extractPlacementDiagnosticsFromReadiness,
+  ONBOARDING_HEARTBEAT_POLL_MS,
+  ONBOARDING_PLACEMENT_TEST_CHECK_ID,
+  PAGE_EMPTY_STATES,
   renderEvidenceChainPanel,
+  renderFriendlyEmptyState,
   renderInstallCommandsPanel,
   renderOnboardingWizard,
   buildSupportReadinessPreview,
+  renderPlacementDiagnosticsPanel,
+  renderPlacementGuideLink,
+  renderAgentFleetTable,
+  renderTargetGroupDetailPanel,
+  renderProbeProfileKind,
   renderReleaseEvidencePanel,
   renderStagingReadinessAttestationPanel,
   renderReportBuilder,
@@ -14,6 +24,25 @@ import {
   renderDiscoveryPage,
   renderSupplyChainPage,
   renderRemediationPage,
+  renderNotificationOpsPanel,
+  renderWafDriftQueue,
+  renderWafReportsPanel,
+  renderWafCriticalityCard,
+  renderWafVendorMixCard,
+  renderWafGeographyCard,
+  renderWafRoadmapPanel,
+  renderWafPostureTabs,
+  renderWafAssetsTable,
+  renderWafAssetEffectivenessSection,
+  buildRetestMapByDriftEventId,
+  renderWafValidationPlansPanel,
+  renderWafConnectorsPanel,
+  renderWafScenarioCadencePanel,
+  summarizeWafConnectorPollResult,
+  summarizeWafConnectorPollError,
+  roleHasUiPermission,
+  summarizeOnboardingPlacementConfidenceHint,
+  resolveOnboardingHeartbeatState,
   DISCOVERY_MODES,
 } from './ui-helpers.js';
 import {
@@ -49,9 +78,39 @@ const NAV = [
   ['settings', 'Settings'],
 ];
 
+function uiPermissions() {
+  const role = el('role')?.value ?? '';
+  return {
+    findingWrite: roleHasUiPermission(role, 'finding:write'),
+    bootstrapTokenCreate: roleHasUiPermission(role, 'bootstrap_token:create'),
+    environmentWrite: roleHasUiPermission(role, 'environment:write'),
+    targetGroupWrite: roleHasUiPermission(role, 'target_group:write'),
+    testRunStart: roleHasUiPermission(role, 'test_run:start'),
+    auditRead: roleHasUiPermission(role, 'audit:read'),
+    releaseEvidenceRead: roleHasUiPermission(role, 'release_evidence:read'),
+    wafRun: roleHasUiPermission(role, 'waf:run'),
+    wafWrite: roleHasUiPermission(role, 'waf:write'),
+    wafConnectorRead: roleHasUiPermission(role, 'waf:connector_read'),
+    wafConnectorWrite: roleHasUiPermission(role, 'waf:connector_write'),
+    cvePipelineWrite: roleHasUiPermission(role, 'cve_pipeline:write'),
+    discoveryWrite: roleHasUiPermission(role, 'discovery:write'),
+    discoveryApprove: roleHasUiPermission(role, 'discovery:approve'),
+    highScaleRequest: roleHasUiPermission(role, 'high_scale:request'),
+    highScaleWrite: roleHasUiPermission(role, 'high_scale:write'),
+    socHighScale: roleHasUiPermission(role, 'soc:high_scale'),
+    socKillSwitch: roleHasUiPermission(role, 'soc:kill_switch'),
+  };
+}
+
 let route = 'dashboard';
 let selectedFindingId = null;
+let selectedTargetGroupId = null;
+let activeTargetGroupTab = 'targets';
 let lastTokenSecret = null;
+let onboardingHeartbeatSkipped = false;
+let onboardingHeartbeatTimedOut = false;
+let onboardingHeartbeatPollStartedAt = null;
+let onboardingHeartbeatPollTimer = null;
 let lastReportId = null;
 let lastReportSummary = null;
 let lastReportKind = 'executive';
@@ -64,11 +123,22 @@ let lastReportCustodyPreview = null;
 let lastSocOut = { payload: 'No SOC action yet.', isError: false };
 let lastHighScaleOut = { payload: 'No request submitted yet.', isError: false };
 let lastWafOut = { payload: 'No WAF posture action yet.', isError: false };
+let lastNotificationRetryResult = null;
+let lastNotificationRedriveResult = null;
+/** @type {Record<string, { id: string, status?: string }>} */
+let wafRetestByDriftEventId = {};
+let wafReportKind = 'executive_coverage';
+let wafReportFormat = 'json';
+let wafReportCustodyPreviewHtml = '';
+let activeWafPostureTab = 'overview';
+let selectedWafAssetId = null;
+let lastWafAssetDetail = null;
 let wafFeatureEnabled = true;
 let discoveryFeatureEnabled = false;
 let selectedCveId = null;
 let lastCveDetail = null;
 let showCveIngestForm = false;
+let showWafScenarioIntakeForm = false;
 let activeDiscoveryTab = 'inbox';
 let discoveryMode = 'D0_declared_only';
 let selectedSupplyChainRiskId = null;
@@ -605,7 +675,14 @@ async function refreshFeatureFlags() {
 }
 
 function navEntries() {
-  return NAV.filter(([id]) => (id === 'discovery' ? discoveryFeatureEnabled : true));
+  const perms = uiPermissions();
+  return NAV.filter(([id]) => {
+    if (id === 'discovery') return discoveryFeatureEnabled;
+    if (id === 'soc') return perms.socHighScale;
+    if (id === 'audit') return perms.auditRead;
+    if (id === 'release-evidence') return perms.releaseEvidenceRead;
+    return true;
+  });
 }
 
 function renderNav() {
@@ -624,6 +701,10 @@ function renderNav() {
 
 async function render() {
   await refreshFeatureFlags();
+  if (!navEntries().some(([id]) => id === route)) {
+    route = 'dashboard';
+    location.hash = route;
+  }
   renderNav();
   const title = navEntries().find(([id]) => id === route)?.[1]
     ?? NAV.find(([id]) => id === route)?.[1]
@@ -653,11 +734,20 @@ async function render() {
     else if (route === 'release-evidence') view.innerHTML = await viewReleaseEvidence();
     else if (route === 'settings') view.innerHTML = await viewSettings();
     bindHandlers();
+    if (route === 'onboarding') setupOnboardingHeartbeatPoll();
     if (route === 'soc') applySocOut();
     if (route === 'high-scale') applyHighScaleOut();
-    if (route === 'waf-posture') applyWafOut();
+    if (route === 'waf-posture') {
+      applyWafOut();
+      applyWafPlanScheduleVisibility();
+    }
   } catch (err) {
-    view.innerHTML = `<div class="card">Error: ${err.message}</div>`;
+    const message = err?.message ?? 'Unable to load this page.';
+    if (/forbidden/i.test(message)) {
+      view.innerHTML = '<div class="empty">Your current role cannot access this page. Switch role or open a permitted section.</div>';
+    } else {
+      view.innerHTML = `<div class="card">Unable to load this page: ${vizEsc(message)}</div>`;
+    }
   }
 }
 
@@ -674,9 +764,13 @@ async function loadEnvBadge() {
 async function viewEnvironments() {
   const data = await api('/v1/environments');
   if (!data.items.length) {
-    return '<div class="empty">No environments. <button class="btn" data-action="create-env">Create environment</button></div>';
+    return renderFriendlyEmptyState(PAGE_EMPTY_STATES.environments);
   }
-  return `<div class="card"><button class="btn" data-action="create-env">Add environment</button></div>
+  const perms = uiPermissions();
+  const createBtn = perms.environmentWrite
+    ? '<button class="btn" data-action="create-env">Add environment</button>'
+    : '';
+  return `<div class="card">${createBtn}</div>
     <div class="card"><table><thead><tr><th>Name</th><th>Status</th><th>ID</th></tr></thead><tbody>
     ${data.items.map((e) => `<tr><td>${e.name}</td><td>${e.status || 'active'}</td><td>${e.id}</td></tr>`).join('')}
     </tbody></table></div>`;
@@ -688,6 +782,15 @@ async function viewEvidence() {
     api('/v1/test-runs'),
     api('/v1/findings'),
   ]);
+  if (!data.items.length) {
+    return `${renderFriendlyEmptyState(PAGE_EMPTY_STATES.evidence)}
+    ${renderExportInspectionPanel({
+    panelId: 'evidenceCustodyPreview',
+    heading: 'Evidence export inspection',
+    emptyMessage: 'Export the evidence-chain JSON to inspect digest metadata for this bundle.',
+    preview: lastEvidenceCustodyPreview,
+  })}`;
+  }
   const verdicts = [];
   for (const r of runs.items.slice(-20)) {
     try {
@@ -716,10 +819,23 @@ async function viewEvidence() {
 
 async function viewNotifications() {
   const data = await api('/v1/notifications');
-  return `<div class="card"><button class="btn" data-action="create-notify-rule">Add rule (metadata only)</button>
+  const role = el('role')?.value ?? '';
+  const canWriteNotifications = role === 'admin' || role === 'owner';
+  const rulesEmpty = data.rules.length
+    ? data.rules.map((r) => `<div>${vizEsc(r.channel)} · ${r.enabled === false ? 'disabled' : 'enabled'} · ${(r.triggers ?? []).length} trigger(s)</div>`).join('')
+    : renderFriendlyEmptyState(PAGE_EMPTY_STATES.notifications);
+  const eventsEmpty = data.events.length
+    ? `<ul>${data.events.slice().reverse().map((e) => `<li>${vizEsc(e.created_at)} · ${vizEsc(e.trigger)} · ${vizEsc(e.subject)}</li>`).join('')}</ul>`
+    : '<p class="muted">No notification events yet — events appear after triggers fire.</p>';
+  return `<div class="card">${canWriteNotifications ? '<button class="btn" data-action="create-notify-rule">Add rule (metadata only)</button>' : ''}
     <p class="muted">Developer validation records intended deliveries only — no Slack/email/Teams send.</p>
-    <h4>Rules</h4>${data.rules.length ? data.rules.map((r) => `<div>${r.channel} → ${r.destination}</div>`).join('') : '<div class="empty">No rules yet.</div>'}
-    <h4>Recent events</h4>${data.events.length ? `<ul>${data.events.slice().reverse().map((e) => `<li>${e.created_at} · ${e.trigger} · ${e.subject}</li>`).join('')}</ul>` : '<div class="empty">No notification events yet.</div>'}
+    <h4>Rules</h4>${rulesEmpty}
+    <h4>Recent events</h4>${eventsEmpty}
+    ${renderNotificationOpsPanel(data, {
+      lastRetryResult: lastNotificationRetryResult,
+      lastRedriveResult: lastNotificationRedriveResult,
+      canWrite: canWriteNotifications,
+    })}
   </div>`;
 }
 
@@ -732,6 +848,9 @@ async function viewDashboard() {
     api('/v1/high-scale-requests'),
   ]);
   await loadEnvBadge();
+  if (!tgs.items.length) {
+    return `${renderFriendlyEmptyState(PAGE_EMPTY_STATES.dashboard)}`;
+  }
   const verdictByRunId = {};
   for (const r of runs.items.slice(-8)) {
     try {
@@ -744,6 +863,18 @@ async function viewDashboard() {
   const factorList = s.readiness.factors?.length
     ? s.readiness.factors
     : [{ label: 'Posture', score: s.readiness.score, detail: 'Awaiting factor breakdown.' }];
+  const placementDiagnostics = extractPlacementDiagnosticsFromReadiness(s.readiness);
+  const recentRuns = runs.items.slice(-5).reverse();
+  const recentRunsHtml = recentRuns.length
+    ? `<ul class="dashboard-recent-runs">${recentRuns.map((r) => {
+      const verdict = verdictByRunId[r.id] || 'pending';
+      return `<li><code>${vizEsc(r.id)}</code> · ${vizEsc(r.status)} · ${vizEsc(verdict)} · <button type="button" class="btn secondary" data-action="goto-runs">View</button></li>`;
+    }).join('')}</ul>`
+    : `<p class="muted">No test runs yet.${uiPermissions().testRunStart ? ' <button type="button" class="btn secondary" data-action="start-run">Start safe validation</button>' : ''}</p>`;
+  const pendingSoc = (hs.items || []).filter((r) => ['submitted', 'under_review', 'approved', 'scheduled'].includes(r.state));
+  const socRequestsHtml = pendingSoc.length
+    ? `<ul>${pendingSoc.slice(0, 5).map((r) => `<li><code>${vizEsc(r.id)}</code> · ${vizEsc(r.state)} · ${vizEsc(r.target_group_id || '—')}</li>`).join('')}</ul>`
+    : '<p class="muted">No pending high-scale requests.</p>';
   return `
     <div class="card platform-promise">
       <p class="muted"><strong>No-access-first:</strong> ${PLATFORM_PROMISE}</p>
@@ -769,20 +900,78 @@ async function viewDashboard() {
     <div class="card">
       <h3>Readiness factors</h3>
       <ul>${factorList.map((f) => `<li><strong>${f.label}</strong> (${f.score}) — ${f.detail}</li>`).join('')}</ul>
-    </div>`;
+    </div>
+    <div class="grid">
+      <div class="card">
+        <h3>Recent test runs</h3>
+        ${recentRunsHtml}
+      </div>
+      <div class="card">
+        <h3>High-scale / SOC requests</h3>
+        <p class="muted">Customers submit requests only — SOC executes after approval.</p>
+        ${socRequestsHtml}
+      </div>
+    </div>
+    ${renderPlacementDiagnosticsPanel(placementDiagnostics, { compact: true })}
+    ${renderPlacementGuideLink(placementDiagnostics)}`;
 }
 
 function apiBaseUrl() {
   return `${location.protocol}//${location.host}`;
 }
 
+function stopOnboardingHeartbeatPoll() {
+  if (onboardingHeartbeatPollTimer) {
+    clearInterval(onboardingHeartbeatPollTimer);
+    onboardingHeartbeatPollTimer = null;
+  }
+}
+
+async function pollOnboardingHeartbeat() {
+  const startedAt = onboardingHeartbeatPollStartedAt ?? Date.now();
+  onboardingHeartbeatPollStartedAt = startedAt;
+  try {
+    const agents = await api('/v1/agents');
+    const heartbeatState = resolveOnboardingHeartbeatState(agents.items, {
+      pollStartedAt: startedAt,
+    });
+    if (heartbeatState.status === 'online') {
+      stopOnboardingHeartbeatPoll();
+    } else if (heartbeatState.status === 'timeout') {
+      onboardingHeartbeatTimedOut = true;
+      stopOnboardingHeartbeatPoll();
+    }
+    if (route === 'onboarding') await render();
+  } catch {
+    /* keep polling until timeout */
+  }
+}
+
+function startOnboardingHeartbeatPoll() {
+  if (onboardingHeartbeatPollTimer) return;
+  onboardingHeartbeatPollStartedAt = Date.now();
+  pollOnboardingHeartbeat();
+  onboardingHeartbeatPollTimer = setInterval(pollOnboardingHeartbeat, ONBOARDING_HEARTBEAT_POLL_MS);
+}
+
+function setupOnboardingHeartbeatPoll() {
+  const wizard = document.getElementById('onboardingWizard');
+  const activeStep = wizard?.querySelector('.onboarding-step--active')?.dataset?.step;
+  if (activeStep === 'verify_heartbeat' && !onboardingHeartbeatSkipped && !onboardingHeartbeatTimedOut) {
+    startOnboardingHeartbeatPoll();
+  } else {
+    stopOnboardingHeartbeatPoll();
+  }
+}
+
 async function viewOnboarding() {
-  const [envs, tgs, agents, runs, tokens] = await Promise.all([
+  const [envs, tgs, agents, runs, tokens, state] = await Promise.all([
     api('/v1/environments'),
     api('/v1/target-groups'),
     api('/v1/agents'),
     api('/v1/test-runs'),
     api('/v1/bootstrap-tokens'),
+    api('/v1/state').catch(() => null),
   ]);
   const targets = [];
   for (const g of tgs.items) {
@@ -793,6 +982,14 @@ async function viewOnboarding() {
       /* partial onboarding state */
     }
   }
+  const placementDiagnostics = extractPlacementDiagnosticsFromReadiness(state?.readiness);
+  const heartbeatState = resolveOnboardingHeartbeatState(agents.items, {
+    pollStartedAt: onboardingHeartbeatPollStartedAt ?? Date.now(),
+  });
+  const placementHint = summarizeOnboardingPlacementConfidenceHint(
+    heartbeatState.agents[0] ?? agents.items[0],
+    placementDiagnostics,
+  );
   const progress = computeOnboardingProgress({
     environments: envs.items,
     targetGroups: tgs.items,
@@ -800,6 +997,7 @@ async function viewOnboarding() {
     agents: agents.items,
     runs: runs.items,
     hasToken: tokens.items.length > 0 || Boolean(lastTokenSecret),
+    heartbeatSkipped: onboardingHeartbeatSkipped,
   });
   const tgName = tgs.items[0]?.name;
   const installCommands = buildInstallCommands({
@@ -807,29 +1005,57 @@ async function viewOnboarding() {
     token: lastTokenSecret || '<BOOTSTRAP_TOKEN>',
     targetGroupName: tgName,
   });
+  const placementTestDone = runs.items.some((r) =>
+    r.check_id === ONBOARDING_PLACEMENT_TEST_CHECK_ID
+    && ['completed', 'verdicted', 'running'].includes(r.status));
   return renderOnboardingWizard(progress, installCommands, {
     tokenSecret: lastTokenSecret,
     targetValue: targets[0]?.value,
+    heartbeatState,
+    placementHint,
+    heartbeatAllowSkip: true,
+    placementTestDone,
   });
 }
 
 async function viewTargetGroups() {
-  const data = await api('/v1/target-groups');
+  const [data, agents, runs] = await Promise.all([
+    api('/v1/target-groups'),
+    api('/v1/agents'),
+    api('/v1/test-runs'),
+  ]);
   if (!data.items.length) {
-    return `<div class="empty">No target groups. <button class="btn" data-action="create-tg">Create target group</button></div>`;
+    return renderFriendlyEmptyState(PAGE_EMPTY_STATES.target_groups);
   }
-  const rows = data.items.map((g) => `<tr><td>${g.name}</td><td>${g.id}</td><td><button class="btn secondary" data-action="tg-detail" data-id="${g.id}">Open</button></td></tr>`).join('');
-  return `<div class="card"><button class="btn" data-action="create-tg">Create target group</button></div>
+  const focusId = selectedTargetGroupId && data.items.some((g) => g.id === selectedTargetGroupId)
+    ? selectedTargetGroupId
+    : data.items[0].id;
+  const detail = await api(`/v1/target-groups/${focusId}`);
+  const groupRuns = runs.items.filter((r) => r.target_group_id === focusId);
+  const rows = data.items.map((g) => {
+    const active = g.id === focusId ? ' tg-row--active' : '';
+    return `<tr class="tg-row${active}"><td>${vizEsc(g.name)}</td><td><code>${vizEsc(g.id)}</code></td><td><button class="btn secondary" data-action="tg-detail" data-id="${vizEsc(g.id)}">Open</button></td></tr>`;
+  }).join('');
+  const perms = uiPermissions();
+  const createBtn = perms.targetGroupWrite
+    ? '<button class="btn" data-action="create-tg">Create target group</button>'
+    : '';
+  return `<div class="card">${createBtn}</div>
     <div class="card"><table><thead><tr><th>Name</th><th>ID</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
-    <div id="tgDetail"></div>`;
+    ${renderTargetGroupDetailPanel(detail, groupRuns, agents.items, activeTargetGroupTab, {
+    canWrite: perms.targetGroupWrite,
+    canRun: perms.testRunStart,
+  })}`;
 }
 
 async function viewAgents() {
-  const [agents, tgs, tokens] = await Promise.all([
+  const [agents, tgs, tokens, state] = await Promise.all([
     api('/v1/agents'),
     api('/v1/target-groups'),
     api('/v1/bootstrap-tokens'),
+    api('/v1/state'),
   ]);
+  const placementDiagnostics = extractPlacementDiagnosticsFromReadiness(state.readiness);
   const installCommands = buildInstallCommands({
     apiBase: apiBaseUrl(),
     token: lastTokenSecret || '<BOOTSTRAP_TOKEN>',
@@ -843,35 +1069,45 @@ async function viewAgents() {
       <p class="muted">Outbound-only polling — no inbound management port. Canary observation is customer-approved metadata only.</p>
       ${tokens.items.length ? '' : '<p class="muted">No bootstrap tokens yet — <button type="button" class="btn secondary" data-action="goto-settings">create token</button>.</p>'}
     </div>
-    <div class="card">${agents.items.length ? `<table><thead><tr><th>Name</th><th>Status</th><th>Last heartbeat</th></tr></thead><tbody>
-      ${agents.items.map((a) => `<tr><td>${a.name}</td><td>${a.status}</td><td>${a.last_heartbeat_at || '-'}</td></tr>`).join('')}
-    </tbody></table>` : '<div class="empty">No agents registered. Generate a token in Settings and run the install command.</div>'}
+    ${renderPlacementDiagnosticsPanel(placementDiagnostics)}
+    ${renderPlacementGuideLink(placementDiagnostics)}
+    <div class="card">
+      <h3>Agent fleet</h3>
+      ${renderAgentFleetTable(agents.items, tgs.items)}
     </div>`;
 }
 
 async function viewChecks() {
-  const data = await api('/v1/checks');
+  const [data, tgs] = await Promise.all([api('/v1/checks'), api('/v1/target-groups')]);
+  if (!tgs.items.length) {
+    return renderFriendlyEmptyState(PAGE_EMPTY_STATES.checks);
+  }
   const families = [...new Set(data.items.map((c) => c.vector_family))];
   const matrix = families.map((f) => {
     const items = data.items.filter((c) => c.vector_family === f);
     return `<tr><td>${f}</td><td>${items.length}</td><td>${items.map((c) => c.safety_class || c.risk_class).join(', ')}</td></tr>`;
   }).join('');
   return `<div class="card"><h3>Vector coverage matrix</h3><table><thead><tr><th>Family</th><th>Checks</th><th>Safety</th></tr></thead><tbody>${matrix}</tbody></table></div>
-    <div class="card"><table><thead><tr><th>Check</th><th>Family</th><th>Safety</th><th>Description</th></tr></thead><tbody>
-    ${data.items.map((c) => `<tr><td>${c.name}</td><td>${c.vector_family}</td><td><span class="pill ${c.risk_class === 'safe' ? 'safe' : ''}">${c.safety_class || c.risk_class}</span></td><td>${c.description}</td></tr>`).join('')}
-  </tbody></table></div>`;
+    <div class="card"><table><thead><tr><th>Check</th><th>Family</th><th>Probe profile</th><th>Safety</th><th>Description</th></tr></thead><tbody>
+    ${data.items.map((c) => `<tr><td>${c.name}</td><td>${c.vector_family}</td><td><code>${renderProbeProfileKind(c)}</code></td><td><span class="pill ${c.risk_class === 'safe' ? 'safe' : ''}">${c.safety_class || c.risk_class}</span></td><td>${c.description}</td></tr>`).join('')}
+  </tbody></table></div>
+    <p class="muted">Bounded probe profiles are signed on worker jobs — customers cannot raise max_requests or timeout_ms above catalog caps.</p>`;
 }
 
 async function viewRuns() {
   const runs = await api('/v1/test-runs');
   if (!runs.items.length) {
-    return `<div class="empty">No runs yet. <button class="btn" data-action="start-run">Start safe validation</button></div>`;
+    return renderFriendlyEmptyState(PAGE_EMPTY_STATES.runs);
   }
   const latest = runs.items[runs.items.length - 1];
   const detail = await api(`/v1/test-runs/${latest.id}`);
   const events = await api(`/v1/test-runs/${latest.id}/events`);
+  const perms = uiPermissions();
+  const startBtn = perms.testRunStart
+    ? '<button class="btn" data-action="start-run">Start safe validation</button>'
+    : '';
   return `
-    <div class="card"><button class="btn" data-action="start-run">Start safe validation</button></div>
+    <div class="card">${startBtn}</div>
     <div class="card"><h3>Latest run ${latest.id}</h3>
       <p>Status: ${detail.status} · Check: ${detail.check_id}</p>
       <p class="muted">Vector: ${detail.vector_family || '-'} · Safety: ${detail.safety_class || '-'}</p>
@@ -889,7 +1125,7 @@ async function viewRuns() {
 
 async function viewFindings() {
   const data = await api('/v1/findings');
-  if (!data.items.length) return '<div class="empty">No findings yet. Run a safe validation that correlates to bypassable or penetrated.</div>';
+  if (!data.items.length) return renderFriendlyEmptyState(PAGE_EMPTY_STATES.findings);
   const focusId = selectedFindingId && data.items.some((f) => f.id === selectedFindingId)
     ? selectedFindingId
     : data.items[0].id;
@@ -918,7 +1154,15 @@ async function viewFindings() {
   </tbody></table></div>
   <div class="card finding-detail">
     <h3>${vizEsc(finding.title)}</h3>
-    <p>Severity: <span class="pill high">${vizEsc(finding.severity)}</span> · Status: ${vizEsc(finding.status)}</p>
+    <p>Severity: <span class="pill high">${vizEsc(finding.severity)}</span> · Status: ${vizEsc(finding.status)}${finding.assignee ? ` · Assignee: <code>${vizEsc(finding.assignee)}</code>` : ''}</p>
+    ${uiPermissions().findingWrite
+    ? `<div class="finding-triage-actions friendly-empty-actions">
+      <button type="button" class="btn secondary" data-action="finding-assign" data-id="${vizEsc(finding.id)}">Assign to me</button>
+      <button type="button" class="btn secondary" data-action="finding-status" data-id="${vizEsc(finding.id)}" data-status="accepted_risk">Accept risk</button>
+      <button type="button" class="btn secondary" data-action="finding-status" data-id="${vizEsc(finding.id)}" data-status="closed">Close</button>
+      <button type="button" class="btn secondary" data-action="start-run">Retest</button>
+    </div>`
+    : '<p class="muted">Finding triage actions require engineer, admin, or owner role.</p>'}
     ${runMeta}
     ${explanationHtml}
   </div>
@@ -948,7 +1192,7 @@ const HS_AUTH_ARTIFACT_TYPES = [
   ['emergency_contacts', 'Emergency contacts'],
   ['stop_criteria', 'Stop criteria'],
   ['test_plan', 'Test plan'],
-  ['scope_rate_plan', 'Scope / rate plan'],
+  ['scope_and_rate_plan', 'Scope / rate plan'],
   ['abort_criteria', 'Abort criteria'],
   ['provider_approval', 'Provider approval'],
 ];
@@ -967,7 +1211,7 @@ function renderAuthorizationPackStatus(pack) {
   </div>`;
 }
 
-function buildHsArtifactUploadBody(type, requestId, providerName) {
+async function buildHsArtifactUploadBody(type, requestId, providerName) {
   const win = hsDefaultWindowLocal();
   const body = {
     type,
@@ -986,6 +1230,7 @@ function buildHsArtifactUploadBody(type, requestId, providerName) {
     emergency_contacts: 'declared-on-request',
   };
   if (providerName && type === 'provider_approval') body.provider_name = providerName;
+  body.content_sha256 = await sha256Hex(`authorization-artifact:${requestId}:${type}:${body.reference_uri}`);
   return body;
 }
 
@@ -1008,19 +1253,134 @@ function applyWafOut() {
   out.classList.toggle('waf-out-error', lastWafOut.isError);
 }
 
+function applyWafPlanScheduleVisibility() {
+  const mode = document.getElementById('wafPlanMode')?.value;
+  const row = document.getElementById('wafPlanScheduleRow');
+  if (row) row.hidden = mode !== 'scheduled';
+}
+
 function setWafOut(payload, isError = false) {
   lastWafOut = { payload, isError };
   applyWafOut();
 }
 
+const WAF_ACTION_META_MAX_LEN = 80;
+
+const WAF_ORCHESTRATOR_ERROR_GUIDANCE = {
+  postgres_waf_orchestrator_unavailable: 'WAF orchestrator service is not injected in this environment.',
+  waf_orchestrator_signed_worker_required: 'Plan and retest execution require signed-worker mode.',
+  waf_orchestrator_execution_in_progress: 'Another orchestrator tick holds the execution lease; retry after it finishes or expires.',
+  waf_retest_already_delegated: 'Retest is already delegated; complete it after verdict evidence finalizes.',
+  waf_retest_closure_not_ready: 'Completion needs finalized delegated test-run verdict evidence.',
+  validation_plan_cancelled: 'This validation plan was cancelled; create a new plan if you still need coverage.',
+  validation_plan_already_completed: 'This validation plan already completed; execution is not available.',
+  validation_plan_not_cancellable: 'This plan cannot be cancelled in its current state.',
+  waf_orchestration_batch_too_large: 'Reduce scenarios, concurrency, or batch size and try again.',
+  validation_plan_execution_failed: 'Plan execution failed; review WAF output and orchestrator status before retrying.',
+};
+
+function boundWafActionMetaString(value, maxLen = WAF_ACTION_META_MAX_LEN) {
+  if (value == null) return undefined;
+  const text = String(value).trim();
+  if (!text) return undefined;
+  return text.length > maxLen ? `${text.slice(0, maxLen)}…` : text;
+}
+
+function summarizeWafActionEntityRef(entity, stateKey = 'status') {
+  if (!entity || typeof entity !== 'object' || Array.isArray(entity)) return undefined;
+  const id = boundWafActionMetaString(entity.id, 64);
+  const status = boundWafActionMetaString(entity[stateKey] ?? entity.status, 32);
+  if (!id && !status) return undefined;
+  const out = {};
+  if (id) out.id = id;
+  if (status) out.status = status;
+  return out;
+}
+
+export function summarizeWafActionResult(result) {
+  const payload = result && typeof result === 'object' && !Array.isArray(result) ? result : {};
+  const summary = { ok: payload.ok !== false };
+  const retest = summarizeWafActionEntityRef(payload.retest_request);
+  if (retest) summary.retest_request = retest;
+  const drift = summarizeWafActionEntityRef(payload.drift_event);
+  if (drift) summary.drift_event = drift;
+  if (typeof payload.continuation_required === 'boolean') {
+    summary.continuation_required = payload.continuation_required;
+  }
+  if (Array.isArray(payload.delegated_jobs)) {
+    summary.delegated_jobs_count = payload.delegated_jobs.length;
+  } else if (Number.isFinite(payload.delegated_jobs_count)) {
+    summary.delegated_jobs_count = payload.delegated_jobs_count;
+  }
+  const plan = payload.validation_plan;
+  if (plan && typeof plan === 'object' && !Array.isArray(plan)) {
+    const validationPlan = {};
+    const planId = boundWafActionMetaString(plan.id, 64);
+    const planState = boundWafActionMetaString(plan.state ?? plan.status, 32);
+    if (planId) validationPlan.id = planId;
+    if (planState) validationPlan.state = planState;
+    if (Object.keys(validationPlan).length) summary.validation_plan = validationPlan;
+  }
+  return summary;
+}
+
+export function summarizeWafActionError(err) {
+  const codeOrMessage = boundWafActionMetaString(err?.message, 120) || 'WAF action failed.';
+  const guidance = WAF_ORCHESTRATOR_ERROR_GUIDANCE[codeOrMessage]
+    || WAF_ORCHESTRATOR_ERROR_GUIDANCE[String(err?.message ?? '').trim()];
+  const summary = { ok: false, error: codeOrMessage };
+  if (guidance) summary.guidance = guidance;
+  return summary;
+}
+
+function rememberWafRetestFromResult(result) {
+  const retest = result?.retest_request;
+  if (retest?.id && retest?.drift_event_id) {
+    wafRetestByDriftEventId = {
+      ...wafRetestByDriftEventId,
+      [retest.drift_event_id]: { id: retest.id, status: retest.status },
+    };
+  }
+}
+
 async function runWafAction(fn) {
   try {
     const result = await fn();
-    setWafOut(result ?? { ok: true });
+    rememberWafRetestFromResult(result);
+    setWafOut(summarizeWafActionResult(result ?? { ok: true }));
     await render();
     return result;
   } catch (err) {
-    setWafOut(err.message || 'WAF action failed.', true);
+    setWafOut(summarizeWafActionError(err), true);
+    await render();
+    return null;
+  }
+}
+
+async function postConnectorPoll(connectorId) {
+  const res = await fetch(`/v1/connectors/${encodeURIComponent(connectorId)}/poll`, {
+    method: 'POST',
+    headers: { ...headers(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(data.error || data.message || res.statusText);
+    if (data.health && typeof data.health === 'object') err.pollHealth = data.health;
+    if (typeof data.message === 'string') err.pollMessage = data.message;
+    throw err;
+  }
+  return data;
+}
+
+async function runWafConnectorPoll(fn) {
+  try {
+    const result = await fn();
+    setWafOut(summarizeWafConnectorPollResult(result ?? { ok: true }));
+    await render();
+    return result;
+  } catch (err) {
+    setWafOut(summarizeWafConnectorPollError(err), true);
     await render();
     return null;
   }
@@ -1035,17 +1395,85 @@ async function fetchWafAssetRows(assets) {
           ...asset,
           posture_status: payload.current_posture?.status ?? asset.status ?? 'unknown',
           reason_codes: payload.current_posture?.reason_codes ?? [],
+          detected_vendor: payload.current_posture?.detected_vendor ?? asset.expected_vendor_hint ?? null,
+          detected_product: payload.current_posture?.detected_product ?? null,
+          risk_score: payload.current_posture?.risk_score ?? null,
+          priority_band: payload.current_posture?.priority_band ?? null,
+          effectiveness: payload.effectiveness ?? null,
         };
       } catch {
         return {
           ...asset,
           posture_status: asset.status ?? 'unknown',
           reason_codes: [],
+          effectiveness: null,
         };
       }
     }),
   );
   return details;
+}
+
+async function fetchWafConnectorsPanelData() {
+  try {
+    const payload = await api('/v1/connectors');
+    return { connectors: payload.items ?? [] };
+  } catch (err) {
+    if (isWafFeatureDisabledError(err)) throw err;
+    const code = String(err?.message ?? 'unknown_error');
+    if (code === 'forbidden' || code === 'access_denied' || /forbidden|permission|unauthorized/i.test(code)) {
+      return {
+        connectors: [],
+        permissionDenied: { code, message: code },
+      };
+    }
+    return {
+      connectors: [],
+      unavailable: { code, message: code },
+    };
+  }
+}
+
+async function fetchWafValidationPlansPanelData(targetGroupsPayload) {
+  const targetGroups = targetGroupsPayload.items || [];
+  const tgNameById = Object.fromEntries(
+    targetGroups.map((g) => [g.id, g.name ?? g.id]),
+  );
+  try {
+    const [allPlans, scheduled] = await Promise.all([
+      api('/v1/waf/validation-plans'),
+      api('/v1/waf/validation-plans/scheduled'),
+    ]);
+    return {
+      plans: allPlans.items ?? [],
+      scheduledPlans: scheduled.items ?? [],
+      targetGroups,
+      tgNameById,
+    };
+  } catch (err) {
+    if (isWafFeatureDisabledError(err)) throw err;
+    const code = String(err?.message ?? 'unknown_error');
+    return {
+      plans: [],
+      scheduledPlans: [],
+      targetGroups,
+      tgNameById,
+      unavailable: { code, message: code },
+    };
+  }
+}
+
+async function fetchWafConsolePayload(path, fallback = {}) {
+  try {
+    return await api(path);
+  } catch (err) {
+    if (isWafFeatureDisabledError(err)) throw err;
+    const code = String(err?.message ?? 'unknown_error');
+    return {
+      ...fallback,
+      unavailable: { code, message: code },
+    };
+  }
 }
 
 function renderWafDisabledConsole() {
@@ -1057,17 +1485,82 @@ function renderWafDisabledConsole() {
     </div>`;
 }
 
+function summarizeWafReportExport(payload, kind, format) {
+  return [
+    ['Report kind', vizEsc(kind || '—')],
+    ['Format', vizEsc(format || 'json')],
+    ['Generated at', vizEsc(formatUtc(payload?.generated_at))],
+    ['Tenant', vizEsc(payload?.tenant_id || '—')],
+    ['Assets', String((payload?.asset_summary ?? []).length)],
+    ['Validation runs', String((payload?.validation_runs ?? []).length)],
+    ['Drift events', String((payload?.drift_events ?? []).length)],
+    ['Connectors', String((payload?.connectors ?? []).length)],
+  ];
+}
+
+function renderWafReportCustodyPreviewBlock(preview, summaryRows = []) {
+  if (!preview) return '';
+  return renderExportInspectionPanel({
+    panelId: 'wafReportCustodyInspection',
+    heading: 'WAF report custody preview',
+    emptyMessage: 'Export a WAF report to inspect custody metadata.',
+    description: 'Summary-only custody manifest preview. Full JSON payload is not rendered on this page.',
+    summaryRows,
+    preview,
+  });
+}
+
 async function viewWafPosture() {
   let coverage;
+  let criticalityCoverage;
+  let vendorCoverage;
+  let geographyCoverage;
+  let riskRoadmap;
   let assetsPayload;
   let validationsPayload;
   let targetGroupsPayload;
+  let driftPayload;
+  let retestsPayload;
+  let wafProductsPayload;
+  let scenarioIntakesPayload;
   try {
-    [coverage, assetsPayload, validationsPayload, targetGroupsPayload] = await Promise.all([
-      api('/v1/waf/coverage'),
-      api('/v1/waf/assets'),
-      api('/v1/waf/validations'),
-      api('/v1/target-groups'),
+    [
+      coverage,
+      criticalityCoverage,
+      vendorCoverage,
+      geographyCoverage,
+      riskRoadmap,
+      assetsPayload,
+      validationsPayload,
+      targetGroupsPayload,
+      driftPayload,
+      retestsPayload,
+      wafProductsPayload,
+      scenarioIntakesPayload,
+    ] = await Promise.all([
+      fetchWafConsolePayload('/v1/waf/coverage', {
+        coverage_ratio: 0,
+        protected: 0,
+        underprotected: 0,
+        unprotected: 0,
+        unknown: 0,
+        excluded: 0,
+        total_assets: 0,
+      }),
+      fetchWafConsolePayload('/v1/waf/coverage/criticality', { items: [] }),
+      fetchWafConsolePayload('/v1/waf/coverage/vendors', { vendor_mix: [], items: [] }),
+      fetchWafConsolePayload('/v1/waf/coverage/geography', { items: [] }),
+      fetchWafConsolePayload('/v1/waf/coverage/risk-roadmap', { tiers: {}, method: null }),
+      fetchWafConsolePayload('/v1/waf/assets', { items: [] }),
+      fetchWafConsolePayload('/v1/waf/validations', { items: [] }),
+      api('/v1/target-groups').catch((err) => ({
+        items: [],
+        unavailable: { code: String(err?.message ?? 'unknown_error') },
+      })),
+      fetchWafConsolePayload('/v1/waf/drift-events', { items: [] }),
+      fetchWafConsolePayload('/v1/waf/retests', { items: [] }),
+      fetchWafConsolePayload('/v1/waf/products', { items: [], summary: null }),
+      fetchWafConsolePayload('/v1/waf/scenario-intake', { items: [] }),
     ]);
   } catch (err) {
     if (isWafFeatureDisabledError(err)) return renderWafDisabledConsole();
@@ -1079,8 +1572,66 @@ async function viewWafPosture() {
   );
   const assets = await fetchWafAssetRows(assetsPayload.items || []);
   const validations = validationsPayload.items || [];
+  const driftEvents = driftPayload.items || [];
+  const assetLabelById = Object.fromEntries(
+    assets.map((a) => [a.id, a.canonical_url || a.hostname || a.id]),
+  );
+  const retestByDriftId = {
+    ...buildRetestMapByDriftEventId(retestsPayload?.items || []),
+    ...wafRetestByDriftEventId,
+  };
 
+  let assetDetail = lastWafAssetDetail;
+  if (selectedWafAssetId) {
+    const cached = assetDetail?.asset?.id === selectedWafAssetId ? assetDetail : null;
+    if (!cached) {
+      try {
+        assetDetail = await api(`/v1/waf/assets/${encodeURIComponent(selectedWafAssetId)}`);
+        lastWafAssetDetail = assetDetail;
+      } catch {
+        assetDetail = null;
+        lastWafAssetDetail = null;
+      }
+    } else {
+      assetDetail = cached;
+    }
+  } else {
+    assetDetail = null;
+  }
+
+  const perms = uiPermissions();
+  const driftQueueHtml = renderWafDriftQueue({
+    items: driftEvents,
+    assetLabelById,
+    retestByDriftId,
+    canWrite: perms.wafWrite,
+  });
+  const reportsPanelHtml = renderWafReportsPanel({
+    selectedKind: wafReportKind,
+    selectedFormat: wafReportFormat,
+  });
+  const reportCustodyHtml = wafReportCustodyPreviewHtml || '';
+  const validationPlansPanelHtml = renderWafValidationPlansPanel({
+    ...(await fetchWafValidationPlansPanelData(targetGroupsPayload)),
+    canRun: perms.wafRun,
+  });
+  const connectorsPanelHtml = renderWafConnectorsPanel({
+    ...(await fetchWafConnectorsPanelData()),
+    canPoll: perms.wafConnectorWrite,
+  });
+  const scenarioCadencePanelHtml = renderWafScenarioCadencePanel({
+    catalogSummary: wafProductsPayload?.summary ?? null,
+    intakes: scenarioIntakesPayload?.items ?? [],
+    showIntakeForm: showWafScenarioIntakeForm,
+    canWrite: perms.wafWrite,
+  });
+  const tabsHtml = renderWafPostureTabs(activeWafPostureTab);
+
+  const coverageRatioLabel = Number.isFinite(Number(coverage.coverage_ratio))
+    ? `${Math.round(Number(coverage.coverage_ratio) * 10000) / 100}%`
+    : '—';
   const coverageCards = [
+    ['Coverage ratio', coverageRatioLabel],
     ['Protected', coverage.protected],
     ['Underprotected', coverage.underprotected],
     ['Unprotected', coverage.unprotected],
@@ -1089,27 +1640,35 @@ async function viewWafPosture() {
     ['Total assets', coverage.total_assets],
   ].map(([label, value]) => `<div class="card waf-coverage-card"><div class="muted">${vizEsc(label)}</div><div class="metric">${value ?? 0}</div></div>`).join('');
 
-  const assetRows = assets.length
-    ? assets.map((a) => {
-      const reasons = (a.reason_codes || []).length
-        ? a.reason_codes.map((c) => `<code>${vizEsc(c)}</code>`).join(', ')
-        : '—';
-      const tgLabel = tgNameById[a.target_group_id] || a.target_group_id || '—';
-      return `<tr>
-        <td><code>${vizEsc(a.canonical_url || a.hostname || '—')}</code></td>
-        <td>${wafPostureStatusPill(a.posture_status)}</td>
-        <td>${vizEsc(a.owner_hint || '—')}</td>
-        <td>${vizEsc(tgLabel)}</td>
-        <td>${reasons}</td>
-        <td>
-          <button type="button" class="btn secondary" data-action="waf-run-validation" data-id="${vizEsc(a.id)}">Run marker validation</button>
-          <button type="button" class="btn secondary" data-action="waf-finalize-pass" data-id="${vizEsc(a.id)}">Finalize pass</button>
-        </td>
-      </tr>`;
-    }).join('')
-    : '';
+  const vendorMixCardHtml = renderWafVendorMixCard({
+    vendor_mix: vendorCoverage?.vendor_mix ?? [],
+    items: vendorCoverage?.items ?? [],
+  });
+  const geographyCardHtml = renderWafGeographyCard({
+    items: geographyCoverage?.items ?? [],
+  });
+  const criticalityCardHtml = renderWafCriticalityCard({
+    items: criticalityCoverage?.items ?? [],
+  });
+  const roadmapPanelHtml = renderWafRoadmapPanel({
+    tiers: riskRoadmap?.tiers ?? {},
+    generated_at: riskRoadmap?.generated_at,
+    method: riskRoadmap?.method,
+    emptyReason: riskRoadmap?.method ? undefined : 'risk_not_run',
+  });
+  const assetsTableHtml = renderWafAssetsTable({
+    assets,
+    validations,
+    tgNameById,
+    selectedAssetId: selectedWafAssetId,
+    canWrite: perms.wafWrite,
+    canRun: perms.wafRun,
+  });
+  const assetEffectivenessHtml = renderWafAssetEffectivenessSection(assetDetail);
 
-  const validationRows = validations.length
+  const validationRows = validationsPayload.unavailable
+    ? `<tr><td colspan="5"><div class="empty">Validation runs are temporarily unavailable: <code>${vizEsc(validationsPayload.unavailable.code ?? 'unknown_error')}</code>.</div></td></tr>`
+    : validations.length
     ? validations.map((r) => `<tr>
         <td><code>${vizEsc(r.id)}</code></td>
         <td>${vizEsc(r.mode || '—')}</td>
@@ -1119,27 +1678,20 @@ async function viewWafPosture() {
       </tr>`).join('')
     : '<tr><td colspan="5"><div class="empty">No validation runs yet. Create an asset and start a safe marker validation.</div></td></tr>';
 
-  const emptyAssets = assets.length
-    ? ''
-    : `<div class="empty">No WAF assets declared yet.
-        <button type="button" class="btn" data-action="waf-create-demo-asset">Create declared demo WAF asset</button>
-      </div>`;
-
-  return `
-    <div id="waf-posture" class="card">
-      <h3>WAF Posture console</h3>
-      <p class="muted">Customer-declared assets only — bounded marker and canary validations with metadata-only evidence. No cloud connector credentials required for core no-access mode.</p>
-      <button type="button" class="btn secondary" data-action="waf-create-demo-asset">Add demo asset (tg_1)</button>
-      <pre id="wafOut" class="waf-out muted"></pre>
-    </div>
+  const overviewPanels = `
+    ${coverage.unavailable ? `<div class="card waf-panel-warning" role="alert">Coverage data is temporarily unavailable: <code>${vizEsc(coverage.unavailable.code ?? 'unknown_error')}</code>.</div>` : ''}
     <div class="grid waf-coverage-grid">${coverageCards}</div>
-    <div class="card">
-      <h4>Declared assets</h4>
-      ${emptyAssets}
-      ${assets.length ? `<table><thead><tr>
-        <th>Asset URL</th><th>Status</th><th>Owner</th><th>Target group</th><th>Posture reasons</th><th>Actions</th>
-      </tr></thead><tbody>${assetRows}</tbody></table>` : ''}
+    <div class="grid waf-analytics-grid">
+      ${vendorMixCardHtml}
+      ${geographyCardHtml}
     </div>
+    ${criticalityCardHtml}
+    ${scenarioCadencePanelHtml}
+    ${reportsPanelHtml}
+    ${reportCustodyHtml}
+    ${connectorsPanelHtml}
+    ${driftQueueHtml}
+    ${validationPlansPanelHtml}
     <div class="card">
       <h4>Validation runs</h4>
       <table><thead><tr>
@@ -1150,6 +1702,28 @@ async function viewWafPosture() {
       <h4>Evidence safety</h4>
       <p class="muted">Metadata-only summaries are shown here and in exports. Raw request/response payloads, secrets, and full policy bodies are never rendered in the UI.</p>
     </div>`;
+
+  const roadmapPanels = roadmapPanelHtml;
+  const assetsPanels = `${assetsTableHtml}${assetEffectivenessHtml}`;
+
+  const tabPanels = {
+    overview: overviewPanels,
+    roadmap: roadmapPanels,
+    assets: assetsPanels,
+  };
+  const activePanel = tabPanels[activeWafPostureTab] ?? overviewPanels;
+
+  return `
+    <div id="waf-posture" class="card">
+      <h3>WAF Posture console</h3>
+      <p class="muted">Customer-declared assets only — bounded marker and canary validations with metadata-only evidence. No cloud connector credentials required for core no-access mode.</p>
+      ${tabsHtml}
+      ${perms.wafWrite
+    ? '<button type="button" class="btn secondary" data-action="waf-create-demo-asset">Add demo asset (tg_1)</button>'
+    : ''}
+      <pre id="wafOut" class="waf-out muted"></pre>
+    </div>
+    <div class="waf-posture-tab-panel" data-waf-tab-panel="${vizEsc(activeWafPostureTab)}">${activePanel}</div>`;
 }
 
 function renderWafAddonDisabled(title) {
@@ -1180,27 +1754,34 @@ async function viewCvePipeline() {
   const detail = selectedCveId && lastCveDetail?.item?.id === selectedCveId
     ? lastCveDetail
     : (selectedCveId ? { item: items.find((i) => i.id === selectedCveId) ?? null, matches: [], recommendations: [] } : null);
+  const perms = uiPermissions();
   return renderCvePipelinePage({
     items,
     selectedId: selectedCveId,
     detail: detail?.item ? detail : null,
     showIngestForm: showCveIngestForm,
+    canWrite: perms.cvePipelineWrite,
   });
 }
 
 async function viewDiscovery() {
   if (!discoveryFeatureEnabled) return renderDiscoveryDisabled();
-  const [inboxPayload, candidatesPayload, entitiesPayload] = await Promise.all([
+  const [inboxPayload, candidatesPayload, entitiesPayload, targetGroupsPayload] = await Promise.all([
     api('/v1/discovery/inbox'),
     api('/v1/discovery/candidates'),
     api('/v1/discovery/entities'),
+    api('/v1/target-groups'),
   ]);
+  const perms = uiPermissions();
   return renderDiscoveryPage({
     inbox: inboxPayload.items ?? [],
     candidates: normalizeListPayload(candidatesPayload),
     entities: normalizeListPayload(entitiesPayload),
+    targetGroups: normalizeListPayload(targetGroupsPayload),
     activeTab: activeDiscoveryTab,
     discoveryMode,
+    canApprove: perms.discoveryApprove,
+    canWrite: perms.discoveryWrite,
   });
 }
 
@@ -1211,26 +1792,31 @@ async function viewSupplyChain() {
   const detail = selectedSupplyChainRiskId
     ? items.find((r) => r.id === selectedSupplyChainRiskId) ?? null
     : null;
+  const perms = uiPermissions();
   return renderSupplyChainPage({
     items,
     selectedId: selectedSupplyChainRiskId,
     detail,
     showCnameForm: showSupplyCnameForm,
     showDependencyForm: showSupplyDependencyForm,
+    canWrite: perms.wafWrite,
   });
 }
 
 async function viewRemediation() {
   if (!wafFeatureEnabled) return renderWafAddonDisabled('Remediation');
   const payload = await api('/v1/waf/action-items');
+  const perms = uiPermissions();
   return renderRemediationPage({
     items: payload.items ?? [],
     selectedId: selectedActionItemId,
     grouped: remediationGroupedView,
+    canWrite: perms.wafWrite,
   });
 }
 
 async function viewHighScale() {
+  const perms = uiPermissions();
   const [data, tgs] = await Promise.all([
     api('/v1/high-scale-requests'),
     api('/v1/target-groups'),
@@ -1249,11 +1835,8 @@ async function viewHighScale() {
   const tgOptions = tgs.items.length
     ? tgs.items.map((g) => `<option value="${g.id}">${g.name}</option>`).join('')
     : '<option value="">No target groups</option>';
-  return `
-    <div id="high-scale" class="card">
-      <h3>High-scale requests</h3>
-      <p class="muted">Customers submit scope and authorization metadata only. Execution requires SOC approval, schedule window, and governed dry-run adapter — no customer-triggered traffic.</p>
-      <form class="hs-form" id="hsRequestForm">
+  const requestForm = perms.highScaleRequest
+    ? `<form class="hs-form" id="hsRequestForm">
         <label>Target group <select id="hsTargetGroup" required>${tgOptions}</select></label>
         <label>Objective / reason <textarea id="hsObjective" rows="2" required placeholder="What readiness question are you validating?"></textarea></label>
         <div class="hs-form-row">
@@ -1302,24 +1885,37 @@ async function viewHighScale() {
         <label class="hs-inline"><input type="checkbox" id="hsScopeConfirmation" required> I confirm the declared target group scope is accurate</label>
         <button type="button" class="btn" data-action="hs-submit-request">Submit request</button>
       </form>
-      <pre id="hsRequestOut" class="hs-out muted"></pre>
-    </div>
-    <div class="card"><h3>SOC authorization pack</h3>
-      <p class="muted">Attach metadata-only proof references for SOC-009 (customer, business, legal, scope/rate, stop/abort, provider when applicable). SOC reviews artifacts; <code>authorization_pack_status</code> gates approve.</p>
-      ${rows.length ? rows.map((r) => {
-        const providerName = r.provider_context?.provider_name ?? r.provider_context?.provider ?? r.provider_context?.name ?? '';
-        const packStatus = renderAuthorizationPackStatus(r.authorization_pack_status);
-        const artifactButtons = HS_AUTH_ARTIFACT_TYPES.map(([type, label]) => {
+      <pre id="hsRequestOut" class="hs-out muted"></pre>`
+    : '<p class="muted">High-scale request submission requires engineer, admin, or owner role.</p>';
+
+  const artifactSection = rows.length
+    ? rows.map((r) => {
+      const providerName = r.provider_context?.provider_name ?? r.provider_context?.provider ?? r.provider_context?.name ?? '';
+      const packStatus = renderAuthorizationPackStatus(r.authorization_pack_status);
+      const artifactButtons = perms.highScaleWrite
+        ? HS_AUTH_ARTIFACT_TYPES.map(([type, label]) => {
           const hideProvider = type === 'provider_approval' && !providerName && !r.provider_context?.requires_provider_approval;
           if (hideProvider) return '';
           return `<button type="button" class="btn secondary hs-artifact-btn" data-action="hs-artifact-type" data-id="${r.id}" data-type="${type}" data-provider="${vizEsc(providerName)}">${vizEsc(label)}</button>`;
-        }).join('');
-        return `<div class="hs-pack-row" style="margin:0.6rem 0">
+        }).join('')
+        : '<span class="muted">Artifact upload requires engineer, admin, or owner role.</span>';
+      return `<div class="hs-pack-row" style="margin:0.6rem 0">
           <div><code>${vizEsc(r.id)}</code> · ${vizEsc(r.state)} · artifacts: ${r.artifactCount}</div>
           ${packStatus}
           <div class="soc-action-grid hs-artifact-grid">${artifactButtons}</div>
         </div>`;
-      }).join('') : '<div class="empty">No high-scale requests yet. Submit a request, then attach authorization pack metadata for SOC review.</div>'}
+    }).join('')
+    : renderFriendlyEmptyState(PAGE_EMPTY_STATES.high_scale);
+
+  return `
+    <div id="high-scale" class="card">
+      <h3>High-scale requests</h3>
+      <p class="muted">Customers submit scope and authorization metadata only. Execution requires SOC approval, schedule window, and governed dry-run adapter — no customer-triggered traffic.</p>
+      ${requestForm}
+    </div>
+    <div class="card"><h3>SOC authorization pack</h3>
+      <p class="muted">Attach metadata-only proof references for SOC-009 (customer, business, legal, scope/rate, stop/abort, provider when applicable). SOC reviews artifacts; <code>authorization_pack_status</code> gates approve.</p>
+      ${artifactSection}
     </div>`;
 }
 
@@ -1377,18 +1973,32 @@ async function runSocAction(fn, refresh = true) {
 }
 
 async function viewSoc() {
-  if (!['soc', 'owner'].includes(el('role').value)) {
-    return '<div class="empty">Switch role to SOC or Owner to use the SOC console.</div>';
+  const role = el('role').value;
+  const perms = uiPermissions();
+  if (role !== 'soc') {
+    return '<div class="empty">Switch role to SOC to use the SOC console. Owner and other roles have read-only high-scale visibility on the High-scale page.</div>';
+  }
+  if (!perms.socHighScale) {
+    return '<div class="empty">SOC high-scale permissions are required for this console.</div>';
   }
   const data = await api('/v1/high-scale-requests');
   const rows = await Promise.all(
     data.items.map(async (r) => {
+      let hasPostTestReport = false;
       try {
         const arts = await api(`/v1/high-scale-requests/${r.id}/artifacts`);
         const pending = arts.items.filter((a) => a.status === 'pending_review').length;
-        return { ...r, artifactCount: arts.items.length, pendingArtifacts: pending };
+        if (r.state === 'stopped') {
+          try {
+            await api(`/internal/soc/high-scale/${r.id}/post-test-report`);
+            hasPostTestReport = true;
+          } catch {
+            hasPostTestReport = false;
+          }
+        }
+        return { ...r, artifactCount: arts.items.length, pendingArtifacts: pending, hasPostTestReport };
       } catch {
-        return { ...r, artifactCount: 0, pendingArtifacts: 0 };
+        return { ...r, artifactCount: 0, pendingArtifacts: 0, hasPostTestReport };
       }
     }),
   );
@@ -1396,24 +2006,14 @@ async function viewSoc() {
     ? rows.map((r) => `<tr>
         <td><code>${r.id}</code></td>
         <td>${socStateChip(r.state)}</td>
-        <td>${r.target_group_id || '—'}</td>
-        <td>${r.reason || '—'}</td>
+        <td>${vizEsc(r.target_group_id || '—')}</td>
+        <td>${vizEsc(r.reason || '—')}</td>
         <td>${r.artifactCount}${r.pendingArtifacts ? ` <span class="muted">(${r.pendingArtifacts} pending)</span>` : ''}</td>
       </tr>
       <tr class="soc-actions-row"><td colspan="5">
-        <div class="soc-action-grid">
-          <button class="btn secondary" data-action="soc-review-pack" data-id="${r.id}">Review pack</button>
-          <button class="btn secondary" data-action="soc-approve" data-id="${r.id}">Approve</button>
-          <button class="btn secondary" data-action="soc-schedule" data-id="${r.id}">Schedule</button>
-          <button class="btn secondary" data-action="soc-start" data-id="${r.id}">Start (dry-run)</button>
-          <button class="btn secondary" data-action="soc-stop" data-id="${r.id}">Stop</button>
-          <button class="btn secondary" data-action="soc-adapter" data-id="${r.id}">Adapter</button>
-          <button class="btn secondary" data-action="soc-note" data-id="${r.id}">SOC note</button>
-          <button class="btn secondary" data-action="soc-post-report" data-id="${r.id}">Post-test report</button>
-          <button class="btn secondary" data-action="soc-close" data-id="${r.id}">Close</button>
-        </div>
+        ${renderSocLifecycleActions(r)}
       </td></tr>`).join('')
-    : '<tr><td colspan="5"><div class="empty">No requests in queue.</div></td></tr>';
+    : `<tr><td colspan="5">${renderFriendlyEmptyState(PAGE_EMPTY_STATES.soc_queue)}</td></tr>`;
   return `
     <div class="card">
       <h3>SOC Console</h3>
@@ -1445,11 +2045,41 @@ async function viewSoc() {
     </div>`;
 }
 
+function renderSocLifecycleActions(request) {
+  const id = vizEsc(request.id);
+  const state = request.state;
+  const packReady = request.authorization_pack_status?.overall === 'accepted';
+  const buttons = [
+    `<button class="btn secondary" data-action="soc-review-pack" data-id="${id}">Review pack</button>`,
+  ];
+  if (['submitted', 'under_review'].includes(state) && packReady) {
+    buttons.push(`<button class="btn secondary" data-action="soc-approve" data-id="${id}">Approve</button>`);
+  }
+  if (state === 'approved') {
+    buttons.push(`<button class="btn secondary" data-action="soc-schedule" data-id="${id}">Schedule</button>`);
+  }
+  if (state === 'scheduled') {
+    buttons.push(`<button class="btn secondary" data-action="soc-start" data-id="${id}">Start (dry-run)</button>`);
+  }
+  if (state === 'running') {
+    buttons.push(`<button class="btn secondary" data-action="soc-stop" data-id="${id}">Stop</button>`);
+  }
+  buttons.push(`<button class="btn secondary" data-action="soc-adapter" data-id="${id}">Adapter</button>`);
+  buttons.push(`<button class="btn secondary" data-action="soc-note" data-id="${id}">SOC note</button>`);
+  if (['running', 'collecting', 'stopped'].includes(state)) {
+    buttons.push(`<button class="btn secondary" data-action="soc-post-report" data-id="${id}">Post-test report</button>`);
+  }
+  if (state === 'stopped' && request.hasPostTestReport) {
+    buttons.push(`<button class="btn secondary" data-action="soc-close" data-id="${id}">Close</button>`);
+  }
+  return `<div class="soc-action-grid">${buttons.join('')}</div>`;
+}
+
 async function viewReports() {
   const hasReport = Boolean(lastReportId);
   return `<div class="card">
     ${renderReportBuilder(lastReportKind, lastReportFormat, hasReport)}
-    <div id="reportOut">${hasReport ? '' : '<div class="empty">No report generated yet. Select a report type and generate to enable export.</div>'}
+    <div id="reportOut">${hasReport ? '' : renderFriendlyEmptyState(PAGE_EMPTY_STATES.reports)}
     </div></div>
     ${renderExportInspectionPanel({
     panelId: 'reportCustodyPreview',
@@ -1460,10 +2090,20 @@ async function viewReports() {
 }
 
 async function viewAudit() {
-  const data = await api('/v1/audit-log');
-  return `<div class="card"><table><thead><tr><th>Time</th><th>Action</th><th>Resource</th></tr></thead><tbody>
-    ${data.items.slice().reverse().map((a) => `<tr><td>${a.timestamp}</td><td>${a.action}</td><td>${a.resource_type || ''} ${a.resource_id || ''}</td></tr>`).join('')}
-  </tbody></table></div>`;
+  if (!uiPermissions().auditRead) {
+    return '<div class="card"><p class="muted">Audit log access requires owner, admin, or SOC role.</p></div>';
+  }
+  try {
+    const data = await api('/v1/audit-log');
+    if (!data.items.length) {
+      return renderFriendlyEmptyState(PAGE_EMPTY_STATES.audit);
+    }
+    return `<div class="card"><table><thead><tr><th>Time</th><th>Action</th><th>Resource</th></tr></thead><tbody>
+      ${data.items.slice().reverse().map((a) => `<tr><td>${a.timestamp}</td><td>${a.action}</td><td>${a.resource_type || ''} ${a.resource_id || ''}</td></tr>`).join('')}
+    </tbody></table></div>`;
+  } catch (err) {
+    return `<div class="card"><p class="muted">Unable to load audit log: ${vizEsc(err.message)}</p></div>`;
+  }
 }
 
 async function fetchReleaseEvidencePanelData() {
@@ -1520,12 +2160,13 @@ async function viewReleaseEvidence() {
 }
 
 async function viewSettings() {
-  const [tokens, tenant, stateSnapshot, releaseEvidence] = await Promise.all([
-    api('/v1/bootstrap-tokens'),
+  const [tokensResult, tenant, stateSnapshot, releaseEvidence] = await Promise.all([
+    api('/v1/bootstrap-tokens').catch((err) => ({ items: [], permissionDenied: /forbidden/i.test(err?.message ?? '') })),
     api('/v1/tenants/current'),
     api('/v1/state'),
     fetchReleaseEvidencePanelData(),
   ]);
+  const tokens = tokensResult?.items ? tokensResult : { items: [] };
   const supportPreview = buildSupportReadinessPreview({
     kill_switch: stateSnapshot.kill_switch,
     release_evidence_items: releaseEvidence.items,
@@ -1543,11 +2184,17 @@ async function viewSettings() {
     <p class="muted"><button type="button" class="btn secondary" data-action="goto-release-evidence">Open full release evidence view</button></p>
     <div class="card">
       <h3>API keys (bootstrap tokens)</h3>
-      <button class="btn" data-action="create-token">Create bootstrap token</button>
+      ${uiPermissions().bootstrapTokenCreate
+    ? '<button class="btn" data-action="create-token">Create bootstrap token</button>'
+    : '<p class="muted">Bootstrap token creation requires engineer, admin, or owner role.</p>'}
       ${lastTokenSecret ? `<div class="secret-box">Shown once: ${lastTokenSecret}</div>` : '<p class="muted">Token secret is shown once at creation only.</p>'}
-      <table><thead><tr><th>Name</th><th>Uses</th><th>Expires</th></tr></thead><tbody>
+      ${tokens.permissionDenied
+    ? '<p class="muted">Your current role cannot list bootstrap tokens.</p>'
+    : tokens.items.length
+    ? `<table><thead><tr><th>Name</th><th>Uses</th><th>Expires</th></tr></thead><tbody>
         ${tokens.items.map((t) => `<tr><td>${t.name}</td><td>${t.registrations_used}/${t.max_registrations}</td><td>${t.expires_at}</td></tr>`).join('')}
-      </tbody></table>
+      </tbody></table>`
+    : renderFriendlyEmptyState(PAGE_EMPTY_STATES.settings_tokens)}
     </div>`;
 }
 
@@ -1566,6 +2213,12 @@ async function copyTextToClipboard(text, statusElId, successMsg = 'Copied') {
 }
 
 function bindHandlers() {
+  const perms = uiPermissions();
+  const denyMutation = (action) => {
+    // eslint-disable-next-line no-alert
+    alert(`Your role cannot perform: ${action}`);
+  };
+
   document.querySelectorAll('[data-install-tab]').forEach((tab) => {
     tab.onclick = () => {
       activeInstallTab = tab.dataset.installTab;
@@ -1628,18 +2281,21 @@ function bindHandlers() {
   });
   document.querySelectorAll('[data-action="onboard-create-env"]').forEach((b) => {
     b.onclick = async () => {
+      if (!perms.environmentWrite) return denyMutation('create environment');
       await api('/v1/environments', { method: 'POST', body: JSON.stringify({ name: `Validation ${Date.now()}` }) });
       render();
     };
   });
   document.querySelectorAll('[data-action="onboard-create-tg"]').forEach((b) => {
     b.onclick = async () => {
+      if (!perms.targetGroupWrite) return denyMutation('create target group');
       await api('/v1/target-groups', { method: 'POST', body: JSON.stringify({ name: `Service ${Date.now()}` }) });
       render();
     };
   });
   document.querySelectorAll('[data-action="onboard-add-target"]').forEach((b) => {
     b.onclick = async () => {
+      if (!perms.targetGroupWrite) return denyMutation('add target');
       const value = document.getElementById('onboardTargetValue')?.value?.trim();
       if (!value) return;
       const tgs = await api('/v1/target-groups');
@@ -1654,6 +2310,7 @@ function bindHandlers() {
   });
   document.querySelectorAll('[data-action="onboard-create-token"]').forEach((b) => {
     b.onclick = async () => {
+      if (!perms.bootstrapTokenCreate) return denyMutation('create bootstrap token');
       const tgs = await api('/v1/target-groups');
       const tg = tgs.items[0];
       if (!tg) return;
@@ -1667,6 +2324,7 @@ function bindHandlers() {
   });
   document.querySelectorAll('[data-action="onboard-start-run"]').forEach((b) => {
     b.onclick = async () => {
+      if (!perms.testRunStart) return denyMutation('start test run');
       const tgs = await api('/v1/target-groups');
       const tg = tgs.items[0];
       if (!tg) return;
@@ -1677,6 +2335,42 @@ function bindHandlers() {
         method: 'POST',
         body: JSON.stringify({
           check_id: 'origin.direct_bypass.safe',
+          target_group_id: tg.id,
+          target_id: target.id,
+        }),
+      });
+      route = 'runs';
+      render();
+    };
+  });
+  document.querySelectorAll('[data-action="onboard-retry-heartbeat"]').forEach((b) => {
+    b.onclick = () => {
+      onboardingHeartbeatTimedOut = false;
+      stopOnboardingHeartbeatPoll();
+      onboardingHeartbeatPollStartedAt = Date.now();
+      render();
+    };
+  });
+  document.querySelectorAll('[data-action="onboard-skip-heartbeat"]').forEach((b) => {
+    b.onclick = () => {
+      onboardingHeartbeatSkipped = true;
+      stopOnboardingHeartbeatPoll();
+      render();
+    };
+  });
+  document.querySelectorAll('[data-action="onboard-start-placement-test"]').forEach((b) => {
+    b.onclick = async () => {
+      if (!perms.testRunStart) return denyMutation('start placement test');
+      const tgs = await api('/v1/target-groups');
+      const tg = tgs.items[0];
+      if (!tg) return;
+      const detail = await api(`/v1/target-groups/${tg.id}`);
+      const target = detail.targets[0];
+      if (!target) return;
+      await api('/v1/test-runs', {
+        method: 'POST',
+        body: JSON.stringify({
+          check_id: ONBOARDING_PLACEMENT_TEST_CHECK_ID,
           target_group_id: tg.id,
           target_id: target.id,
         }),
@@ -1696,6 +2390,7 @@ function bindHandlers() {
   });
   document.querySelectorAll('[data-action="create-env"]').forEach((b) => {
     b.onclick = async () => {
+      if (!perms.environmentWrite) return denyMutation('create environment');
       await api('/v1/environments', { method: 'POST', body: JSON.stringify({ name: `Env ${Date.now()}` }) });
       render();
     };
@@ -1704,7 +2399,30 @@ function bindHandlers() {
     b.onclick = async () => {
       await api('/v1/notifications', {
         method: 'POST',
-        body: JSON.stringify({ channel: 'webhook', destination: 'metadata-only' }),
+        body: JSON.stringify({ channel: 'in_app', triggers: ['finding.high_severity'] }),
+      });
+      render();
+    };
+  });
+  document.querySelectorAll('[data-action="process-notification-retries"]').forEach((b) => {
+    b.onclick = async () => {
+      lastNotificationRetryResult = await api('/v1/notifications/retries/process', {
+        method: 'POST',
+        body: JSON.stringify({ dry_run: b.dataset.dryRun === 'true' }),
+      });
+      render();
+    };
+  });
+  document.querySelectorAll('[data-action="redrive-notification-dlq"]').forEach((b) => {
+    b.onclick = async () => {
+      const attemptId = b.dataset.attemptId;
+      if (!attemptId) return;
+      lastNotificationRedriveResult = await api('/v1/notifications/dlq/redrive', {
+        method: 'POST',
+        body: JSON.stringify({
+          attempt_ids: [attemptId],
+          dry_run: b.dataset.dryRun === 'true',
+        }),
       });
       render();
     };
@@ -1713,7 +2431,7 @@ function bindHandlers() {
     b.onclick = async () => {
       const type = b.dataset.type;
       const requestId = b.dataset.id;
-      const body = buildHsArtifactUploadBody(type, requestId, b.dataset.provider || '');
+      const body = await buildHsArtifactUploadBody(type, requestId, b.dataset.provider || '');
       await api(`/v1/high-scale-requests/${requestId}/artifacts`, {
         method: 'POST',
         body: JSON.stringify(body),
@@ -1813,6 +2531,7 @@ function bindHandlers() {
   });
   document.querySelectorAll('[data-action="create-tg"]').forEach((b) => {
     b.onclick = async () => {
+      if (!perms.targetGroupWrite) return denyMutation('create target group');
       await api('/v1/target-groups', { method: 'POST', body: JSON.stringify({ name: `Group ${Date.now()}` }) });
       render();
     };
@@ -1872,8 +2591,11 @@ function bindHandlers() {
   });
   document.querySelectorAll('[data-action="start-run"]').forEach((b) => {
     b.onclick = async () => {
+      if (!perms.testRunStart) return denyMutation('start test run');
       const tgs = await api('/v1/target-groups');
-      const tg = tgs.items[0];
+      const tg = b.dataset.groupId
+        ? tgs.items.find((g) => g.id === b.dataset.groupId) ?? tgs.items[0]
+        : tgs.items[0];
       if (!tg) return alert('Create a target group first');
       const detail = await api(`/v1/target-groups/${tg.id}`);
       const target = detail.targets[0];
@@ -1899,6 +2621,20 @@ function bindHandlers() {
       }),
     }));
   });
+  document.querySelectorAll('[data-waf-posture-tab]').forEach((tab) => {
+    tab.onclick = () => {
+      activeWafPostureTab = tab.dataset.wafPostureTab || 'overview';
+      render();
+    };
+  });
+  document.querySelectorAll('[data-action="waf-view-asset"]').forEach((b) => {
+    b.onclick = async () => {
+      selectedWafAssetId = b.dataset.id || null;
+      activeWafPostureTab = 'assets';
+      lastWafAssetDetail = null;
+      await render();
+    };
+  });
   document.querySelectorAll('[data-action="waf-run-validation"]').forEach((b) => {
     b.onclick = () => runWafAction(() => api('/v1/waf/validations', {
       method: 'POST',
@@ -1910,29 +2646,192 @@ function bindHandlers() {
       }),
     }));
   });
-  document.querySelectorAll('[data-action="waf-finalize-pass"]').forEach((b) => {
-    b.onclick = () => runWafAction(async () => {
-      const assetId = b.dataset.id;
-      const vals = await api('/v1/waf/validations');
-      const openRun = (vals.items || [])
-        .filter((r) => r.waf_asset_id === assetId && r.status !== 'finalized')
-        .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0];
-      if (!openRun) throw new Error('No open validation run for this asset.');
-      const requestId = `ui_${Date.now().toString(36)}`;
-      return api(`/v1/waf/validations/${openRun.id}/finalize`, {
-        method: 'POST',
-        body: JSON.stringify({
-          waf_detected: true,
-          validation_passed: true,
-          scenario_results: [{
-            scenario_family: 'marker',
-            passed: true,
-            observed_action: 'block',
-            evidence_summary: { request_id: requestId, blocked: true },
-          }],
-        }),
+
+  document.querySelectorAll('[data-action="waf-drift-status"]').forEach((b) => {
+    b.onclick = () => {
+      const driftId = b.dataset.id;
+      const row = b.closest('tr');
+      const status = row?.querySelector('[data-waf-drift-status-select]')?.value;
+      if (!status) return;
+      runWafAction(() => api(`/v1/waf/drift-events/${driftId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status }),
+      }));
+    };
+  });
+  document.querySelectorAll('[data-action="waf-drift-retest"]').forEach((b) => {
+    b.onclick = () => runWafAction(() => api(`/v1/waf/drift-events/${b.dataset.id}/retest`, {
+      method: 'POST',
+      body: JSON.stringify({
+        retest_plan: ['marker'],
+        requested_by: 'ui',
+        priority: 'normal',
+      }),
+    }));
+  });
+  const wafReportKindSelect = document.getElementById('wafReportKind');
+  if (wafReportKindSelect) {
+    wafReportKindSelect.onchange = () => {
+      wafReportKind = wafReportKindSelect.value || 'executive_coverage';
+    };
+  }
+  const wafReportFormatSelect = document.getElementById('wafReportFormat');
+  if (wafReportFormatSelect) {
+    wafReportFormatSelect.onchange = () => {
+      wafReportFormat = wafReportFormatSelect.value || 'json';
+    };
+  }
+  async function exportWafReportForUi({ download = false } = {}) {
+    const kind = el('wafReportKind')?.value || wafReportKind || 'executive_coverage';
+    const format = el('wafReportFormat')?.value || wafReportFormat || 'json';
+    wafReportKind = kind;
+    wafReportFormat = format;
+    if (format === 'markdown' && download) {
+      const res = await fetch(`/v1/waf/reports/${encodeURIComponent(kind)}/export?format=markdown`, {
+        headers: headers(),
       });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'WAF report export failed.');
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `waf-${kind}.md`;
+      a.click();
+      URL.revokeObjectURL(url);
+      return { ok: true, kind, format };
+    }
+    const exported = await api(`/v1/waf/reports/${encodeURIComponent(kind)}/export?format=json`);
+    const preview = await buildCustodyPreviewFromExport({
+      payload: exported.payload,
+      custody: exported.custody,
+      fallbackType: 'waf_report_export',
+      fallbackFormat: 'json',
+      note: 'Developer-validation WAF report export. Immutable storage and external signing remain open production gates.',
     });
+    wafReportCustodyPreviewHtml = renderWafReportCustodyPreviewBlock(
+      preview,
+      summarizeWafReportExport(exported.payload, kind, format),
+    );
+    if (download && format === 'json') {
+      const blob = new Blob([JSON.stringify({ payload: exported.payload, custody: exported.custody }, null, 2)], {
+        type: 'application/json',
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `waf-${kind}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+    return { ok: true, kind, format, custody_verified: preview.statusTone === 'safe' };
+  }
+  document.querySelectorAll('[data-action="waf-report-export"]').forEach((b) => {
+    b.onclick = () => runWafAction(() => exportWafReportForUi({ download: true }));
+  });
+  document.querySelectorAll('[data-action="waf-report-custody-preview"]').forEach((b) => {
+    b.onclick = () => runWafAction(() => exportWafReportForUi({ download: false }));
+  });
+  document.querySelectorAll('[data-action="waf-retest-execute"]').forEach((b) => {
+    b.onclick = () => runWafAction(() => api(`/v1/waf/retests/${b.dataset.retestId}/execute`, {
+      method: 'POST',
+      body: JSON.stringify({ note: 'UI requested governed retest execution.' }),
+    }));
+  });
+  document.querySelectorAll('[data-action="waf-retest-complete"]').forEach((b) => {
+    b.onclick = () => runWafAction(() => api(`/v1/waf/retests/${b.dataset.retestId}/complete`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }));
+  });
+  const wafPlanMode = document.getElementById('wafPlanMode');
+  if (wafPlanMode) {
+    wafPlanMode.onchange = () => applyWafPlanScheduleVisibility();
+  }
+  document.querySelectorAll('[data-action="waf-plan-create"]').forEach((b) => {
+    b.onclick = () => {
+      const targetGroupId = el('wafPlanTargetGroup')?.value;
+      const mode = el('wafPlanMode')?.value || 'manual';
+      const scenarios = [...document.querySelectorAll('input[name="waf-plan-scenario"]:checked')]
+        .map((input) => input.value)
+        .filter(Boolean);
+      if (!targetGroupId) return;
+      if (!scenarios.length) return;
+      const maxConcurrent = Number(el('wafPlanMaxConcurrent')?.value) || 2;
+      const timeoutMs = Number(el('wafPlanTimeoutMs')?.value) || 60000;
+      const body = {
+        target_group_id: targetGroupId,
+        mode,
+        scenarios,
+        max_concurrent: maxConcurrent,
+        timeout_ms: timeoutMs,
+      };
+      if (mode === 'scheduled') {
+        body.schedule_interval = el('wafPlanScheduleInterval')?.value || 'daily';
+      }
+      runWafAction(() => api('/v1/waf/validation-plans', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }));
+    };
+  });
+  document.querySelectorAll('[data-action="waf-plan-execute"]').forEach((b) => {
+    b.onclick = () => runWafAction(() => api(
+      `/v1/waf/validation-plans/${b.dataset.planId}/execute`,
+      { method: 'POST', body: JSON.stringify({}) },
+    ));
+  });
+  document.querySelectorAll('[data-action="waf-plan-cancel"]').forEach((b) => {
+    b.onclick = () => runWafAction(() => api(
+      `/v1/waf/validation-plans/${b.dataset.planId}/cancel`,
+      { method: 'POST', body: JSON.stringify({}) },
+    ));
+  });
+  document.querySelectorAll('[data-action="waf-connector-poll"]').forEach((b) => {
+    b.onclick = () => runWafConnectorPoll(() => postConnectorPoll(b.dataset.id));
+  });
+  document.querySelectorAll('[data-action="waf-scenario-intake-toggle"]').forEach((b) => {
+    b.onclick = () => {
+      showWafScenarioIntakeForm = !showWafScenarioIntakeForm;
+      render();
+    };
+  });
+  document.querySelectorAll('[data-action="waf-scenario-intake-cancel"]').forEach((b) => {
+    b.onclick = () => {
+      showWafScenarioIntakeForm = false;
+      render();
+    };
+  });
+  document.querySelectorAll('[data-action="waf-scenario-intake-submit"]').forEach((b) => {
+    b.onclick = async () => {
+      const pattern_title = el('wafScenarioIntakeTitle')?.value?.trim();
+      const advisoriesRaw = el('wafScenarioIntakeAdvisories')?.value?.trim();
+      const proposed_scenario_family = el('wafScenarioIntakeFamily')?.value?.trim();
+      const risk_class = el('wafScenarioIntakeRisk')?.value?.trim();
+      const threat_summary = el('wafScenarioIntakeSummary')?.value?.trim();
+      const advisory_refs = advisoriesRaw
+        ? advisoriesRaw.split(',').map((s) => s.trim()).filter(Boolean)
+        : [];
+      if (!pattern_title || !advisory_refs.length || !risk_class) return;
+      const body = {
+        pattern_title,
+        advisory_refs,
+        risk_class,
+        ...(proposed_scenario_family ? { proposed_scenario_family } : {}),
+        ...(threat_summary ? { threat_summary } : {}),
+      };
+      const result = await api('/v1/waf/scenario-intake', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
+      showWafScenarioIntakeForm = false;
+      setWafOut(summarizeWafActionResult({
+        action: 'scenario_intake',
+        intake_id: result?.intake?.id,
+        status: result?.status,
+        pattern_title: result?.intake?.pattern_title,
+      }));
+      render();
+    };
   });
   document.querySelectorAll('[data-action="hs-submit-request"]').forEach((b) => {
     b.onclick = async () => {
@@ -2115,7 +3014,128 @@ function bindHandlers() {
   });
 
   document.querySelectorAll('[data-action="goto-settings"]').forEach((b) => {
-    b.onclick = () => { route = 'settings'; render(); };
+    b.onclick = () => { route = 'settings'; location.hash = route; render(); };
+  });
+  document.querySelectorAll('[data-action="goto-onboarding"]').forEach((b) => {
+    b.onclick = () => { route = 'onboarding'; location.hash = route; render(); };
+  });
+  document.querySelectorAll('[data-action="goto-agents"]').forEach((b) => {
+    b.onclick = () => { route = 'agents'; location.hash = route; render(); };
+  });
+  document.querySelectorAll('[data-action="goto-target-groups"]').forEach((b) => {
+    b.onclick = () => { route = 'target-groups'; location.hash = route; render(); };
+  });
+  document.querySelectorAll('[data-action="goto-high-scale"]').forEach((b) => {
+    b.onclick = () => { route = 'high-scale'; location.hash = route; render(); };
+  });
+  document.querySelectorAll('[data-action="goto-high-scale-form"]').forEach((b) => {
+    b.onclick = () => {
+      route = 'high-scale';
+      location.hash = route;
+      render();
+      setTimeout(() => document.getElementById('hsObjective')?.focus(), 0);
+    };
+  });
+  document.querySelectorAll('[data-action="tg-detail"]').forEach((b) => {
+    b.onclick = () => {
+      selectedTargetGroupId = b.dataset.id;
+      render();
+    };
+  });
+  document.querySelectorAll('[data-tg-tab]').forEach((tab) => {
+    tab.onclick = () => {
+      activeTargetGroupTab = tab.dataset.tgTab;
+      render();
+    };
+  });
+  document.querySelectorAll('[data-action="tg-save-settings"]').forEach((b) => {
+    b.onclick = async () => {
+      if (!perms.targetGroupWrite) return denyMutation('update target group settings');
+      const groupId = b.dataset.id;
+      const name = el('tgSettingsName')?.value?.trim();
+      const description = el('tgSettingsDescription')?.value ?? '';
+      const maxRuns = Number(el('tgSettingsMaxRuns')?.value);
+      const minSeconds = Number(el('tgSettingsMinSeconds')?.value);
+      await api(`/v1/target-groups/${groupId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          name,
+          description,
+          safety_policy: {
+            max_runs_per_hour: Number.isFinite(maxRuns) ? maxRuns : undefined,
+            min_seconds_between_runs: Number.isFinite(minSeconds) ? minSeconds : undefined,
+          },
+        }),
+      });
+      selectedTargetGroupId = groupId;
+      render();
+    };
+  });
+  document.querySelectorAll('[data-action="tg-archive"]').forEach((b) => {
+    b.onclick = async () => {
+      if (!perms.targetGroupWrite) return denyMutation('archive target group');
+      const groupId = b.dataset.id;
+      if (!window.confirm('Archive this target group? It will be removed from active validation.')) return;
+      try {
+        await api(`/v1/target-groups/${groupId}`, { method: 'DELETE' });
+        selectedTargetGroupId = null;
+        activeTargetGroupTab = 'targets';
+        render();
+      } catch (err) {
+        alert(err.message || 'Unable to archive target group');
+      }
+    };
+  });
+  document.querySelectorAll('[data-action="tg-target-save"]').forEach((b) => {
+    b.onclick = async () => {
+      if (!perms.targetGroupWrite) return denyMutation('update target');
+      const groupId = b.dataset.groupId;
+      const targetId = b.dataset.id;
+      const value = el(`tgTargetValue_${targetId}`)?.value?.trim();
+      const kind = el(`tgTargetKind_${targetId}`)?.value;
+      const expected_behavior = el(`tgTargetBehavior_${targetId}`)?.value;
+      await api(`/v1/target-groups/${groupId}/targets/${targetId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ value, kind, expected_behavior }),
+      });
+      selectedTargetGroupId = groupId;
+      render();
+    };
+  });
+  document.querySelectorAll('[data-action="tg-target-delete"]').forEach((b) => {
+    b.onclick = async () => {
+      if (!perms.targetGroupWrite) return denyMutation('delete target');
+      const groupId = b.dataset.groupId;
+      const targetId = b.dataset.id;
+      if (!window.confirm('Delete this declared target?')) return;
+      try {
+        await api(`/v1/target-groups/${groupId}/targets/${targetId}`, { method: 'DELETE' });
+        selectedTargetGroupId = groupId;
+        render();
+      } catch (err) {
+        alert(err.message || 'Unable to delete target');
+      }
+    };
+  });
+  document.querySelectorAll('[data-action="finding-assign"]').forEach((b) => {
+    b.onclick = async () => {
+      await api(`/v1/findings/${b.dataset.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ assignee: el('userId')?.value || 'usr_admin' }),
+      });
+      selectedFindingId = b.dataset.id;
+      render();
+    };
+  });
+  document.querySelectorAll('[data-action="finding-status"]').forEach((b) => {
+    b.onclick = async () => {
+      await api(`/v1/findings/${b.dataset.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status: b.dataset.status }),
+      });
+      selectedFindingId = b.dataset.id;
+      render();
+    };
   });
   document.querySelectorAll('[data-action="goto-release-evidence"]').forEach((b) => {
     b.onclick = () => {
@@ -2219,6 +3239,25 @@ function bindHandlers() {
       render();
     };
   });
+  document.querySelectorAll('[data-action="discovery-import"]').forEach((b) => {
+    b.onclick = async () => {
+      const selector = document.getElementById(`discoveryImportTargetGroup_${b.dataset.id}`)
+        ?? el('discoveryImportTargetGroup');
+      const targetGroupId = selector?.value?.trim();
+      if (!targetGroupId) {
+        alert('Select a target group before importing.');
+        return;
+      }
+      await api(`/v1/discovery/candidates/${b.dataset.id}/import`, {
+        method: 'POST',
+        body: JSON.stringify({
+          target_group_id: targetGroupId,
+          create_waf_asset: true,
+        }),
+      });
+      render();
+    };
+  });
 
   document.querySelectorAll('[data-action="supply-view"]').forEach((b) => {
     b.onclick = () => {
@@ -2310,6 +3349,19 @@ function bindHandlers() {
         body: JSON.stringify({ status }),
       });
       render();
+    };
+  });
+  document.querySelectorAll('[data-action="remediation-deliver"]').forEach((btn) => {
+    btn.onclick = async () => {
+      const id = btn.dataset.id;
+      const channel = btn.dataset.channel || 'webhook';
+      if (!id) return;
+      const result = await api(`/v1/waf/action-items/${id}/deliver`, {
+        method: 'POST',
+        body: JSON.stringify({ channel, dry_run: true }),
+      });
+      const status = result?.delivery?.status ?? 'unknown';
+      window.alert(`Dry-run deliver (${channel}): ${status}`);
     };
   });
 }

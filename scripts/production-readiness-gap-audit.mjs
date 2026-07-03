@@ -46,6 +46,7 @@ export function parseArgs(argv = []) {
     releaseId: null,
     profile: DEFAULT_STAGING_READINESS_PROFILE,
     validateOnly: false,
+    allowExternalBlockersOnly: false,
     help: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -60,6 +61,7 @@ export function parseArgs(argv = []) {
     else if (arg === '--release-id') opts.releaseId = next();
     else if (arg === '--profile') opts.profile = next();
     else if (arg === '--validate-only') opts.validateOnly = true;
+    else if (arg === '--allow-external-blockers-only') opts.allowExternalBlockersOnly = true;
     else if (arg === '--help' || arg === '-h') opts.help = true;
     else throw new Error(`Unknown argument: ${arg}`);
   }
@@ -67,11 +69,15 @@ export function parseArgs(argv = []) {
   return opts;
 }
 
+const EXTERNAL_REMAINING_PATTERN = /Remaining\s*\(external\)/i;
+
 export function parseChecklistGateCounts(markdown = '') {
   let unchecked = 0;
   let in_progress = 0;
   let complete = 0;
+  let external_blockers = 0;
   const open_items = [];
+  const external_blocker_items = [];
   for (const line of markdown.split('\n')) {
     const uncheckedMatch = /^- \[ \]\s*(.*)$/.exec(line);
     if (uncheckedMatch) {
@@ -85,16 +91,27 @@ export function parseChecklistGateCounts(markdown = '') {
       open_items.push({ status: 'in_progress', text: inProgressMatch[1].trim() });
       continue;
     }
-    if (/^- \[x\]/i.test(line)) complete += 1;
+    const completeMatch = /^- \[x\]\s*(.*)$/i.exec(line);
+    if (completeMatch) {
+      complete += 1;
+      const text = completeMatch[1].trim();
+      if (EXTERNAL_REMAINING_PATTERN.test(text)) {
+        external_blockers += 1;
+        external_blocker_items.push({ status: 'external_blocker', text });
+      }
+      continue;
+    }
   }
-  const open_gates = unchecked > 0 || in_progress > 0;
+  const open_gates = unchecked > 0 || in_progress > 0 || external_blockers > 0;
   return {
     unchecked,
     in_progress,
     complete,
+    external_blockers,
     open_gates,
     total_items: unchecked + in_progress + complete,
     open_items,
+    external_blocker_items,
   };
 }
 
@@ -127,7 +144,11 @@ export function loadReleaseDocGateCounts(options = {}) {
       unchecked: checklist.unchecked + release_plan.unchecked,
       in_progress: checklist.in_progress + release_plan.in_progress,
       complete: checklist.complete + release_plan.complete,
-      open_gates: checklist.open_gates || release_plan.open_gates,
+      external_blockers: checklist.external_blockers + release_plan.external_blockers,
+      open_gates:
+        checklist.open_gates || release_plan.open_gates
+        || checklist.external_blockers > 0
+        || release_plan.external_blockers > 0,
       total_items: checklist.total_items + release_plan.total_items,
       open_items: [
         ...checklist.open_items.map((item) => ({
@@ -135,6 +156,16 @@ export function loadReleaseDocGateCounts(options = {}) {
           ...item,
         })),
         ...release_plan.open_items.map((item) => ({
+          source: 'docs/product/06-release-plan.md',
+          ...item,
+        })),
+      ],
+      external_blocker_items: [
+        ...checklist.external_blocker_items.map((item) => ({
+          source: 'docs/release-checklist.md',
+          ...item,
+        })),
+        ...release_plan.external_blocker_items.map((item) => ({
           source: 'docs/product/06-release-plan.md',
           ...item,
         })),
@@ -160,14 +191,18 @@ function buildChecklistBlockers(docGates) {
   if (combined.open_gates) {
     if (release_checklist.open_gates) {
       blockers.push(
-        `Release checklist has ${release_checklist.unchecked} unchecked and `
-        + `${release_checklist.in_progress} in-progress gate(s) in ${release_checklist.source}`,
+        `Release checklist has ${release_checklist.unchecked} unchecked, `
+        + `${release_checklist.in_progress} in-progress, and `
+        + `${release_checklist.external_blockers} externally-blocked checked gate(s) in `
+        + `${release_checklist.source}`,
       );
     }
     if (release_plan.open_gates) {
       blockers.push(
-        `Release plan has ${release_plan.unchecked} unchecked and `
-        + `${release_plan.in_progress} in-progress verification item(s) in ${release_plan.source}`,
+        `Release plan has ${release_plan.unchecked} unchecked, `
+        + `${release_plan.in_progress} in-progress, and `
+        + `${release_plan.external_blockers} externally-blocked checked verification item(s) in `
+        + `${release_plan.source}`,
       );
     }
   }
@@ -272,7 +307,21 @@ export function parseEvidenceInput(parsed) {
     records: normalizeEvidenceRecords(parsed),
     createdAt: parsed.created_at ?? null,
     notes: parsed.notes ?? null,
+    rehearsalOnly: parsed.rehearsal_only === true,
   };
+}
+
+function formatOpenGatePreview(report, limit = 5) {
+  const items = report.release_checklist_gates.combined.open_items.slice(0, limit);
+  if (items.length === 0) return '  open_gate_preview: none';
+  const lines = ['  open_gate_preview:'];
+  for (const item of items) {
+    const text = item.text.length > 160 ? `${item.text.slice(0, 157)}...` : item.text;
+    lines.push(`    - [${item.status}] ${item.source}: ${text}`);
+  }
+  const remaining = report.release_checklist_gates.combined.open_items.length - items.length;
+  if (remaining > 0) lines.push(`    ... ${remaining} more open gate(s) in JSON output`);
+  return lines.join('\n');
 }
 
 function formatValidateOnlySummary(report) {
@@ -283,7 +332,24 @@ function formatValidateOnlySummary(report) {
     `  evidence: present=${counts.present} missing=${counts.missing} invalid=${counts.invalid} rejected=${counts.rejected}`,
     `  checklist: unchecked=${gates.unchecked} in_progress=${gates.in_progress} complete=${gates.complete}`,
     `  external_gates: local_validation_cannot_satisfy=${report.external_gates.local_developer_validation_cannot_satisfy}`,
+    formatOpenGatePreview(report),
   ].join('\n');
+}
+
+export function gapAuditExitCode(report, options = {}) {
+  if (report?.production_ready) return 0;
+  if (!report?.evidence_attestation_complete) return 1;
+  const combined = report.release_checklist_gates?.combined ?? {};
+  if ((combined.unchecked ?? 0) > 0 || (combined.in_progress ?? 0) > 0) return 1;
+  if (
+    options.allowExternalBlockersOnly === true
+    && (combined.external_blockers ?? 0) > 0
+    && (combined.unchecked ?? 0) === 0
+    && (combined.in_progress ?? 0) === 0
+  ) {
+    return 0;
+  }
+  return 1;
 }
 
 export async function main(argv = process.argv.slice(2)) {
@@ -312,22 +378,29 @@ export async function main(argv = process.argv.slice(2)) {
       records: normalized.records,
       createdAt: normalized.createdAt,
       notes: normalized.notes,
+      rehearsalOnly: normalized.rehearsalOnly,
     };
   }
 
   const report = aggregateProductionReadinessGapAudit(input, { profile: opts.profile });
+  const exitOptions = { allowExternalBlockersOnly: opts.allowExternalBlockersOnly };
 
   if (opts.validateOnly) {
     console.log(formatValidateOnlySummary(report));
-    return report.production_ready ? 0 : 1;
+    return gapAuditExitCode(report, exitOptions);
   }
 
   mkdirSync(path.dirname(opts.out), { recursive: true });
   writeFileSync(opts.out, `${JSON.stringify(report, null, 2)}\n`);
+  const counts = report.required_evidence_kinds.counts;
+  const gates = report.release_checklist_gates.combined;
   console.log(
-    `production-readiness-gap-audit: wrote ${opts.out} (production_ready=${report.production_ready})`,
+    `production-readiness-gap-audit: wrote ${opts.out} `
+    + `(production_ready=${report.production_ready}; evidence missing=${counts.missing} `
+    + `invalid=${counts.invalid} rejected=${counts.rejected}; checklist unchecked=${gates.unchecked} `
+    + `in_progress=${gates.in_progress} external_blockers=${gates.external_blockers ?? 0})`,
   );
-  return report.production_ready ? 0 : 1;
+  return gapAuditExitCode(report, exitOptions);
 }
 
 const isCli = process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1]);

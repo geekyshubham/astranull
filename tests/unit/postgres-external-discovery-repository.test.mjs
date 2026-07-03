@@ -26,10 +26,13 @@ const POSTGRES_EXTERNAL_DISCOVERY_SERVICE_METHODS = [
   'createEntity',
   'listCandidates',
   'createCandidate',
+  'ingestDiscoveryCandidates',
   'approveCandidateToTarget',
   'rejectCandidate',
   'patchCandidateState',
   'getDiscoveryInbox',
+  'getDiscoveryReportSummary',
+  'importCandidateToTargetGroup',
   'canImportCandidateToTargetGroup',
   'declaredOnlyModeActive',
 ];
@@ -129,6 +132,51 @@ describe('postgres external discovery repository', () => {
     assert.equal(mapped.entity_id, 'ent_1');
     assert.deepEqual(mapped.root_domains, ['example.com']);
     assert.equal(mapped.created_at, FIXED_NOW);
+  });
+
+  it('inserts discovery entity using caller-supplied entity_id as primary key', async () => {
+    const pool = createRecordingPool((sql, params) => {
+      if (/INSERT INTO discovery_entities/i.test(sql)) {
+        assertParameterized(sql);
+        assertTenantScoped(sql, params);
+        assert.equal(params[0], 'ent_custom_1');
+        return {
+          rows: [
+            {
+              id: 'ent_custom_1',
+              tenant_id: CTX.tenantId,
+              entity_type: 'subsidiary',
+              name: 'Example Sub',
+              display_name: 'Example Subsidiary',
+              parent_entity_id: null,
+              root_domains: ['example.com'],
+              country: 'US',
+              confidence: 0.9,
+              source: 'declared',
+              created_at: new Date(FIXED_NOW),
+              updated_at: new Date(FIXED_NOW),
+            },
+          ],
+        };
+      }
+      return { rows: [] };
+    });
+    const repo = createExternalDiscoveryRepository(pool);
+    const created = await repo.insertEntity(CTX, {
+      entity_id: 'ent_custom_1',
+      entity_type: 'subsidiary',
+      name: 'Example Sub',
+      display_name: 'Example Subsidiary',
+      root_domains: ['example.com'],
+      country: 'US',
+      confidence: 0.9,
+      source: 'declared',
+      created_at: FIXED_NOW,
+      updated_at: FIXED_NOW,
+    });
+    assertTenantWrapped(pool.client);
+    assert.equal(created.id, 'ent_custom_1');
+    assert.equal(created.entity_id, 'ent_custom_1');
   });
 
   it('lists entities with tenant-scoped parameterized sql', async () => {
@@ -302,11 +350,19 @@ describe('postgres external discovery repository', () => {
   });
 
   it('postgres external discovery service adapter exposes expected methods', () => {
-    const services = createPostgresExternalDiscoveryServices({
-      connect: async () => {
-        throw new Error('pool should not connect during signature check');
+    const services = createPostgresExternalDiscoveryServices(
+      {
+        coreCatalog: { addTarget: async () => null, getTargetGroup: async () => null },
+        wafPosture: { createWafAsset: async () => null },
       },
-    });
+      {
+        pool: {
+          connect: async () => {
+            throw new Error('pool should not connect during signature check');
+          },
+        },
+      },
+    );
     assert.deepEqual(
       POSTGRES_EXTERNAL_DISCOVERY_SERVICE_METHODS.sort(),
       Object.keys(services).filter((key) => typeof services[key] === 'function').sort(),

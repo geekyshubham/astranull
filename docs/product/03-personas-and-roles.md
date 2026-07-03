@@ -20,7 +20,9 @@
 | SOC Lead | Approve risky tests, enforce rules, stop tests | SOC Console, Authorization Pack |
 | Customer Success Engineer | Help customers onboard and place agents correctly | Onboarding, Agents, Target Groups |
 | Detection Engineer | Add/maintain vector checks and verdict logic | Check Library, Detection Engine |
-| Platform Admin | Tenant support, operational health, incident response | Admin and Observability |
+| Platform Admin | Tenant support, operational health, incident response | Internal Management and Observability |
+| Billing Operations | Manage subscription status, plan metadata, billing references, and entitlement requests | Internal Management |
+| Security Admin | Review internal audit, legal hold, data export approval, and staff access policy | Internal Management, Audit |
 
 ## RBAC matrix
 
@@ -39,3 +41,18 @@
 | Accept risk | Yes | Yes | No | No | No | No |
 | Manage users | Yes | Yes | No | No | No | No |
 | View audit logs | Yes | Yes | No | Yes | Yes | No |
+
+## Internal staff roles
+
+Customer tenant roles do not grant access to AstraNull internal management. Internal staff roles are assigned through the staff identity provider and apply only to `/internal/*` management surfaces.
+
+| Staff role | Scope |
+|---|---|
+| `internal_admin` | Tenant lifecycle, sign-up review, subscription metadata, entitlements, support owner assignment. |
+| `billing_ops` | Subscription status, billing references, entitlement requests; no SOC execution. |
+| `support_engineer` | Support context, approved owner/admin invites, role correction requests; no subscription or high-scale approval. |
+| `soc_analyst` | High-scale request review, authorization pack validation, monitoring, notes. |
+| `soc_lead` | Final high-scale approval, schedule/start/stop/close, kill-switch decisions. |
+| `security_admin` | Internal audit review, legal hold, data export approval, staff access policy. |
+
+See [Public Landing and Internal Management](13-public-landing-and-internal-management.md) for the staff-only management surface and approval model.

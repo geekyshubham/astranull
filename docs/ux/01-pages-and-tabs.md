@@ -6,19 +6,54 @@ This is the master page map for AstraNull.
 
 | Main page | Who uses it | Purpose |
 |---|---|---|
+| Public Landing | Visitors, prospects, returning users | Explain AstraNull and route to sign-up or login. |
+| Sign-Up Intake | Prospects/customers | Submit account request metadata for review or provisioning. |
 | Dashboard | Everyone | Enterprise readiness overview. |
-| Onboarding | New users | Guided setup: environment, targets, agent, first run. |
+| Onboarding | New users | Guided setup: environment, targets, agent install, heartbeat verification, optional placement test, first safe run. |
 | Target Groups | Engineers, security architects | Define what to validate. |
 | Agents | Engineers, platform teams | Install, monitor, troubleshoot agents. |
 | Checks Library | Security architects, engineers | Understand and enable readiness checks. |
 | Test Runs | Engineers, SOC, auditors | Inspect execution, timeline, evidence, verdicts. |
 | Findings | Security/SRE teams | Triage and remediate gaps. |
-| High-Scale Requests | Customers and SOC | Request, review, approve, execute, close high-scale tests. |
+| High-Scale Requests | Customers | Submit and track high-scale requests; no approval or execution controls. |
 | Reports | Executives, auditors, engineers | Generate reports and evidence packs. |
 | Integrations | Admins | Webhooks, Slack, Teams, SIEM, ticketing, optional future connectors. |
 | Settings | Admins | Users, roles, API keys, SSO, retention, audit logs, compact release evidence summary. |
 | Release Evidence | Owner, admin, SOC, auditor | Metadata-only production release evidence ledger visibility (not production-ready signoff). |
+| Internal Management | AstraNull staff only | Manage sign-up requests, tenants, subscriptions, entitlements, support actions, and internal approvals. |
 | SOC Console | AstraNull internal SOC | Operate high-scale workflow and test monitoring. |
+
+Customer-facing navigation must not include `Internal Management` or `SOC Console`. Those pages are separate staff-only surfaces and must fail closed for customer principals even when accessed by direct URL.
+
+## Public and internal pages
+
+| Page | Audience | Required behavior |
+|---|---|---|
+| Public Landing | Unauthenticated visitors | Show AstraNull product promise and route `Sign up` to intake and `Log in` to the configured IdP. |
+| Sign-Up Intake | Prospects/customers | Capture organization, work email/domain, contact, requested plan, intended use, region, and high-scale interest. |
+| Internal Overview | AstraNull staff | Show pending sign-ups, subscription requests, high-scale reviews, blocked tenants, and support alerts. |
+| Sign-Up Queue | Internal admin/customer operations | Approve, reject, request more information, and provision tenants. |
+| Tenant Detail | Internal admin/support/security | View lifecycle state, subscription, entitlements, owner/admin users, support notes, and audit activity. |
+| Subscription Console | Internal admin/billing operations | Manage plan, limits, billing status, contract references, and effective-date changes. |
+| User Support Console | Internal admin/support | Resend approved invites, disable users, request role corrections, and record support notes. |
+| Approval Queue | Staff roles by request type | Decide sign-up, subscription, connector, export, and high-scale requests with evidence and reason. |
+| Internal Audit | Internal admin/security | Filter internal audit by tenant, actor, action, resource, and time. |
+
+## Onboarding wizard steps
+
+| Step | User action | Platform behavior | Success condition |
+|---|---|---|---|
+| Environment | Create validation scope | Stores environment metadata | At least one environment exists. |
+| Target group | Declare business service | Stores target group | Target group created. |
+| Declared target | Add FQDN/URL/IP | Format validation only | At least one target exists. |
+| Bootstrap token | Generate one-time token | Issues install credential | Token created; install commands shown. |
+| Install agent | Copy Linux/Docker/Helm command | Shows outbound-only install tabs | Optional — agent registration recommended. |
+| Verify heartbeat | Wait on wizard | Polls `GET /v1/agents` until heartbeat or timeout | Online agent with `last_heartbeat_at`; timeout shows friendly troubleshooting empty state with retry and Agents page links. |
+| Placement test | Start optional safe canary run | Starts `path.protected_canary.safe` against declared target | Optional — bounded metadata-only canary to strengthen placement confidence. |
+| First safe run | Start validation | Starts customer-runnable safe check (e.g. `origin.direct_bypass.safe`) | Safe test run created. |
+| Review result | Open runs/evidence/findings | Links to verdict and evidence chain | Verdicted run exists. |
+
+Wizard panels surface **placement confidence** hints (from readiness diagnostics and agent capabilities) on heartbeat verification and placement-test steps. Heartbeat verification does not render raw agent credentials or payloads.
 
 ## Dashboard tabs
 

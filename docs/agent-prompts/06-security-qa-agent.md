@@ -5,7 +5,10 @@ Read:
 1. `docs/security/05-waf-safe-validation-policy.md`
 2. `docs/backend/12-waf-posture-data-model.md`
 3. `docs/backend/13-waf-posture-api-contract.md`
-4. `docs/detection/14-waf-effectiveness-drift.md`
+4. `docs/backend/16-waf-analytics-schema-extensions.md`
+5. `docs/detection/14-waf-effectiveness-drift.md`
+6. `docs/detection/16-waf-scenario-cadence.md`
+7. `docs/product/12-waf-compliance-audit-evidence.md`
 
 Your task:
 

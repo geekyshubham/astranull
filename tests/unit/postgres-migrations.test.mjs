@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
@@ -7,6 +8,7 @@ import {
   getLatestMigrationVersion,
   listMigrationFiles,
   migrationVersionFromFilename,
+  migrationRequiresOutsideTransaction,
   MIGRATION_ADVISORY_LOCK_KEY,
   runMigrations,
 } from '../../src/persistence/postgres/migrations.mjs';
@@ -20,6 +22,9 @@ function createFakeClient({
   applied = new Set(),
   failOnQuery = null,
   schemaMigrationsTableExists = null,
+  invalidIndexes = new Set(),
+  validIndexes = new Set(),
+  onQuery = null,
 } = {}) {
   const queries = [];
   let inTransaction = false;
@@ -28,6 +33,7 @@ function createFakeClient({
     queries,
     async query(text, params) {
       queries.push({ text, params });
+      if (onQuery) onQuery({ text, params, queries, applied, invalidIndexes, validIndexes });
       if (failOnQuery && failOnQuery(text)) {
         throw new Error('migration sql failed');
       }
@@ -47,6 +53,12 @@ function createFakeClient({
       if (/to_regclass\('schema_migrations'\)/.test(text)) {
         return { rows: [{ table_name: tableExists ? 'schema_migrations' : null }] };
       }
+      if (/pg_advisory_lock\(\$1\)/.test(text) && !/pg_advisory_xact_lock/.test(text)) {
+        return { rows: [{ locked: true }] };
+      }
+      if (/pg_advisory_unlock\(\$1\)/.test(text)) {
+        return { rows: [{ unlocked: true }] };
+      }
       if (/SELECT version FROM schema_migrations/.test(text)) {
         if (!tableExists) {
           const err = new Error('relation "schema_migrations" does not exist');
@@ -54,6 +66,30 @@ function createFakeClient({
           throw err;
         }
         return { rows: [...applied].map((version) => ({ version })) };
+      }
+      if (/i\.indisvalid = false/.test(text)) {
+        const indexName = params?.[0];
+        return {
+          rows: invalidIndexes.has(indexName)
+            ? [{ schema_name: 'public', index_name: indexName }]
+            : [],
+        };
+      }
+      if (/DROP INDEX CONCURRENTLY IF EXISTS/.test(text)) {
+        for (const indexName of [...invalidIndexes]) {
+          if (text.includes(indexName)) invalidIndexes.delete(indexName);
+        }
+        return { rows: [] };
+      }
+      if (/CREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY/i.test(text)) {
+        const match = String(text).match(
+          /CREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\s+(?:IF\s+NOT\s+EXISTS\s+)?("?[\w$]+"?)/i,
+        );
+        if (match) validIndexes.add(match[1].replace(/^"|"$/g, ''));
+      }
+      if (/i\.indisvalid = true/.test(text)) {
+        const indexName = params?.[0];
+        return { rows: validIndexes.has(indexName) ? [{ index_name: indexName }] : [] };
       }
       if (/CREATE TABLE schema_migrations/.test(text)) {
         tableExists = true;
@@ -277,6 +313,189 @@ describe('postgres migrations', () => {
     assert.ok(client.queries.every((q) => q.text.trim() !== 'ROLLBACK'));
   });
 
+  it('detects migrations that require outside-transaction execution', () => {
+    assert.equal(
+      migrationRequiresOutsideTransaction('CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_demo ON demo(id);'),
+      true,
+    );
+    assert.equal(migrationRequiresOutsideTransaction('CREATE INDEX IF NOT EXISTS idx_demo ON demo(id);'), false);
+  });
+
+  it('applies CREATE INDEX CONCURRENTLY migration outside an open transaction', async () => {
+    const applied = new Set(['0001_core_validation_loop']);
+    const client = createFakeClient({ applied, schemaMigrationsTableExists: true });
+    const pool = {
+      async query(text) {
+        throw new Error(`unexpected pool query: ${text}`);
+      },
+      async connect() {
+        return client;
+      },
+    };
+    const concurrentSql = [
+      'ALTER TABLE demo ADD COLUMN IF NOT EXISTS created_at timestamptz;',
+      'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_demo ON demo(id);',
+    ].join('\n');
+    const files = [
+      {
+        name: '0097_concurrent.sql',
+        version: '0097_concurrent',
+        path: '/tmp/0097_concurrent.sql',
+        sql: concurrentSql,
+      },
+    ];
+    const { results } = await runMigrations(pool, { migrationsDir: MIGRATIONS_DIR, files });
+    assert.equal(results[0].status, 'applied');
+    assert.ok(applied.has('0097_concurrent'));
+
+    const ddlIdx = queryIndex(client, (t) => /CREATE INDEX CONCURRENTLY/.test(t));
+    assert.ok(ddlIdx >= 0, 'expected concurrent index DDL');
+    const alterIdx = queryIndex(client, (t) => /ALTER TABLE demo ADD COLUMN/.test(t));
+    assert.ok(alterIdx >= 0, 'expected non-concurrent DDL statement to execute separately');
+    assert.ok(alterIdx < ddlIdx, 'expected split statements to preserve migration order');
+    assert.notEqual(alterIdx, ddlIdx, 'outside-transaction migration must split semicolon statements');
+    const commitBeforeDdl = client.queries
+      .slice(0, ddlIdx)
+      .some((q) => q.text.trim() === 'COMMIT');
+    assert.ok(commitBeforeDdl, 'must COMMIT before concurrent index DDL');
+    const beginAfterDdl = client.queries
+      .slice(ddlIdx)
+      .some((q) => q.text.trim() === 'BEGIN');
+    assert.ok(beginAfterDdl, 'must BEGIN a new transaction after concurrent migration');
+    const ddlBetweenBeginCommit = (() => {
+      let openBegin = null;
+      for (const q of client.queries) {
+        const t = q.text.trim();
+        if (t === 'BEGIN') openBegin = client.queries.indexOf(q);
+        if (t === 'COMMIT' && openBegin != null) openBegin = null;
+        if (/CREATE INDEX CONCURRENTLY/.test(q.text) && openBegin != null) return true;
+      }
+      return false;
+    })();
+    assert.equal(ddlBetweenBeginCommit, false, 'concurrent DDL must not run between BEGIN and COMMIT');
+    assert.ok(
+      client.queries.some((q) => /pg_advisory_lock\(\$1\)/.test(q.text) && !/xact/.test(q.text)),
+      'expected session advisory lock around concurrent migration',
+    );
+    assert.ok(
+      client.queries.some((q) => /i\.indisvalid = false/.test(q.text)),
+      'expected invalid index catalog check before concurrent create',
+    );
+    assert.ok(
+      client.queries.some((q) => /i\.indisvalid = true/.test(q.text)),
+      'expected valid index catalog check after concurrent create',
+    );
+  });
+
+  it('drops invalid matching concurrent indexes before rebuilding', async () => {
+    const applied = new Set(['0001_core_validation_loop']);
+    const invalidIndexes = new Set(['idx_demo']);
+    const client = createFakeClient({
+      applied,
+      schemaMigrationsTableExists: true,
+      invalidIndexes,
+    });
+    const pool = {
+      async query(text) {
+        throw new Error(`unexpected pool query: ${text}`);
+      },
+      async connect() {
+        return client;
+      },
+    };
+    const files = [{
+      name: '0097_concurrent.sql',
+      version: '0097_concurrent',
+      path: '/tmp/0097_concurrent.sql',
+      sql: 'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_demo ON demo(id);',
+    }];
+
+    await runMigrations(pool, { migrationsDir: MIGRATIONS_DIR, files });
+
+    const dropIdx = queryIndex(client, (t) => /DROP INDEX CONCURRENTLY IF EXISTS "public"\."idx_demo"/.test(t));
+    const createIdx = queryIndex(client, (t) => /CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_demo/.test(t));
+    assert.ok(dropIdx >= 0, 'expected invalid index to be dropped');
+    assert.ok(createIdx > dropIdx, 'expected rebuild after invalid drop');
+    assert.equal(invalidIndexes.has('idx_demo'), false);
+  });
+
+  it('skips outside-transaction migration when another migrator records it under the session lock', async () => {
+    const applied = new Set(['0001_core_validation_loop']);
+    const client = createFakeClient({
+      applied,
+      schemaMigrationsTableExists: true,
+      onQuery: ({ text }) => {
+        if (/pg_advisory_lock\(\$1\)/.test(text) && !/xact/.test(text)) {
+          applied.add('0097_concurrent');
+        }
+      },
+    });
+    const pool = {
+      async query(text) {
+        throw new Error(`unexpected pool query: ${text}`);
+      },
+      async connect() {
+        return client;
+      },
+    };
+    const files = [{
+      name: '0097_concurrent.sql',
+      version: '0097_concurrent',
+      path: '/tmp/0097_concurrent.sql',
+      sql: 'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_demo ON demo(id);',
+    }];
+
+    const { results } = await runMigrations(pool, { migrationsDir: MIGRATIONS_DIR, files });
+
+    assert.equal(results[0].status, 'skipped');
+    assert.equal(client.queries.some((q) => /CREATE INDEX CONCURRENTLY/.test(q.text)), false);
+  });
+
+  it('refreshes applied migrations after reacquiring the transaction lock', async () => {
+    const applied = new Set(['0001_core_validation_loop']);
+    let xactLockCount = 0;
+    const client = createFakeClient({
+      applied,
+      schemaMigrationsTableExists: true,
+      onQuery: ({ text }) => {
+        if (/pg_advisory_xact_lock/.test(text)) {
+          xactLockCount += 1;
+          if (xactLockCount === 2) applied.add('0098_later');
+        }
+      },
+    });
+    const pool = {
+      async query(text) {
+        throw new Error(`unexpected pool query: ${text}`);
+      },
+      async connect() {
+        return client;
+      },
+    };
+    const files = [
+      {
+        name: '0097_concurrent.sql',
+        version: '0097_concurrent',
+        path: '/tmp/0097_concurrent.sql',
+        sql: 'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_demo ON demo(id);',
+      },
+      {
+        name: '0098_later.sql',
+        version: '0098_later',
+        path: '/tmp/0098_later.sql',
+        sql: 'CREATE TABLE later(id int);',
+      },
+    ];
+
+    const { results } = await runMigrations(pool, { migrationsDir: MIGRATIONS_DIR, files });
+
+    assert.deepEqual(results.map((r) => [r.version, r.status]), [
+      ['0097_concurrent', 'applied'],
+      ['0098_later', 'skipped'],
+    ]);
+    assert.equal(client.queries.some((q) => /CREATE TABLE later/.test(q.text)), false);
+  });
+
   it('rolls back on migration failure', async () => {
     const applied = new Set();
     const client = createFakeClient({
@@ -347,10 +566,77 @@ describe('postgres migrations', () => {
     );
   });
 
+  it('lists WAF add-on postgres parity migration after wave1 extensions', () => {
+    const files = listMigrationFiles(MIGRATIONS_DIR);
+    const versions = files.map((f) => f.version);
+    assert.ok(versions.includes('0010_waf_addon_postgres_parity'));
+    assert.equal(
+      versions.indexOf('0010_waf_addon_postgres_parity'),
+      versions.indexOf('0009_wave1_extensions') + 1,
+    );
+  });
+
+  it('lists WAF orchestrator migration after WAF add-on postgres parity', () => {
+    const files = listMigrationFiles(MIGRATIONS_DIR);
+    const versions = files.map((f) => f.version);
+    assert.ok(versions.includes('0011_waf_orchestrator'));
+    assert.equal(
+      versions.indexOf('0011_waf_orchestrator'),
+      versions.indexOf('0010_waf_addon_postgres_parity') + 1,
+    );
+  });
+
+  it('lists WAF orchestrator execution leases migration after WAF orchestrator', () => {
+    const files = listMigrationFiles(MIGRATIONS_DIR);
+    const versions = files.map((f) => f.version);
+    assert.ok(versions.includes('0012_waf_orchestrator_execution_leases'));
+    assert.equal(
+      versions.indexOf('0012_waf_orchestrator_execution_leases'),
+      versions.indexOf('0011_waf_orchestrator') + 1,
+    );
+  });
+
   it('getLatestMigrationVersion returns last sorted file', () => {
     const files = listMigrationFiles(MIGRATIONS_DIR);
     const latest = getLatestMigrationVersion(files);
-    assert.equal(latest, '0009_wave1_extensions');
+    assert.equal(latest, '0021_internal_management');
     assert.equal(latest, files[files.length - 1].version);
+  });
+
+  it('0010 migration adds notification delivery attempt retry columns', () => {
+    const sql = fs.readFileSync(
+      path.join(MIGRATIONS_DIR, '0010_waf_addon_postgres_parity.sql'),
+      'utf8',
+    );
+    assert.match(sql, /ALTER TABLE notification_delivery_attempts ADD COLUMN IF NOT EXISTS attempt_number INT/);
+    assert.match(sql, /ALTER TABLE notification_delivery_attempts ADD COLUMN IF NOT EXISTS next_retry_at TIMESTAMPTZ/);
+    assert.match(sql, /ALTER TABLE notification_delivery_attempts ADD COLUMN IF NOT EXISTS exhausted BOOLEAN/);
+  });
+
+  it('0011 migration adds WAF orchestrator tables with tenant RLS', () => {
+    const sql = fs.readFileSync(
+      path.join(MIGRATIONS_DIR, '0011_waf_orchestrator.sql'),
+      'utf8',
+    );
+    assert.match(sql, /CREATE TABLE IF NOT EXISTS waf_validation_plans/);
+    assert.match(sql, /CREATE TABLE IF NOT EXISTS waf_baseline_approvals/);
+    assert.match(sql, /CREATE TABLE IF NOT EXISTS waf_retest_requests/);
+    assert.match(sql, /ALTER TABLE waf_baselines ADD COLUMN IF NOT EXISTS updated_at/);
+    assert.match(sql, /tenant_isolation_waf_validation_plans/);
+    assert.match(sql, /fk_waf_retest_requests_drift_event_tenant/);
+  });
+
+  it('0012 migration adds execution lease columns and partial lock indexes', () => {
+    const sql = fs.readFileSync(
+      path.join(MIGRATIONS_DIR, '0012_waf_orchestrator_execution_leases.sql'),
+      'utf8',
+    );
+    assert.match(sql, /ALTER TABLE waf_validation_plans ADD COLUMN IF NOT EXISTS execution_lock_token TEXT/);
+    assert.match(sql, /ALTER TABLE waf_validation_plans ADD COLUMN IF NOT EXISTS execution_lock_expires_at TIMESTAMPTZ/);
+    assert.match(sql, /ALTER TABLE waf_retest_requests ADD COLUMN IF NOT EXISTS execution_lock_token TEXT/);
+    assert.match(sql, /ALTER TABLE waf_retest_requests ADD COLUMN IF NOT EXISTS execution_lock_expires_at TIMESTAMPTZ/);
+    assert.match(sql, /CREATE INDEX IF NOT EXISTS idx_waf_validation_plans_execution_lock/);
+    assert.match(sql, /CREATE INDEX IF NOT EXISTS idx_waf_retest_requests_execution_lock/);
+    assert.match(sql, /WHERE execution_lock_token IS NOT NULL/);
   });
 });

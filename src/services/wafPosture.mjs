@@ -1,11 +1,19 @@
-import { audit } from '../audit.mjs';
+import {
+  audit,
+  getLatestChainedAuditEntry,
+  getLatestChainedAuditEntryForTenant,
+} from '../audit.mjs';
 import {
   ACTION_ITEM_STATUSES,
   assertNoRawWafEvidence,
   buildSiemEventPayload,
   classifyWafPosture,
   createActionItem,
+  deriveControlBypassStatus,
   extractFindingRemediationContext,
+  formatControlBypassUxLabel,
+  mapReasonCodesToControlBypassClasses,
+  normalizeScenarioIntakeInput,
   normalizeWafAssetInput,
   normalizeWafEvidenceSummary,
   normalizeWafValidationRequest,
@@ -13,10 +21,59 @@ import {
   validateActionItem,
   WAF_EXPECTED_ACTIONS,
   WAF_SCENARIO_FAMILIES,
+  WAF_SCENARIO_INTAKE_STAGES,
 } from '../contracts/wafPosture.mjs';
+import {
+  seedWafProductsIfEmpty,
+  summarizeWafProductCatalog,
+} from '../lib/wafProductCatalog.mjs';
+import {
+  buildProviderPollFailure,
+  executeConnectorProviderPoll,
+  shouldAttemptOutboundConnectorPoll,
+} from '../lib/connectorProviders/pollWorker.mjs';
+import { supportsOutboundProviderPoll } from '../lib/connectorProviders/index.mjs';
 import { newId } from '../lib/ids.mjs';
+import { loadSecretEncryptionKey } from '../lib/secrets.mjs';
+import {
+  buildWafReportPayload,
+  custodyAuditMetadata,
+  normalizeWafReportKind,
+  prepareWafReportExport,
+  WAF_REPORT_DRIFT_LIMIT,
+  WAF_REPORT_KINDS,
+} from '../lib/wafReports.mjs';
 import { getStore, persistStore } from '../store.mjs';
+import {
+  executeRemediationDelivery,
+  normalizeRemediationDeliverChannel,
+  resolveRemediationConnectorType,
+} from '../lib/remediationDelivery.mjs';
 import { emitNotification } from './notifications.mjs';
+import { decryptEncryptedSecretForUse } from './secretVault.mjs';
+import {
+  booleanFieldExplicit,
+  deriveWafSignalsFromBoundEvents,
+} from '../lib/wafBoundRunCorrelation.mjs';
+import {
+  buildCorroborationFromEvents,
+  buildWafEvidenceCorroboration,
+  protectedFinalizeEvidenceRequired,
+  stripClientAssertedAgentEvidence,
+} from '../lib/wafProtectedEvidence.mjs';
+import {
+  buildCoverageSummary,
+  buildCriticalityRollup,
+  buildEntityRollup,
+  buildGeographyRollup,
+  buildRiskRoadmap,
+  buildVendorBreakdown,
+  buildVendorConsolidation,
+} from './wafCoverageService.mjs';
+import {
+  computeAssetRiskAssessment,
+  enrichSnapshotWithRisk,
+} from './wafRiskService.mjs';
 
 const PATCHABLE_ASSET_FIELDS = new Set([
   'target_id',
@@ -35,17 +92,23 @@ function ensureStoreShape() {
   const store = getStore();
   const keys = [
     'wafAssets',
+    'wafProducts',
+    'wafScenarioIntakes',
     'wafValidationRuns',
     'wafScenarioResults',
     'wafPostureSnapshots',
     'wafDriftEvents',
+    'wafExceptions',
     'wafConnectors',
     'wafConnectorSnapshots',
     'wafActionItems',
+    'cvePipelineItems',
+    'cveAssetMatches',
   ];
   for (const key of keys) {
     if (!Array.isArray(store[key])) store[key] = [];
   }
+  seedWafProductsIfEmpty(store);
   return store;
 }
 
@@ -107,13 +170,6 @@ function validateTestRunBinding(ctx, testRunId, asset) {
   return { testRun };
 }
 
-const EXTERNAL_WAF_PASS = new Set(['blocked', 'challenge', 'challenged', 'rate_limited', 'filtered']);
-const EXTERNAL_WAF_FAIL = new Set(['allowed', 'reached_origin', 'delivered', 'connected']);
-
-function normalizeExternalResult(value) {
-  return String(value ?? '').trim().toLowerCase();
-}
-
 function probeEventsForRun(ctx, testRunId) {
   return getStore().events.filter(
     (e) =>
@@ -132,114 +188,11 @@ function agentObservationsForRun(ctx, testRunId) {
   );
 }
 
-function hasWafFingerprintHint(metadata) {
-  const md = metadata ?? {};
-  return Boolean(
-    md.waf_fingerprint_detected === true
-    || (typeof md.block_page_fingerprint_hash === 'string' && md.block_page_fingerprint_hash.trim())
-    || (typeof md.waf_product_hint === 'string' && md.waf_product_hint.trim())
-    || (typeof md.detected_vendor === 'string' && md.detected_vendor.trim()),
-  );
-}
-
-function isWafMarkerAgentMetadata(metadata) {
-  const md = metadata ?? {};
-  if (md.waf_marker === true || md.waf_validation_marker === true) return true;
-  if (typeof md.marker_type === 'string' && md.marker_type.trim()) return true;
-  if (md.scenario_family === 'marker') return true;
-  if (md.canary_observation === true && (md.waf_marker === true || md.waf_validation_marker === true)) {
-    return true;
-  }
-  return false;
-}
-
 function deriveWafSignalsFromBoundRun(ctx, testRunId) {
-  const probes = probeEventsForRun(ctx, testRunId);
-  const agents = agentObservationsForRun(ctx, testRunId);
-  const agentsByNonce = new Map();
-  for (const agentEvent of agents) {
-    if (!agentEvent.nonce_hash) continue;
-    const bucket = agentsByNonce.get(agentEvent.nonce_hash) ?? [];
-    bucket.push(agentEvent);
-    agentsByNonce.set(agentEvent.nonce_hash, bucket);
-  }
-
-  let wafDetected = false;
-  let anyPass = false;
-  let validationFailed = false;
-  let originBypassConfirmed = false;
-  let hasExternalProbeEvidence = false;
-  const scenarioResults = [];
-
-  for (const probe of probes) {
-    if (hasWafFingerprintHint(probe.metadata)) {
-      wafDetected = true;
-    }
-
-    const external = normalizeExternalResult(probe.metadata?.external_result);
-    if (!external) continue;
-    hasExternalProbeEvidence = true;
-
-    const nonce = probe.nonce_hash ?? null;
-    const matchingAgents = nonce ? (agentsByNonce.get(nonce) ?? []) : [];
-    const wafMarkerAgents = matchingAgents.filter((a) => isWafMarkerAgentMetadata(a.metadata));
-
-    let passed = null;
-    let observed_action = 'inconclusive';
-    if (EXTERNAL_WAF_FAIL.has(external)) {
-      validationFailed = true;
-      passed = false;
-      observed_action = 'allow';
-      if (external === 'reached_origin' || external === 'delivered') {
-        originBypassConfirmed = true;
-      }
-    } else if (EXTERNAL_WAF_PASS.has(external)) {
-      wafDetected = true;
-      if (wafMarkerAgents.length > 0) {
-        validationFailed = true;
-        passed = false;
-        observed_action = 'allow';
-      } else {
-        anyPass = true;
-        passed = true;
-        observed_action = 'block';
-      }
-    }
-
-    const evidence_summary = {
-      request_id: probe.id,
-      nonce_hash: nonce ?? undefined,
-      marker_result: external,
-      blocked: EXTERNAL_WAF_PASS.has(external),
-      observed_at_agent: wafMarkerAgents.length > 0,
-    };
-
-    scenarioResults.push({
-      scenario_family: 'marker',
-      expected_action: 'block',
-      observed_action,
-      passed,
-      confidence: passed === true ? 0.85 : passed === false ? 0.8 : 0,
-      evidence_summary,
-    });
-  }
-
-  const validationPassed = hasExternalProbeEvidence && anyPass && !validationFailed;
-
-  return {
-    wafDetected,
-    validationPassed,
-    validationFailed,
-    originBypassConfirmed,
-    scenarioResults,
-    source_external: hasExternalProbeEvidence,
-    source_agent: agents.length > 0,
-  };
-}
-
-function booleanFieldExplicit(body, snake, camel) {
-  return Object.prototype.hasOwnProperty.call(body, snake)
-    || Object.prototype.hasOwnProperty.call(body, camel);
+  return deriveWafSignalsFromBoundEvents({
+    probes: probeEventsForRun(ctx, testRunId),
+    agents: agentObservationsForRun(ctx, testRunId),
+  });
 }
 
 const WAF_POSTURE_REMEDIATION_TEMPLATE = 'waf_posture_remediation';
@@ -727,11 +680,16 @@ export function formatWafDriftEvent(record) {
   };
 }
 
-export function listWafDriftEvents(ctx) {
+export function listWafDriftEvents(ctx, options = {}) {
   ensureStoreShape();
-  return getStore()
+  const events = getStore()
     .wafDriftEvents.filter((e) => e.tenant_id === ctx.tenantId)
-    .map((e) => formatWafDriftEvent(e));
+    .sort((a, b) => String(b.created_at ?? '').localeCompare(String(a.created_at ?? '')));
+  const limit = Number.isFinite(Number(options.limit)) && Number(options.limit) > 0
+    ? Math.floor(Number(options.limit))
+    : null;
+  const sliced = limit ? events.slice(0, limit) : events;
+  return sliced.map((e) => formatWafDriftEvent(e));
 }
 
 export function patchWafDriftEvent(ctx, id, body = {}) {
@@ -832,13 +790,34 @@ export function createWafAsset(ctx, body) {
   }
 }
 
+function buildAssetEffectiveness(ctx, assetId, reasonCodes = []) {
+  const codes = Array.isArray(reasonCodes) ? reasonCodes : [];
+  const bypassClasses = mapReasonCodesToControlBypassClasses(codes);
+  const control_bypass_status = deriveControlBypassStatus({ reason_codes: codes });
+  const validationSummary = latestValidationSummaryByAsset(ctx).get(assetId) ?? {};
+  const scenario_pass_rate = typeof validationSummary.scenario_pass_rate === 'number'
+    ? validationSummary.scenario_pass_rate
+    : null;
+  return {
+    scenario_pass_rate,
+    control_bypass_status,
+    control_bypass_label: formatControlBypassUxLabel(control_bypass_status),
+    control_bypass_classes: bypassClasses.map((bypassClass) => ({
+      id: bypassClass.id,
+      label: bypassClass.label,
+    })),
+  };
+}
+
 export function getWafAsset(ctx, id) {
   const asset = findAsset(ctx, id);
   if (!asset) return null;
   const current = getCurrentSnapshot(ctx, id);
+  const reasonCodes = current?.reason_codes ?? [];
   return {
     asset,
     ...(current ? { current_posture: formatSnapshot(current) } : {}),
+    effectiveness: buildAssetEffectiveness(ctx, id, reasonCodes),
   };
 }
 
@@ -852,11 +831,120 @@ function formatSnapshot(snapshot) {
     detected_product: snapshot.detected_product ?? null,
     coverage_required: snapshot.coverage_required,
     risk_score: snapshot.risk_score,
+    ...(Array.isArray(snapshot.risk_factors_json) ? { risk_factors: snapshot.risk_factors_json } : {}),
+    ...(snapshot.priority_band ? { priority_band: snapshot.priority_band } : {}),
+    ...(snapshot.recommended_action ? { recommended_action: snapshot.recommended_action } : {}),
     confidence: snapshot.confidence,
     source_mix: snapshot.source_mix_json ?? {},
     created_at: snapshot.created_at,
     is_current: snapshot.is_current,
   };
+}
+
+function currentSnapshotsByAsset(ctx) {
+  ensureStoreShape();
+  const map = new Map();
+  for (const asset of listWafAssets(ctx)) {
+    const snapshot = getCurrentSnapshot(ctx, asset.id);
+    if (snapshot) map.set(asset.id, snapshot);
+  }
+  return map;
+}
+
+function latestValidationSummaryByAsset(ctx) {
+  const byAsset = new Map();
+  const runs = getStore()
+    .wafValidationRuns.filter(
+      (run) => run.tenant_id === ctx.tenantId && run.status === 'finalized',
+    )
+    .sort((a, b) => String(b.finalized_at ?? '').localeCompare(String(a.finalized_at ?? '')));
+  for (const run of runs) {
+    if (!byAsset.has(run.waf_asset_id)) {
+      byAsset.set(run.waf_asset_id, run.summary_json ?? {});
+    }
+  }
+  return byAsset;
+}
+
+function cveMatchesByAsset(ctx) {
+  const byAsset = new Map();
+  for (const match of getStore().cveAssetMatches ?? []) {
+    if (match.tenant_id !== ctx.tenantId || !match.waf_asset_id) continue;
+    const rows = byAsset.get(match.waf_asset_id) ?? [];
+    rows.push(match);
+    byAsset.set(match.waf_asset_id, rows);
+  }
+  return byAsset;
+}
+
+function findingsByAsset(ctx) {
+  const byAsset = new Map();
+  for (const finding of getStore().findings ?? []) {
+    if (finding.tenant_id !== ctx.tenantId) continue;
+    const checkId = finding.check_id ?? '';
+    const match = checkId.match(/^waf\.posture\.(.+)$/);
+    if (!match) continue;
+    const assetId = match[1];
+    const rows = byAsset.get(assetId) ?? [];
+    rows.push(finding.id);
+    byAsset.set(assetId, rows);
+  }
+  return byAsset;
+}
+
+function actionItemsByAsset(ctx) {
+  const byAsset = new Map();
+  for (const item of getStore().wafActionItems ?? []) {
+    if (item.tenant_id !== ctx.tenantId || !item.waf_asset_id) continue;
+    const rows = byAsset.get(item.waf_asset_id) ?? [];
+    rows.push(item.action_item_id ?? item.id);
+    byAsset.set(item.waf_asset_id, rows);
+  }
+  return byAsset;
+}
+
+function gatherWafAnalyticsContext(ctx, options = {}) {
+  ensureStoreShape();
+  const windowDays = Number(options.window_days ?? options.windowDays ?? 90);
+  const assets = listWafAssets(ctx);
+  const snapshotsByAsset = currentSnapshotsByAsset(ctx);
+  const cutoff = new Date();
+  cutoff.setUTCDate(cutoff.getUTCDate() - Math.max(1, windowDays));
+  const historicalSnapshots = getStore().wafPostureSnapshots.filter(
+    (snapshot) =>
+      snapshot.tenant_id === ctx.tenantId
+      && String(snapshot.created_at) >= cutoff.toISOString(),
+  );
+  return {
+    assets,
+    currentSnapshotsByAsset: snapshotsByAsset,
+    historicalSnapshots,
+    targetGroups: getStore().targetGroups.filter((group) => group.tenant_id === ctx.tenantId),
+    environments: getStore().environments.filter((env) => env.tenant_id === ctx.tenantId),
+    entities: getStore().discoveryEntities?.filter((entity) => entity.tenant_id === ctx.tenantId) ?? [],
+    validationSummaryByAsset: latestValidationSummaryByAsset(ctx),
+    cveMatchesByAsset: cveMatchesByAsset(ctx),
+    findingsByAsset: findingsByAsset(ctx),
+    actionItemsByAsset: actionItemsByAsset(ctx),
+    connectors: getStore().wafConnectors.filter((connector) => connector.tenant_id === ctx.tenantId),
+    driftEvents: getStore().wafDriftEvents.filter((event) => event.tenant_id === ctx.tenantId),
+    windowDays,
+  };
+}
+
+function buildRiskAssessmentForFinalize(ctx, asset, snapshot, summary) {
+  const targetGroup =
+    getStore().targetGroups.find(
+      (group) => group.id === asset.target_group_id && group.tenant_id === ctx.tenantId,
+    ) ?? null;
+  return computeAssetRiskAssessment({
+    asset,
+    snapshot,
+    validationSummary: summary,
+    cveMatches: cveMatchesByAsset(ctx).get(asset.id) ?? [],
+    targetGroup,
+    computedAt: snapshot.created_at,
+  });
 }
 
 export function patchWafAsset(ctx, id, body) {
@@ -931,35 +1019,95 @@ export function patchWafAsset(ctx, id, body) {
   }
 }
 
-export function getWafCoverage(ctx) {
-  ensureStoreShape();
-  const assets = listWafAssets(ctx);
-  const counts = {
-    protected: 0,
-    underprotected: 0,
-    unprotected: 0,
-    unknown: 0,
-    excluded: 0,
-  };
-  for (const asset of assets) {
-    const snap = getCurrentSnapshot(ctx, asset.id);
-    const status = snap?.status ?? asset.status ?? 'unknown';
-    if (Object.prototype.hasOwnProperty.call(counts, status)) {
-      counts[status] += 1;
-    } else {
-      counts.unknown += 1;
-    }
-  }
-  const total_assets = assets.length;
-  const percentages = {};
-  for (const key of Object.keys(counts)) {
-    percentages[key] = total_assets === 0 ? 0 : Math.round((counts[key] / total_assets) * 10000) / 100;
-  }
-  return {
-    total_assets,
-    ...counts,
-    percentages,
-  };
+export function getWafCoverage(ctx, options = {}) {
+  const context = gatherWafAnalyticsContext(ctx, options);
+  return buildCoverageSummary({
+    assets: context.assets,
+    currentSnapshotsByAsset: context.currentSnapshotsByAsset,
+    historicalSnapshots: context.historicalSnapshots,
+    windowDays: context.windowDays,
+  });
+}
+
+export function getWafCoverageVendors(ctx) {
+  const context = gatherWafAnalyticsContext(ctx);
+  return buildVendorBreakdown({
+    assets: context.assets,
+    currentSnapshotsByAsset: context.currentSnapshotsByAsset,
+  });
+}
+
+export function getWafCoverageEntities(ctx, options = {}) {
+  const context = gatherWafAnalyticsContext(ctx, options);
+  return buildEntityRollup({
+    assets: context.assets,
+    currentSnapshotsByAsset: context.currentSnapshotsByAsset,
+    entities: context.entities,
+    targetGroups: context.targetGroups,
+    entityTypeFilter: options.entity_type ?? options.entityType ?? null,
+  });
+}
+
+export function getWafCoverageGeography(ctx, options = {}) {
+  const context = gatherWafAnalyticsContext(ctx, options);
+  return buildGeographyRollup({
+    assets: context.assets,
+    currentSnapshotsByAsset: context.currentSnapshotsByAsset,
+    targetGroups: context.targetGroups,
+    environments: context.environments,
+    entities: context.entities,
+    regionCodeFilter: options.region_code ?? options.regionCode ?? null,
+  });
+}
+
+export function getWafCoverageCriticality(ctx, options = {}) {
+  const context = gatherWafAnalyticsContext(ctx, options);
+  return buildCriticalityRollup({
+    assets: context.assets,
+    currentSnapshotsByAsset: context.currentSnapshotsByAsset,
+    criticalityFilter: options.business_criticality ?? options.criticality ?? null,
+  });
+}
+
+export function getWafRiskRoadmap(ctx, options = {}) {
+  const context = gatherWafAnalyticsContext(ctx, options);
+  return buildRiskRoadmap({
+    assets: context.assets,
+    currentSnapshotsByAsset: context.currentSnapshotsByAsset,
+    validationSummaryByAsset: context.validationSummaryByAsset,
+    cveMatchesByAsset: context.cveMatchesByAsset,
+    targetGroups: context.targetGroups,
+    entities: context.entities,
+    findingsByAsset: context.findingsByAsset,
+    actionItemsByAsset: context.actionItemsByAsset,
+    filters: {
+      entity_id: options.entity_id ?? options.entityId ?? null,
+      region_code: options.region_code ?? options.regionCode ?? null,
+      vendor: options.vendor ?? null,
+      min_score:
+        options.min_score != null
+          ? Number(options.min_score)
+          : options.minScore != null
+            ? Number(options.minScore)
+            : null,
+      limit_per_tier:
+        options.limit_per_tier != null
+          ? Number(options.limit_per_tier)
+          : options.limitPerTier != null
+            ? Number(options.limitPerTier)
+            : 50,
+    },
+  });
+}
+
+export function getWafVendorConsolidation(ctx) {
+  const context = gatherWafAnalyticsContext(ctx);
+  return buildVendorConsolidation({
+    assets: context.assets,
+    currentSnapshotsByAsset: context.currentSnapshotsByAsset,
+    connectors: context.connectors,
+    driftEvents: context.driftEvents,
+  });
 }
 
 export function createWafValidation(ctx, body) {
@@ -1036,28 +1184,7 @@ function parseBooleanField(body, snake, camel, fallback = false) {
   return fallback;
 }
 
-function scenarioSupportsProtectedClaim(normalizedScenarios) {
-  return normalizedScenarios.some(
-    (scenario) =>
-      scenario.passed === true
-      && scenario.evidence_summary_json
-      && Object.keys(scenario.evidence_summary_json).length > 0,
-  );
-}
 
-function manualProtectedEvidenceRequired({
-  validationPassed,
-  usedBoundRunDerivation,
-  normalizedScenarios,
-}) {
-  if (!validationPassed) return null;
-  if (usedBoundRunDerivation) return null;
-  if (scenarioSupportsProtectedClaim(normalizedScenarios)) return null;
-  return {
-    error: 'waf_validation_evidence_required',
-    status: 400,
-  };
-}
 
 function normalizeScenarioResultInput(entry) {
   if (entry === null || entry === undefined || typeof entry !== 'object' || Array.isArray(entry)) {
@@ -1109,7 +1236,15 @@ export function finalizeWafValidation(ctx, id, body = {}) {
     const scenarioInputs = Array.isArray(body.scenario_results) ? body.scenario_results : [];
     const hasExplicitScenarios = scenarioInputs.length > 0;
     let normalizedScenarios = hasExplicitScenarios
-      ? scenarioInputs.map((entry) => normalizeScenarioResultInput(entry))
+      ? scenarioInputs.map((entry) => {
+        const normalized = normalizeScenarioResultInput(entry);
+        return {
+          ...normalized,
+          evidence_summary_json: normalizeWafEvidenceSummary(
+            stripClientAssertedAgentEvidence(normalized.evidence_summary_json),
+          ),
+        };
+      })
       : [];
 
     let wafDetected = parseBooleanField(body, 'waf_detected', 'wafDetected', false);
@@ -1126,8 +1261,12 @@ export function finalizeWafValidation(ctx, id, body = {}) {
     const connectorMode = body.connector_mode ?? body.connectorMode ?? null;
 
     const usedBoundRunDerivation = Boolean(run.test_run_id && !hasExplicitScenarios);
+    let corroboration;
     if (usedBoundRunDerivation) {
-      const derived = deriveWafSignalsFromBoundRun(ctx, run.test_run_id);
+      const probes = probeEventsForRun(ctx, run.test_run_id);
+      const agents = agentObservationsForRun(ctx, run.test_run_id);
+      corroboration = buildWafEvidenceCorroboration({ probes, agents });
+      const derived = deriveWafSignalsFromBoundEvents({ probes, agents });
       normalizedScenarios = derived.scenarioResults.map((entry) => normalizeScenarioResultInput(entry));
       if (!booleanFieldExplicit(body, 'waf_detected', 'wafDetected')) {
         wafDetected = derived.wafDetected;
@@ -1149,10 +1288,17 @@ export function finalizeWafValidation(ctx, id, body = {}) {
       }
     }
 
-    const evidenceGate = manualProtectedEvidenceRequired({
+    if (!corroboration) {
+      corroboration = buildCorroborationFromEvents(
+        getStore().events,
+        run.test_run_id ?? null,
+        normalizedScenarios,
+      );
+    }
+    const evidenceGate = protectedFinalizeEvidenceRequired({
       validationPassed,
-      usedBoundRunDerivation,
       normalizedScenarios,
+      corroboration,
     });
     if (evidenceGate) return evidenceGate;
 
@@ -1177,26 +1323,41 @@ export function finalizeWafValidation(ctx, id, body = {}) {
     }
 
     const snapshotId = newId('id');
-    const snapshot = {
-      id: snapshotId,
-      tenant_id: ctx.tenantId,
-      waf_asset_id: asset.id,
-      status: classification.status,
-      reason_codes: classification.reason_codes,
-      detected_vendor: typeof body.detected_vendor === 'string' ? body.detected_vendor.trim() : null,
-      detected_product: typeof body.detected_product === 'string' ? body.detected_product.trim() : null,
-      coverage_required: asset.expected_waf_required !== false,
-      risk_score: 0,
-      confidence: Number(body.confidence ?? 0) || 0,
-      source_mix_json: {
-        validation: true,
-        external: sourceExternal,
-        agent: sourceAgent,
-        connector: Boolean(body.source_connector),
+    const snapshot = enrichSnapshotWithRisk(
+      {
+        id: snapshotId,
+        tenant_id: ctx.tenantId,
+        waf_asset_id: asset.id,
+        status: classification.status,
+        reason_codes: classification.reason_codes,
+        detected_vendor: typeof body.detected_vendor === 'string' ? body.detected_vendor.trim() : null,
+        detected_product: typeof body.detected_product === 'string' ? body.detected_product.trim() : null,
+        coverage_required: asset.expected_waf_required !== false,
+        risk_score: 0,
+        confidence: Number(body.confidence ?? 0) || 0,
+        source_mix_json: {
+          validation: true,
+          external: sourceExternal,
+          agent: sourceAgent,
+          connector: Boolean(body.source_connector),
+        },
+        created_at: now,
+        is_current: true,
       },
-      created_at: now,
-      is_current: true,
-    };
+      buildRiskAssessmentForFinalize(ctx, asset, {
+        status: classification.status,
+        reason_codes: classification.reason_codes,
+        waf_asset_id: asset.id,
+        created_at: now,
+      }, {
+        waf_detected: wafDetected,
+        validation_passed: validationPassed,
+        validation_failed: validationFailed,
+        origin_bypass_confirmed: originBypassConfirmed,
+        posture_status: classification.status,
+        reason_codes: classification.reason_codes,
+      }),
+    );
     getStore().wafPostureSnapshots.push(snapshot);
 
     const scenarioResultIds = [];
@@ -1451,16 +1612,40 @@ function normalizeConnectorSnapshotSummary(raw) {
   return out;
 }
 
-function providerCapabilities(provider) {
+function providerCapabilities(provider, connector = null) {
   const snapshot_kinds = provider === 'webhook'
     ? ['waf_policy']
     : ['waf_policy', 'cdn_property', 'dns_zone'];
+  const outbound_polling = supportsOutboundProviderPoll(provider)
+    && Boolean(connector?.secret_id);
   return {
     provider,
     read_only_metadata: true,
-    outbound_polling: false,
+    outbound_polling,
     snapshot_kinds,
   };
+}
+
+async function defaultConnectorSecretResolver(ctx, secretId) {
+  const key = loadSecretEncryptionKey();
+  if (!key) return { error: 'encryption_not_configured' };
+  const decrypted = decryptEncryptedSecretForUse(ctx, secretId, key);
+  if (!decrypted || decrypted.error) return { error: 'secret_not_found' };
+  return { plaintext: decrypted.plaintext };
+}
+
+function applyConnectorPollHealth(connector, health, now) {
+  connector.updated_at = now;
+  if (health?.status === 'active' || health?.status === 'degraded') {
+    connector.status = health.status;
+    connector.last_success_at = now;
+    connector.last_error_at = null;
+    return;
+  }
+  if (connector.status !== 'disabled') {
+    connector.status = health?.status ?? 'error';
+  }
+  connector.last_error_at = now;
 }
 
 function findConnector(ctx, id) {
@@ -1590,7 +1775,7 @@ export function validateConnector(ctx, id) {
   }
 
   const readOnly = connector.config_json?.read_only === true;
-  const capabilities = providerCapabilities(connector.provider);
+  const capabilities = providerCapabilities(connector.provider, connector);
   const now = new Date().toISOString();
 
   if (!readOnly) {
@@ -1667,7 +1852,44 @@ function normalizePollSnapshotInput(entry, connectorId) {
   };
 }
 
-export function pollConnector(ctx, id, body = {}) {
+function persistManualConnectorSnapshots(ctx, connector, snapshotInputs, now) {
+  const created = [];
+  const kindCounts = {};
+  for (const entry of snapshotInputs) {
+    const normalized = normalizePollSnapshotInput(entry, connector.id);
+    const record = {
+      id: newId('id'),
+      tenant_id: ctx.tenantId,
+      ...normalized,
+      created_at: now,
+    };
+    getStore().wafConnectorSnapshots.push(record);
+    created.push(formatConnectorSnapshot(record));
+    kindCounts[normalized.snapshot_kind] = (kindCounts[normalized.snapshot_kind] ?? 0) + 1;
+  }
+  return { created, kindCounts };
+}
+
+function buildConnectorPollJob({
+  connectorId,
+  now,
+  status,
+  snapshotCount,
+  health = null,
+  attempts = null,
+}) {
+  return {
+    id: newId('poll'),
+    connector_id: connectorId,
+    status,
+    snapshot_count: snapshotCount,
+    created_at: now,
+    ...(health ? { health } : {}),
+    ...(attempts != null ? { attempts } : {}),
+  };
+}
+
+export async function pollConnector(ctx, id, body = {}, options = {}) {
   ensureStoreShape();
   const connector = findConnector(ctx, id);
   if (!connector) {
@@ -1677,11 +1899,65 @@ export function pollConnector(ctx, id, body = {}) {
     assertSafeConnectorPayload(body);
     const snapshotInputs = Array.isArray(body.snapshots) ? body.snapshots : [];
     const now = new Date().toISOString();
-    const created = [];
-    const kindCounts = {};
+    const secretResolver = options.secretResolver ?? defaultConnectorSecretResolver;
+    const fetchFn = options.fetchFn ?? fetch;
+    const prefetchedMetadata = options.prefetchedMetadata ?? body.prefetched_metadata ?? null;
 
-    for (const entry of snapshotInputs) {
-      const normalized = normalizePollSnapshotInput(entry, connector.id);
+    let outboundHealth = null;
+    let outboundAttempts = null;
+    let outboundSnapshots = [];
+
+    if (shouldAttemptOutboundConnectorPoll(connector, body)) {
+      try {
+        const outbound = await executeConnectorProviderPoll({
+          connector,
+          secretResolver,
+          ctx,
+          fetchFn,
+          prefetchedMetadata,
+          now,
+          maxAttempts: options.maxAttempts,
+        });
+        outboundSnapshots = outbound.snapshots ?? [];
+        outboundHealth = outbound.health ?? null;
+        outboundAttempts = outbound.health?.attempts ?? null;
+      } catch (err) {
+        const failure = buildProviderPollFailure(connector, err, err?.attempts ?? null);
+        applyConnectorPollHealth(connector, failure.health, now);
+        audit({
+          tenant_id: ctx.tenantId,
+          actor_user_id: ctx.userId,
+          actor_role: ctx.role,
+          action: 'connector.poll.failed',
+          resource_type: 'waf_connector',
+          resource_id: connector.id,
+          metadata: {
+            provider: connector.provider,
+            connector_id: connector.id,
+            health_status: failure.health.status,
+            health_code: failure.health.health_code,
+            attempts: failure.health.attempts,
+          },
+        });
+        persistStore();
+        return {
+          error: 'connector_poll_failed',
+          status: failure.health.status === 'rate_limited' ? 429 : 503,
+          message: 'Outbound connector poll failed; manual metadata snapshots remain supported.',
+          health: failure.health,
+        };
+      }
+    }
+
+    const manualResult = snapshotInputs.length > 0
+      ? persistManualConnectorSnapshots(ctx, connector, snapshotInputs, now)
+      : { created: [], kindCounts: {} };
+
+    const providerSnapshots = outboundSnapshots.map((entry) => normalizePollSnapshotInput(entry, connector.id));
+    const created = [...manualResult.created];
+    const kindCounts = { ...manualResult.kindCounts };
+
+    for (const normalized of providerSnapshots) {
       const record = {
         id: newId('id'),
         tenant_id: ctx.tenantId,
@@ -1693,19 +1969,28 @@ export function pollConnector(ctx, id, body = {}) {
       kindCounts[normalized.snapshot_kind] = (kindCounts[normalized.snapshot_kind] ?? 0) + 1;
     }
 
-    connector.last_success_at = now;
-    connector.updated_at = now;
-    if (connector.status !== 'disabled') {
-      connector.status = 'active';
+    if (outboundHealth) {
+      applyConnectorPollHealth(connector, outboundHealth, now);
+    } else if (created.length > 0) {
+      connector.last_success_at = now;
+      connector.updated_at = now;
+      if (connector.status !== 'disabled') {
+        connector.status = 'active';
+      }
+      connector.last_error_at = null;
     }
 
-    const poll_job = {
-      id: newId('poll'),
-      connector_id: connector.id,
-      status: 'completed',
-      snapshot_count: created.length,
-      created_at: now,
-    };
+    const pollStatus = outboundHealth
+      ? (created.length > 0 ? 'completed' : 'completed_empty')
+      : 'completed';
+    const poll_job = buildConnectorPollJob({
+      connectorId: connector.id,
+      now,
+      status: pollStatus,
+      snapshotCount: created.length,
+      health: outboundHealth,
+      attempts: outboundAttempts,
+    });
 
     audit({
       tenant_id: ctx.tenantId,
@@ -1719,6 +2004,8 @@ export function pollConnector(ctx, id, body = {}) {
         connector_id: connector.id,
         snapshot_count: created.length,
         snapshot_kinds: kindCounts,
+        outbound: Boolean(outboundHealth),
+        ...(outboundHealth ? { health_status: outboundHealth.status } : {}),
       },
     });
     persistStore();
@@ -1991,6 +2278,97 @@ export function patchActionItemStatus(ctx, id, body = {}) {
   return { action_item: formatActionItem(record) };
 }
 
+function parseRemediationDryRunDefault(body, options = {}) {
+  if (options.dry_run !== undefined || options.dryRun !== undefined) {
+    const value = options.dry_run ?? options.dryRun;
+    if (typeof value === 'boolean') return value;
+    if (value === '1' || value === 1 || value === 'true') return true;
+    if (value === '0' || value === 0 || value === 'false') return false;
+    return true;
+  }
+  if (body?.dry_run !== undefined || body?.dryRun !== undefined) {
+    const value = body.dry_run ?? body.dryRun;
+    if (typeof value === 'boolean') return value;
+    if (value === '1' || value === 1 || value === 'true') return true;
+    if (value === '0' || value === 0 || value === 'false') return false;
+    return true;
+  }
+  return true;
+}
+
+export async function deliverActionItem(ctx, actionItemId, channel, options = {}) {
+  ensureStoreShape();
+  try {
+    assertNoRawWafEvidence(options);
+  } catch (err) {
+    return contractError(err);
+  }
+
+  const normalizedChannel = normalizeRemediationDeliverChannel(channel);
+  if (!normalizedChannel) {
+    return {
+      error: 'invalid_request',
+      status: 400,
+      message: `channel must be one of: jira, servicenow, slack, webhook, siem.`,
+    };
+  }
+
+  const record = getStore().wafActionItems.find(
+    (item) => item.action_item_id === actionItemId && item.tenant_id === ctx.tenantId,
+  );
+  if (!record) {
+    return { error: 'waf_action_item_not_found', status: 404 };
+  }
+
+  const dryRun = parseRemediationDryRunDefault(options.body, options);
+  const connectorType = resolveRemediationConnectorType(normalizedChannel, options);
+  const actionItem = {
+    ...formatActionItem(record),
+    tenant_id: record.tenant_id,
+    finding_ids: record.finding_ids,
+  };
+
+  let payload;
+  try {
+    payload = buildRemediationPayload(actionItem, connectorType);
+  } catch (err) {
+    return contractError(err, err.status ?? 400);
+  }
+
+  const delivery = await executeRemediationDelivery({
+    channel: normalizedChannel,
+    connectorType,
+    payload,
+    dryRun,
+    deliveryMode: options.deliveryMode,
+    fetchFn: options.fetchFn,
+    destination: options.destination,
+  });
+
+  audit({
+    tenant_id: ctx.tenantId,
+    actor_user_id: ctx.userId,
+    actor_role: ctx.role,
+    action: 'waf.action_item.delivered',
+    resource_type: 'waf_action_item',
+    resource_id: record.action_item_id,
+    metadata: {
+      channel: normalizedChannel,
+      connector: connectorType,
+      status: delivery.status,
+      dry_run: delivery.dry_run,
+      ...(delivery.destination_preview ? { destination_preview: delivery.destination_preview } : {}),
+    },
+  });
+  persistStore();
+  return {
+    delivery: {
+      action_item_id: record.action_item_id,
+      ...delivery,
+    },
+  };
+}
+
 function severityToJiraPriority(severity) {
   const map = { critical: 'Highest', high: 'High', medium: 'Medium', low: 'Low' };
   return map[String(severity ?? '').toLowerCase()] ?? 'Medium';
@@ -2190,7 +2568,241 @@ export function buildRemediationPayload(actionItem, connectorType) {
  * - GET  /v1/waf/action-items       requires waf:read
  * - POST /v1/waf/action-items       requires waf:write
  * - PATCH /v1/waf/action-items/:id  requires waf:write
+ * - POST /v1/waf/action-items/:id/deliver  requires waf:write
  */
+
+export function listWafExceptions(ctx) {
+  ensureStoreShape();
+  const now = Date.now();
+  return getStore()
+    .wafExceptions.filter((entry) => entry.tenant_id === ctx.tenantId)
+    .filter((entry) => {
+      const expiresAt = entry.expires_at ? Date.parse(entry.expires_at) : Number.NaN;
+      return Number.isFinite(expiresAt) && expiresAt > now;
+    })
+    .map((entry) => ({
+      ...(entry.id ? { id: entry.id } : {}),
+      waf_asset_id: entry.waf_asset_id,
+      owner: entry.owner,
+      reason: entry.reason,
+      expires_at: entry.expires_at,
+      scope_hash: entry.scope_hash ?? null,
+      ...(entry.approved_at ? { approved_at: entry.approved_at } : {}),
+    }));
+}
+
+function listCveItemsForWafReport(ctx, assetIds) {
+  ensureStoreShape();
+  const matchedItemIds = new Set(
+    getStore()
+      .cveAssetMatches.filter(
+        (match) => match.tenant_id === ctx.tenantId && assetIds.has(match.waf_asset_id),
+      )
+      .map((match) => match.cve_pipeline_item_id ?? match.cve_item_id)
+      .filter(Boolean),
+  );
+  return getStore()
+    .cvePipelineItems.filter((item) => item.tenant_id === ctx.tenantId)
+    .filter((item) => matchedItemIds.size === 0 || matchedItemIds.has(item.id))
+    .map((item) => ({
+      id: item.id,
+      cve_id: item.cve_id,
+      status: item.status,
+      severity: item.severity ?? null,
+      triage_score: item.triage_score ?? null,
+    }));
+}
+
+function listCveMatchesForWafReport(ctx, assetIds) {
+  ensureStoreShape();
+  return getStore()
+    .cveAssetMatches.filter(
+      (match) => match.tenant_id === ctx.tenantId && assetIds.has(match.waf_asset_id),
+    )
+    .map((match) => ({
+      waf_asset_id: match.waf_asset_id,
+      cve_pipeline_item_id: match.cve_pipeline_item_id ?? match.cve_item_id ?? null,
+      cve_item_id: match.cve_item_id ?? match.cve_pipeline_item_id ?? null,
+    }));
+}
+
+function gatherWafReportSourcesFromStore(ctx) {
+  const assets = listWafAssets(ctx);
+  const assetIds = new Set(assets.map((asset) => asset.id));
+  const snapshotsByAssetId = new Map();
+  for (const asset of assets) {
+    const snapshot = getCurrentSnapshot(ctx, asset.id);
+    if (snapshot) snapshotsByAssetId.set(asset.id, formatSnapshot(snapshot));
+  }
+  const validations = listWafValidations(ctx);
+  const scenarioResultsByRunId = new Map();
+  for (const run of validations) {
+    const detail = getWafValidation(ctx, run.id);
+    scenarioResultsByRunId.set(run.id, detail?.scenario_results ?? []);
+  }
+  const coverage = getWafCoverage(ctx);
+  const analyticsContext = gatherWafAnalyticsContext(ctx);
+  const allDriftEvents = listWafDriftEvents(ctx);
+  const driftEvents = allDriftEvents.slice(0, WAF_REPORT_DRIFT_LIMIT);
+  const driftEventsTruncation = {
+    truncated: allDriftEvents.length > driftEvents.length,
+    limit: WAF_REPORT_DRIFT_LIMIT,
+    total_available: allDriftEvents.length,
+    included_count: driftEvents.length,
+  };
+  return {
+    tenantId: ctx.tenantId,
+    coverage,
+    coverageTrend: coverage.trend ?? [],
+    assets,
+    snapshotsByAssetId,
+    validations,
+    scenarioResultsByRunId,
+    driftEvents,
+    driftEventsTruncation,
+    connectors: listConnectors(ctx),
+    exceptions: listWafExceptions(ctx),
+    cveItems: listCveItemsForWafReport(ctx, assetIds),
+    cveMatches: listCveMatchesForWafReport(ctx, assetIds),
+    riskRoadmap: buildRiskRoadmap({
+      assets: analyticsContext.assets,
+      currentSnapshotsByAsset: analyticsContext.currentSnapshotsByAsset,
+      validationSummaryByAsset: analyticsContext.validationSummaryByAsset,
+      cveMatchesByAsset: analyticsContext.cveMatchesByAsset,
+      targetGroups: analyticsContext.targetGroups,
+      entities: analyticsContext.entities,
+      findingsByAsset: analyticsContext.findingsByAsset,
+      actionItemsByAsset: analyticsContext.actionItemsByAsset,
+      filters: { limit_per_tier: 50 },
+    }),
+    vendorBreakdown: buildVendorBreakdown({
+      assets: analyticsContext.assets,
+      currentSnapshotsByAsset: analyticsContext.currentSnapshotsByAsset,
+    }),
+    geographyRollup: buildGeographyRollup({
+      assets: analyticsContext.assets,
+      currentSnapshotsByAsset: analyticsContext.currentSnapshotsByAsset,
+      targetGroups: analyticsContext.targetGroups,
+      environments: analyticsContext.environments,
+      entities: analyticsContext.entities,
+    }),
+  };
+}
+
+export function composeWafReportExport(ctx, kind, format, payload) {
+  const priorGlobal = getLatestChainedAuditEntry();
+  const priorTenant = getLatestChainedAuditEntryForTenant(ctx.tenantId);
+  const prepared = prepareWafReportExport(ctx, kind, format, payload, {
+    previousAuditHash: priorGlobal?.entry_hash ?? null,
+    previousTenantAuditHash: priorTenant?.entry_hash ?? null,
+  });
+  if (prepared.error) return prepared;
+
+  audit({
+    tenant_id: ctx.tenantId,
+    actor_user_id: ctx.userId,
+    actor_role: ctx.role,
+    action: 'waf.report.exported',
+    resource_type: 'waf_report',
+    resource_id: kind,
+    metadata: custodyAuditMetadata(prepared.custody),
+  });
+  persistStore();
+  return prepared;
+}
+
+export function exportWafReport(ctx, kind, format = 'json') {
+  const normalizedKind = normalizeWafReportKind(kind);
+  if (!WAF_REPORT_KINDS.has(normalizedKind)) {
+    return { error: 'waf_report_kind_invalid', status: 400 };
+  }
+  const sources = gatherWafReportSourcesFromStore(ctx);
+  const payload = buildWafReportPayload(normalizedKind, sources);
+  return composeWafReportExport(ctx, normalizedKind, format, payload);
+}
+
+function formatWafProduct(product) {
+  return {
+    id: product.id,
+    vendor: product.vendor,
+    product: product.product,
+    deployment_type: product.deployment_type,
+    fingerprint_version: product.fingerprint_version,
+    enabled: product.enabled !== false,
+    confidence_rules_json: product.confidence_rules_json ?? {},
+  };
+}
+
+function formatScenarioIntake(record) {
+  return {
+    id: record.id,
+    pattern_title: record.pattern_title,
+    advisory_refs: record.advisory_refs ?? [],
+    proposed_scenario_family: record.proposed_scenario_family ?? null,
+    risk_class: record.risk_class,
+    intake_stage: record.intake_stage,
+    notes: record.notes ?? null,
+    threat_summary: record.threat_summary ?? null,
+    created_at: record.created_at,
+    updated_at: record.updated_at,
+  };
+}
+
+export function listWafProducts(ctx) {
+  ensureStoreShape();
+  const products = getStore().wafProducts.filter((product) => product.enabled !== false);
+  return {
+    items: products.map(formatWafProduct),
+    summary: summarizeWafProductCatalog(products),
+  };
+}
+
+export function listScenarioIntakes(ctx) {
+  ensureStoreShape();
+  const items = getStore()
+    .wafScenarioIntakes
+    .filter((record) => record.tenant_id === ctx.tenantId)
+    .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+    .map(formatScenarioIntake);
+  return { items };
+}
+
+export function submitScenarioIntake(ctx, body = {}) {
+  ensureStoreShape();
+  try {
+    assertNoRawWafEvidence(body);
+    const normalized = normalizeScenarioIntakeInput(body);
+    const now = new Date().toISOString();
+    const id = newId('wafintake');
+    const record = {
+      id,
+      tenant_id: ctx.tenantId,
+      ...normalized,
+      intake_stage: WAF_SCENARIO_INTAKE_STAGES[0],
+      created_at: now,
+      updated_at: now,
+    };
+    getStore().wafScenarioIntakes.push(record);
+    audit({
+      tenant_id: ctx.tenantId,
+      actor_user_id: ctx.userId,
+      actor_role: ctx.role,
+      action: 'waf.scenario_intake.submitted',
+      resource_type: 'waf_scenario_intake',
+      resource_id: id,
+      metadata: {
+        pattern_title: record.pattern_title,
+        advisory_refs: record.advisory_refs,
+        proposed_scenario_family: record.proposed_scenario_family ?? null,
+        risk_class: record.risk_class,
+      },
+    });
+    persistStore();
+    return { intake: formatScenarioIntake(record), status: 'accepted' };
+  } catch (err) {
+    return contractError(err);
+  }
+}
 
 export function disableConnector(ctx, id, body = {}) {
   ensureStoreShape();

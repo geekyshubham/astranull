@@ -20,6 +20,12 @@ import {
   readDebControlText,
   stageNativeAgentTree,
   buildSignablePayload,
+  buildGpgSigningHook,
+  buildCosignSigningHook,
+  buildPackageSigningManifest,
+  DEFAULT_COSIGN_SIGNER_REFERENCE,
+  DEFAULT_GPG_KEY_REFERENCE,
+  PACKAGE_SIGNING_ARTIFACT_TYPE,
   sha256File,
   stableStringify,
   verifyManifestSignature,
@@ -147,6 +153,48 @@ describe('agent package builder', () => {
         process.env.ASTRANULL_AGENT_SIGNING_PRIVATE_KEY = prev;
       }
     }
+  });
+
+  it('writes metadata-only signing manifest with gpg and cosign hooks', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'astranull-agent-signing-'));
+    const result = buildAgentPackage({
+      repoRoot: REPO_ROOT,
+      outputDir: tmp,
+      version: '9.9.9-signing',
+      createdAt: '2026-07-01T12:00:00.000Z',
+      formats: ['deb'],
+      containerDigestSha256: 'd'.repeat(64),
+    });
+
+    assert.ok(result.signingManifestPath);
+    assert.ok(fs.existsSync(result.signingManifestPath));
+    const signing = JSON.parse(fs.readFileSync(result.signingManifestPath, 'utf8'));
+    assert.equal(signing.artifact_type, PACKAGE_SIGNING_ARTIFACT_TYPE);
+    assert.equal(signing.version, '9.9.9-signing');
+    assert.ok(signing.artifacts.deb);
+    assert.equal(signing.artifacts.deb.gpg.hook, 'metadata_only');
+    assert.equal(signing.artifacts.deb.gpg.key_reference, DEFAULT_GPG_KEY_REFERENCE);
+    assert.equal(signing.artifacts.deb.gpg.signed, false);
+    assert.ok(signing.artifacts.container);
+    assert.equal(signing.artifacts.container.cosign.signer_reference, DEFAULT_COSIGN_SIGNER_REFERENCE);
+    assert.equal(signing.artifacts.container.digest_sha256, 'd'.repeat(64));
+
+    const gpgHook = buildGpgSigningHook({ gpgKeyReference: 'gpg://custom/key' });
+    const cosignHook = buildCosignSigningHook({ cosignSignerReference: 'cosign://custom/signer' });
+    assert.equal(gpgHook.fingerprint_sha256.length, 64);
+    assert.equal(cosignHook.signer_reference, 'cosign://custom/signer');
+
+    const manifest = buildPackageSigningManifest('1.0.0', {
+      deb: {
+        format: 'deb',
+        name: 'astranull-agent_1.0.0_all.deb',
+        sha256: 'a'.repeat(64),
+        size: 42,
+        gpg: gpgHook,
+      },
+    });
+    assert.equal(manifest.artifacts.deb.gpg.key_reference, 'gpg://custom/key');
+    assertNoSecrets(JSON.stringify(signing), 'signing manifest');
   });
 
   it('agent verifier accepts signed package manifest and tarball', () => {

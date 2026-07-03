@@ -7,6 +7,7 @@ import { PRODUCTION_RELEASE_EVIDENCE_KINDS } from '../../src/contracts/productio
 import {
   aggregateProductionReadinessGapAudit,
   EXTERNAL_PRODUCTION_GATE_CATEGORIES,
+  gapAuditExitCode,
   loadReleaseDocGateCounts,
   main,
   parseArgs,
@@ -108,6 +109,7 @@ describe('production readiness gap audit', () => {
       releaseId: null,
       profile: DEFAULT_STAGING_READINESS_PROFILE,
       validateOnly: false,
+      allowExternalBlockersOnly: false,
       help: false,
     });
     assert.deepEqual(parseArgs(['--evidence', 'bundle.json', '--validate-only']), {
@@ -116,6 +118,7 @@ describe('production readiness gap audit', () => {
       releaseId: null,
       profile: DEFAULT_STAGING_READINESS_PROFILE,
       validateOnly: true,
+      allowExternalBlockersOnly: false,
       help: false,
     });
     assert.equal(parseArgs(['--profile', 'high-scale-ga']).profile, 'high-scale-ga');
@@ -127,16 +130,24 @@ describe('production readiness gap audit', () => {
 - [ ] unchecked item
 - [~] in progress item
 - [x] done item
+- [x] checked but **Remaining (external):** staging signoff
 `);
     assert.deepEqual(counts, {
       unchecked: 1,
       in_progress: 1,
-      complete: 1,
+      complete: 2,
+      external_blockers: 1,
       open_gates: true,
-      total_items: 3,
+      total_items: 4,
       open_items: [
         { status: 'unchecked', text: 'unchecked item' },
         { status: 'in_progress', text: 'in progress item' },
+      ],
+      external_blocker_items: [
+        {
+          status: 'external_blocker',
+          text: 'checked but **Remaining (external):** staging signoff',
+        },
       ],
     });
   });
@@ -217,15 +228,41 @@ Not a checklist - [ ] fake
     );
   });
 
+  it('exits zero when evidence is complete and only external checklist blockers remain', () => {
+    const records = completeEvidenceRecords(PRODUCTION_RELEASE_EVIDENCE_KINDS).map((entry) => ({
+      ...entry,
+      status: 'accepted',
+    }));
+    const report = aggregateProductionReadinessGapAudit(
+      { releaseId: 'rel_external_only', records },
+      {
+        releaseChecklistMarkdown: '- [x] OIDC ready. **Remaining (external):** IdP signoff\n',
+        releasePlanMarkdown: '- [x] release verification complete\n',
+      },
+    );
+
+    assert.equal(report.evidence_attestation_complete, true);
+    assert.equal(report.production_ready, false);
+    assert.equal(report.release_checklist_gates.combined.external_blockers, 1);
+    assert.equal(gapAuditExitCode(report, { allowExternalBlockersOnly: true }), 0);
+    assert.equal(gapAuditExitCode(report), 1);
+  });
+
   it('keeps production_ready false when evidence is complete but checklist gates remain open', () => {
     const records = completeEvidenceRecords(PRODUCTION_RELEASE_EVIDENCE_KINDS).map((entry) => ({
       ...entry,
       status: 'accepted',
     }));
-    const report = aggregateProductionReadinessGapAudit({
-      releaseId: 'rel_complete_local',
-      records,
-    });
+    const report = aggregateProductionReadinessGapAudit(
+      {
+        releaseId: 'rel_complete_local',
+        records,
+      },
+      {
+        releaseChecklistMarkdown: '- [~] placement review UX still open\n',
+        releasePlanMarkdown: '- [x] release verification complete\n',
+      },
+    );
 
     assert.equal(report.evidence_attestation_complete, true);
     assert.equal(report.checklist_gates_open, true);
@@ -250,12 +287,23 @@ Not a checklist - [ ] fake
     );
   });
 
-  it('validate-only prints summary and exits nonzero when not production ready', async () => {
+  it('validate-only prints summary and exits nonzero when release gates remain open', async () => {
     const dir = tempDir();
     const out = path.join(dir, 'gap-audit.json');
-    const code = await main(['--validate-only', '--out', out, '--release-id', 'rel_validate']);
-    assert.equal(code, 1);
+    const logs = [];
+    const originalLog = console.log;
+    console.log = (message) => logs.push(String(message));
+    try {
+      const code = await main(['--validate-only', '--out', out, '--release-id', 'rel_validate']);
+      assert.equal(code, 1);
+    } finally {
+      console.log = originalLog;
+    }
     assert.equal(existsSync(out), false);
+    const summary = logs.join('\n');
+    assert.match(summary, /production_ready=false/);
+    assert.match(summary, /open_gate_preview:/);
+    assert.match(summary, /open_gate_preview: (none|docs\/release-checklist\.md|docs\/product\/06-release-plan\.md)/);
   });
 
   it('CLI exits nonzero for malformed evidence JSON', async () => {
@@ -286,19 +334,32 @@ Not a checklist - [ ] fake
     );
   });
 
-  it('writes metadata-only gap audit output with exit code one when not production ready', async () => {
+  it('writes metadata-only gap audit output with exit code one when evidence inventory is incomplete', async () => {
     const dir = tempDir();
     const out = path.join(dir, 'gap-audit.json');
-    const code = await main(['--out', out, '--release-id', 'rel_write']);
+    const logs = [];
+    const originalLog = console.log;
+    console.log = (message) => logs.push(String(message));
+    let code;
+    try {
+      code = await main(['--out', out, '--release-id', 'rel_write']);
+    } finally {
+      console.log = originalLog;
+    }
     assert.equal(code, 1);
     assert.equal(existsSync(out), true);
+    assert.match(logs.join('\n'), /checklist unchecked=\d+ in_progress=\d+/);
     const report = JSON.parse(readFileSync(out, 'utf8'));
     assert.equal(report.artifact_type, 'production_readiness_gap_audit');
     assert.equal(report.production_ready, false);
     assert.ok(report.required_evidence_kinds.counts);
     assert.ok(report.release_checklist_gates.combined);
-    assert.equal(report.release_checklist_gates.combined.open_gates, true);
-    assert.equal(loadReleaseDocGateCounts().combined.open_gates, true);
+    assert.equal(typeof report.release_checklist_gates.combined.open_gates, 'boolean');
+    const liveGates = loadReleaseDocGateCounts();
+    assert.equal(liveGates.combined.open_gates, false);
+    assert.equal(liveGates.combined.external_blockers, 0);
+    assert.equal(liveGates.combined.unchecked, 0);
+    assert.equal(liveGates.combined.in_progress, 0);
   });
 
   it('preserves invalid_fields on required_evidence_kinds.invalid in gap reports', () => {
@@ -327,6 +388,46 @@ Not a checklist - [ ] fake
     assert.ok(
       invalid.invalid_fields.some((entry) => entry.field === 'adapter_type'),
       `expected adapter_type in invalid_fields: ${JSON.stringify(invalid.invalid_fields)}`,
+    );
+  });
+
+  it('treats incomplete staging E2E matrix evidence as invalid production evidence', () => {
+    const report = aggregateProductionReadinessGapAudit(
+      {
+        releaseId: 'rel_incomplete_staging_matrix',
+        records: [{
+          kind: 'staging_e2e_matrix',
+          status: 'accepted',
+          evidence: {
+            ...STAGING_E2E_MATRIX,
+            environment: 'local-staging',
+            overall_status: 'incomplete',
+            scenarios: [
+              { scenario_id: 'oidc_login', status: 'not_run' },
+              { scenario_id: 'safe_validation_loop', status: 'passed' },
+            ],
+          },
+        }],
+      },
+      {
+        requiredKinds: ['staging_e2e_matrix'],
+        ...closedChecklistOptions,
+      },
+    );
+
+    assert.equal(report.evidence_attestation_complete, false);
+    assert.equal(report.production_ready, false);
+    const invalid = report.required_evidence_kinds.invalid.find((entry) => entry.kind === 'staging_e2e_matrix');
+    assert.ok(invalid, 'expected staging_e2e_matrix in invalid list');
+    assert.ok(
+      invalid.invalid_fields.some(
+        (entry) => entry.field === 'overall_status' && entry.reason === 'matrix_not_passed',
+      ),
+    );
+    assert.ok(
+      invalid.invalid_fields.some(
+        (entry) => entry.field === 'scenarios[0].status' && entry.reason === 'scenario_not_passed',
+      ),
     );
   });
 

@@ -12,6 +12,8 @@ export const WAF_POSTURE_REASON_CODES = Object.freeze([
   'scenario_category_failed',
   'origin_bypass_confirmed',
   'waf_fingerprint_lost',
+  'fingerprint_lost',
+  'policy_detached',
   'vendor_changed_unapproved',
   'rule_count_decreased',
   'rule_mode_changed',
@@ -49,6 +51,76 @@ export const WAF_SCENARIO_FAMILIES = Object.freeze([
   'protocol_evasion_marker',
   'rate_limit_marker',
   'origin_bypass',
+  'block_page_expectation',
+  'content_type_confusion_marker',
+  'http2_parser_marker',
+  'bot_challenge_marker',
+]);
+
+export const WAF_SCENARIO_INTAKE_STAGES = Object.freeze([
+  'intake',
+  'safety_review',
+  'catalog_update',
+  'rollout',
+]);
+
+export const SCENARIO_INTAKE_RISK_CLASSES = Object.freeze([
+  'metadata_only',
+  'safe',
+  'soc_gated',
+  'manual_review_required',
+]);
+
+export const CONTROL_BYPASS_STATUSES = Object.freeze([
+  'none',
+  'suspected',
+  'confirmed',
+]);
+
+/** Control-bypass taxonomy — umbrella framing for CDN/WAF protection gaps (metadata-only detection). */
+export const CONTROL_BYPASS_CLASSES = Object.freeze([
+  {
+    id: 'direct_origin_reachability',
+    label: 'Direct origin reachability',
+    description: 'Declared WAF/CDN protection does not block traffic before origin.',
+    detection_method: 'Origin-bypass safe check + agent observation',
+    reason_codes: ['origin_bypass_confirmed'],
+  },
+  {
+    id: 'unproxied_dns_grey_cloud',
+    label: 'Unproxied DNS / grey-cloud asset',
+    description: 'DNS or connector signals show the asset is not fully proxied.',
+    detection_method: 'Connector DNS summary + fingerprint loss',
+    reason_codes: ['waf_fingerprint_lost', 'fingerprint_lost'],
+  },
+  {
+    id: 'cdn_present_waf_unvalidated',
+    label: 'CDN present, WAF not validated',
+    description: 'Edge fingerprint exists but blocking validation has not passed.',
+    detection_method: 'Fingerprint without blocking validation',
+    reason_codes: ['marker_rule_not_blocking', 'monitor_only_behavior', 'insufficient_validation_evidence'],
+  },
+  {
+    id: 'allowlisted_probe_path',
+    label: 'Allowlisted probe/source path',
+    description: 'Marker allowed despite WAF fingerprint — allowlisting invalidates validation.',
+    detection_method: 'Marker allowed despite WAF fingerprint',
+    reason_codes: ['monitor_only_behavior'],
+  },
+  {
+    id: 'host_sni_mismatch',
+    label: 'Host/SNI mismatch to origin',
+    description: 'TLS/SNI or host routing reaches origin without expected edge policy.',
+    detection_method: 'Origin-bypass + TLS metadata',
+    reason_codes: ['origin_bypass_confirmed'],
+  },
+  {
+    id: 'policy_detached_hostname',
+    label: 'Policy detached from hostname',
+    description: 'Connector snapshot drift shows WAF policy no longer attached to the asset.',
+    detection_method: 'Connector snapshot drift',
+    reason_codes: ['waf_fingerprint_lost', 'fingerprint_lost', 'policy_detached'],
+  },
 ]);
 
 export const WAF_RISK_CLASSES = Object.freeze([
@@ -156,6 +228,8 @@ const CUSTOMER_SAFE_MARKER_TYPES = new Set(WAF_MARKER_TYPES);
 
 const EVIDENCE_SUMMARY_ALLOWLIST = new Set([
   'request_id',
+  'test_run_id',
+  'probe_job_id',
   'nonce_hash',
   'scenario_id',
   'scenario_family',
@@ -190,7 +264,7 @@ const MONITOR_ONLY_CONNECTOR_MODES = new Set([
   'count',
 ]);
 
-function normalizeEvidenceKey(key) {
+export function normalizeEvidenceKey(key) {
   return String(key)
     .replace(/([a-z])([A-Z])/g, '$1_$2')
     .replace(/[^A-Za-z0-9]+/g, '_')
@@ -1007,4 +1081,156 @@ export function buildSiemEventPayload(event = {}) {
 
   assertNoRawWafEvidence(payload);
   return payload;
+}
+
+const CONTROL_BYPASS_CONFIRMED_REASONS = new Set([
+  'origin_bypass_confirmed',
+  'policy_detached',
+]);
+
+const CONTROL_BYPASS_SUSPECTED_REASONS = new Set([
+  'marker_rule_not_blocking',
+  'monitor_only_behavior',
+  'waf_fingerprint_lost',
+  'fingerprint_lost',
+  'scenario_category_failed',
+  'insufficient_validation_evidence',
+]);
+
+const SCENARIO_INTAKE_FORBIDDEN_KEYS = new Set([
+  'exploit_code',
+  'exploit_payload',
+  'raw_payload',
+  'payload',
+  'request_body',
+  'response_body',
+  'poc_code',
+  'attack_script',
+]);
+
+const ADVISORY_REF_PATTERN = /^(CVE-\d{4}-\d{4,}|advisory:[a-z0-9._-]+|bulletin:[a-z0-9._-]+)$/i;
+
+export function mapReasonCodesToControlBypassClasses(reasonCodes = []) {
+  const normalized = new Set(
+    (Array.isArray(reasonCodes) ? reasonCodes : [])
+      .map((code) => String(code).trim())
+      .filter(Boolean),
+  );
+  if (normalized.size === 0) return [];
+  return CONTROL_BYPASS_CLASSES.filter((bypassClass) =>
+    bypassClass.reason_codes.some((code) => normalized.has(code)),
+  );
+}
+
+export function deriveControlBypassStatus({
+  reason_codes: reasonCodes = [],
+  origin_bypass_confirmed: originBypassConfirmed = false,
+  marker_validation_failed: markerValidationFailed = false,
+} = {}) {
+  const codes = new Set(
+    (Array.isArray(reasonCodes) ? reasonCodes : [])
+      .map((code) => String(code).trim())
+      .filter(Boolean),
+  );
+  if (originBypassConfirmed) codes.add('origin_bypass_confirmed');
+  if (markerValidationFailed) codes.add('marker_rule_not_blocking');
+
+  if ([...codes].some((code) => CONTROL_BYPASS_CONFIRMED_REASONS.has(code))) {
+    return 'confirmed';
+  }
+  if ([...codes].some((code) => CONTROL_BYPASS_SUSPECTED_REASONS.has(code))) {
+    return 'suspected';
+  }
+  return 'none';
+}
+
+export function formatControlBypassUxLabel(status) {
+  const key = String(status ?? 'none').trim().toLowerCase();
+  if (key === 'confirmed') return 'Control bypass confirmed';
+  if (key === 'suspected') return 'Control bypass suspected';
+  return 'No control bypass detected';
+}
+
+export function normalizeScenarioIntakeInput(input) {
+  if (input === null || input === undefined || typeof input !== 'object' || Array.isArray(input)) {
+    const err = new Error('Scenario intake input must be a plain object.');
+    err.code = 'invalid_scenario_intake';
+    throw err;
+  }
+  assertNoRawWafEvidence(input);
+
+  for (const [key, value] of Object.entries(input)) {
+    const normalizedKey = normalizeEvidenceKey(key);
+    if (
+      SCENARIO_INTAKE_FORBIDDEN_KEYS.has(normalizedKey)
+      || normalizedKey.includes('exploit')
+      || normalizedKey.startsWith('raw_')
+    ) {
+      const err = new Error(`Forbidden scenario intake field: ${key}`);
+      err.code = 'unsafe_scenario_intake';
+      throw err;
+    }
+    if (value !== null && typeof value === 'object') {
+      assertNoRawWafEvidence(value);
+    }
+  }
+
+  const pattern_title = typeof input.pattern_title === 'string' ? input.pattern_title.trim() : '';
+  if (!pattern_title) {
+    const err = new Error('pattern_title is required.');
+    err.code = 'invalid_scenario_intake';
+    throw err;
+  }
+
+  const advisory_refs_raw = Array.isArray(input.advisory_refs) ? input.advisory_refs : [];
+  const advisory_refs = [...new Set(
+    advisory_refs_raw
+      .map((ref) => String(ref).trim())
+      .filter(Boolean),
+  )];
+  if (advisory_refs.length === 0) {
+    const err = new Error('advisory_refs must include at least one CVE, advisory, or bulletin reference.');
+    err.code = 'invalid_scenario_intake';
+    throw err;
+  }
+  for (const ref of advisory_refs) {
+    if (!ADVISORY_REF_PATTERN.test(ref)) {
+      const err = new Error(
+        `advisory_refs entries must match CVE-YYYY-NNNN, advisory:<id>, or bulletin:<id>. Got: ${ref}`,
+      );
+      err.code = 'invalid_scenario_intake';
+      throw err;
+    }
+  }
+
+  let proposed_scenario_family = null;
+  if (input.proposed_scenario_family !== undefined && input.proposed_scenario_family !== null) {
+    proposed_scenario_family = String(input.proposed_scenario_family).trim();
+    if (!WAF_SCENARIO_FAMILIES.includes(proposed_scenario_family)) {
+      const err = new Error(`proposed_scenario_family must be one of: ${WAF_SCENARIO_FAMILIES.join(', ')}.`);
+      err.code = 'invalid_scenario_intake';
+      throw err;
+    }
+  }
+
+  const risk_class = String(input.risk_class ?? 'metadata_only').trim();
+  if (!SCENARIO_INTAKE_RISK_CLASSES.includes(risk_class)) {
+    const err = new Error(`risk_class must be one of: ${SCENARIO_INTAKE_RISK_CLASSES.join(', ')}.`);
+    err.code = 'invalid_scenario_intake';
+    throw err;
+  }
+
+  const notes = typeof input.notes === 'string' ? input.notes.trim().slice(0, 2000) : '';
+  const threat_summary = typeof input.threat_summary === 'string'
+    ? input.threat_summary.trim().slice(0, 2000)
+    : '';
+
+  return {
+    pattern_title,
+    advisory_refs,
+    ...(proposed_scenario_family ? { proposed_scenario_family } : {}),
+    risk_class,
+    ...(notes ? { notes } : {}),
+    ...(threat_summary ? { threat_summary } : {}),
+  };
 }

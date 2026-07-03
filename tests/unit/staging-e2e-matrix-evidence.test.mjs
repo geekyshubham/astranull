@@ -130,6 +130,33 @@ describe('staging e2e matrix evidence validator', () => {
     assert.ok(validation.validation_gaps.includes('failed_scenario:safe_validation_loop'));
   });
 
+  it('allows local-staging matrices to record external scenarios as not_run without fabricating a pass', async () => {
+    const evidence = validMatrixEvidence({
+      environment: 'local-staging',
+      scenarios: REQUIRED_SCENARIOS.map((scenarioId) => (
+        ['safe_validation_loop', 'verdict_explanation', 'report_export_custody'].includes(scenarioId)
+          ? passedScenario(scenarioId, { evidence_uri: `evidence://local-staging/smoke/${scenarioId}` })
+          : passedScenario(scenarioId, { status: 'not_run' })
+      )),
+    });
+    const validation = validateStagingE2eMatrixEvidence(evidence);
+    assert.equal(validation.ok, false);
+    assert.equal(validation.overall_status, 'incomplete');
+    assert.deepEqual(validation.failed_scenarios, []);
+    assert.ok(validation.validation_gaps.includes('oidc_login.status'));
+    assert.ok(validation.validation_gaps.includes('signed_probe_worker.status'));
+
+    const dir = tempDir();
+    const input = path.join(dir, 'input.json');
+    const out = path.join(dir, 'artifact.json');
+    writeJson(input, evidence);
+    const code = await main(['--input', input, '--out', out]);
+    assert.equal(code, 0);
+    const artifact = JSON.parse(readFileSync(out, 'utf8'));
+    assert.equal(artifact.validation.ok, false);
+    assert.equal(artifact.overall_status, 'incomplete');
+  });
+
   it('rejects missing top-level fields and signoff metadata', () => {
     const evidence = validMatrixEvidence({
       release_id: '',

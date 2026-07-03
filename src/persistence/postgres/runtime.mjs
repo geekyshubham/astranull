@@ -22,6 +22,8 @@ import { createHighScaleRepository } from './highScaleRepository.mjs';
 import { createProductionReleaseEvidenceRepository } from './productionReleaseEvidenceRepository.mjs';
 import { createRetentionRepository } from './retentionRepository.mjs';
 import { createWafPostureRepository } from './wafPostureRepository.mjs';
+import { createWafOrchestratorRepository } from './wafOrchestratorRepository.mjs';
+import { createInternalManagementRepository } from './internalManagementRepository.mjs';
 import {
   createPostgresAgentServices,
   createPostgresAuthServices,
@@ -32,16 +34,21 @@ import {
   createPostgresNotificationServices,
   createPostgresAgentUpdateServices,
   createPostgresStateServices,
+  createPostgresPlacementServices,
   createPostgresProbeJobServices,
   createPostgresHighScaleServices,
   createPostgresProductionReleaseEvidenceServices,
   createPostgresRetentionServices,
   createPostgresWafPostureServices,
+  createPostgresWafOrchestratorServices,
+  createPostgresInternalManagementServices,
 } from './serviceAdapters.mjs';
 import { createPostgresCvePipelineServices } from './cvePipelineServiceAdapters.mjs';
 import { createPostgresExternalDiscoveryServices } from './externalDiscoveryServiceAdapters.mjs';
 import { createPostgresSupplyChainRiskServices } from './supplyChainRiskServiceAdapters.mjs';
 import { createPostgresActionItemServices } from './actionItemServiceAdapters.mjs';
+import { createPostgresWafCoverageRollupServices } from './wafCoverageRollupServiceAdapters.mjs';
+import { createPostgresWafDriftServices } from './wafDriftServiceAdapters.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -64,6 +71,8 @@ export const POSTGRES_RUNTIME_REPOSITORY_KEYS = Object.freeze([
   'productionReleaseEvidence',
   'retention',
   'wafPosture',
+  'wafOrchestrator',
+  'internalManagement',
 ]);
 
 /**
@@ -89,6 +98,8 @@ const DEFAULT_REPOSITORY_FACTORIES = {
   productionReleaseEvidence: createProductionReleaseEvidenceRepository,
   retention: createRetentionRepository,
   wafPosture: createWafPostureRepository,
+  wafOrchestrator: createWafOrchestratorRepository,
+  internalManagement: createInternalManagementRepository,
 };
 
 /**
@@ -172,6 +183,7 @@ export async function createPostgresRuntime(env = process.env, options = {}) {
     const notificationServices = createPostgresNotificationServices(repositories);
     const agentUpdateServices = createPostgresAgentUpdateServices(repositories);
     const stateServices = createPostgresStateServices(repositories);
+    const placementServices = createPostgresPlacementServices(repositories);
     const probeJobServices = createPostgresProbeJobServices(repositories);
     const highScaleServices = createPostgresHighScaleServices(repositories, {
       notifications: notificationServices,
@@ -179,10 +191,17 @@ export async function createPostgresRuntime(env = process.env, options = {}) {
     const productionReleaseEvidenceServices =
       createPostgresProductionReleaseEvidenceServices(repositories);
     const wafPostureServices = createPostgresWafPostureServices(repositories);
+    const wafOrchestratorServices = createPostgresWafOrchestratorServices(repositories, {
+      ...(options.wafOrchestratorServiceOptions ?? {}),
+      testRuns: validationServices.testRuns,
+    });
     const cvePipelineServices = createPostgresCvePipelineServices(pool);
-    const externalDiscoveryServices = createPostgresExternalDiscoveryServices(pool);
+    const externalDiscoveryServices = createPostgresExternalDiscoveryServices(repositories, { pool });
     const supplyChainRiskServices = createPostgresSupplyChainRiskServices(pool);
     const actionItemServices = createPostgresActionItemServices(pool);
+    const wafDriftServices = createPostgresWafDriftServices(repositories);
+    const wafCoverageRollupServices = createPostgresWafCoverageRollupServices(repositories);
+    const internalManagementServices = createPostgresInternalManagementServices(repositories);
     const services = {
       ...catalogServices,
       ...authServices,
@@ -193,15 +212,21 @@ export async function createPostgresRuntime(env = process.env, options = {}) {
       notifications: notificationServices,
       agentUpdates: agentUpdateServices,
       state: stateServices,
+      placement: placementServices,
       probeJobs: probeJobServices,
       highScale: highScaleServices,
       productionReleaseEvidence: productionReleaseEvidenceServices,
       retention: retentionServices,
       wafPosture: wafPostureServices,
+      wafDrift: wafDriftServices,
+      wafCoverageRollup: wafCoverageRollupServices,
+      wafOrchestrator: wafOrchestratorServices,
       cvePipeline: cvePipelineServices,
       externalDiscovery: externalDiscoveryServices,
       supplyChainRisk: supplyChainRiskServices,
       actionItems: actionItemServices,
+      internalManagement: internalManagementServices,
+      signupIntake: internalManagementServices,
       audit: repositories.audit,
     };
 

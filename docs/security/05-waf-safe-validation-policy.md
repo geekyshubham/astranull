@@ -41,7 +41,7 @@ Represent scenario families like this:
 
 | Field | Example |
 |---|---|
-| `scenario_family` | `sqli_marker`, `xss_marker`, `rce_marker`, `path_traversal_marker`, `protocol_evasion_marker`. |
+| `scenario_family` | `sqli_marker`, `xss_marker`, `rce_marker`, `path_traversal_marker`, `protocol_evasion_marker`, `block_page_expectation`. |
 | `test_material_type` | `customer_marker`, `vendor_safe_test`, `lab_only_payload`, `manual_review_required`. |
 | `payload_ref` | Opaque catalog id, not raw payload. |
 | `expected_action` | block, challenge, rate_limit, log_only_expected, allow_expected. |

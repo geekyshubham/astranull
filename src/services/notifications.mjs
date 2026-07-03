@@ -9,6 +9,7 @@ import {
   buildNotificationDeliveryAttempt,
   buildRedactedNotificationEventPayload,
   DEV_NOTIFICATION_DELIVERY_NOTE,
+  formatNotificationRuleForRead,
   normalizeNotificationRuleInput,
 } from '../lib/notifications.mjs';
 import { getStore, persistStore } from '../store.mjs';
@@ -25,7 +26,9 @@ export { destinationPreview } from '../lib/notifications.mjs';
 export function listNotifications(ctx) {
   const store = ensure();
   return {
-    rules: store.notificationRules.filter((r) => r.tenant_id === ctx.tenantId),
+    rules: store.notificationRules
+      .filter((r) => r.tenant_id === ctx.tenantId)
+      .map((r) => formatNotificationRuleForRead(r)),
     events: store.notificationEvents.filter((e) => e.tenant_id === ctx.tenantId).slice(-100),
   };
 }

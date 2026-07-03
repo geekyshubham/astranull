@@ -181,6 +181,7 @@ async function acceptPack(svc, hsId) {
   const hs = req.find((r) => r.id === hsId);
   for (const item of hs?.provider_approval_checklist ?? []) {
     const art = await svc.addArtifact(CTX_ENG, hsId, {
+      ...artifactProofBody('provider_approval'),
       type: 'provider_approval',
       provider_name: item.provider_name,
       reference_uri: 'metadata://pack/provider',
@@ -228,6 +229,35 @@ describe('postgres high-scale service adapters', () => {
     assert.ok(second.scope_hash);
   });
 
+  it('ingests governed adapter telemetry snapshots with provenance metadata', async () => {
+    const { repositories } = memoryRepositories();
+    const svc = createPostgresHighScaleServices(repositories);
+    const created = await svc.createHighScaleRequest(CTX_ENG, validHighScaleRequestPayload());
+    await acceptPack(svc, created.id);
+    await svc.transitionHighScale(CTX_A, created.id, 'approve');
+    await svc.transitionHighScale(CTX_B, created.id, 'approve');
+    const now = Date.now();
+    await svc.transitionHighScale(CTX_A, created.id, 'schedule', {
+      window_start: new Date(now - 60_000).toISOString(),
+      window_end: new Date(now + 3600_000).toISOString(),
+    });
+
+    const ingested = await svc.ingestGovernedAdapterTelemetry(CTX_A, created.id, {
+      adapter_id: 'adapter_partner_lab_1',
+      adapter_type: 'partner_adapter',
+      provider_key: 'cloudflare',
+      snapshots: [
+        { category: 'adapter_metric', live_status: 'stable', metrics: { scenario_rate_rps: 50 } },
+      ],
+    });
+    assert.equal(ingested.snapshot_count, 1);
+    assert.equal(ingested.records[0].metrics.adapter_provenance.adapter_id, 'adapter_partner_lab_1');
+    assert.equal(ingested.records[0].source, 'governed-adapter:adapter_partner_lab_1:cloudflare');
+
+    const listed = await svc.listHighScaleTelemetry(CTX_A, created.id);
+    assert.equal(listed.length, 1);
+  });
+
   it('telemetry rejects forbidden raw fields', async () => {
     const { repositories } = memoryRepositories();
     const svc = createPostgresHighScaleServices(repositories);
@@ -246,6 +276,45 @@ describe('postgres high-scale service adapters', () => {
       metrics: { packet_payload: 'secret' },
     });
     assert.equal(bad.error, 'forbidden_telemetry_fields');
+
+    const compactBad = await svc.recordHighScaleTelemetry(CTX_A, created.id, {
+      category: 'adapter_metric',
+      metrics: { rawpacket: 'secret' },
+    });
+    assert.equal(compactBad.error, 'forbidden_telemetry_fields');
+
+    const requestBodyBad = await svc.recordHighScaleTelemetry(CTX_A, created.id, {
+      category: 'adapter_metric',
+      metrics: { requestBody: 'raw request body' },
+    });
+    assert.equal(requestBodyBad.error, 'forbidden_telemetry_fields');
+
+    const requestHeadersBad = await svc.recordHighScaleTelemetry(CTX_A, created.id, {
+      category: 'adapter_metric',
+      metrics: { 'request-headers': 'Authorization: secret' },
+    });
+    assert.equal(requestHeadersBad.error, 'forbidden_telemetry_fields');
+
+    const directBodyBad = await svc.recordHighScaleTelemetry(CTX_A, created.id, {
+      category: 'adapter_metric',
+      requestBody: 'raw request body',
+      metrics: { scenario_rate_rps: 10 },
+    });
+    assert.equal(directBodyBad.error, 'forbidden_telemetry_fields');
+
+    const directCookieBad = await svc.recordHighScaleTelemetry(CTX_A, created.id, {
+      category: 'adapter_metric',
+      cookie: 'session=secret',
+      metrics: { scenario_rate_rps: 10 },
+    });
+    assert.equal(directCookieBad.error, 'forbidden_telemetry_fields');
+
+    const directAuthorizationBad = await svc.recordHighScaleTelemetry(CTX_A, created.id, {
+      category: 'adapter_metric',
+      authorization: 'Bearer secret',
+      metrics: { scenario_rate_rps: 10 },
+    });
+    assert.equal(directAuthorizationBad.error, 'forbidden_telemetry_fields');
   });
 
   it('emits state-change notifications from options.notifications and survives delivery errors', async () => {

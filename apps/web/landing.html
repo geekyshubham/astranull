@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AstraNull — DDoS Readiness Validation</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body class="public-page">
+  <header class="public-header">
+    <div class="public-brand">AstraNull</div>
+    <nav class="public-nav">
+      <a href="/signup" id="signupLink" class="btn secondary">Sign up</a>
+      <a href="/app" id="loginLink" class="btn">Log in</a>
+    </nav>
+  </header>
+  <main class="public-hero">
+    <p class="public-eyebrow">No-access-first · Evidence-backed · SOC-gated high-scale</p>
+    <h1>Prove DDoS readiness without handing over your cloud keys</h1>
+    <p class="public-lead" id="heroPromise">
+      AstraNull validates customer-declared target groups using outside probes, inside agents, and correlated evidence —
+      without default cloud access or automatic IP inventory discovery.
+    </p>
+    <div class="public-cta-row">
+      <a href="/signup" class="btn" id="heroSignup">Request access</a>
+      <a href="/app" class="btn secondary" id="heroLogin">Log in to portal</a>
+    </div>
+    <section class="public-trust-grid">
+      <article class="card">
+        <h2>Customer-declared scope</h2>
+        <p>You declare target groups manually. AstraNull does not require AWS, GCP, Azure, or CDN credentials to get started.</p>
+      </article>
+      <article class="card">
+        <h2>Outbound-only agents</h2>
+        <p>Linux, Docker, and Kubernetes agents call AstraNull over outbound HTTPS. No inbound management ports required.</p>
+      </article>
+      <article class="card">
+        <h2>Safe-by-default checks</h2>
+        <p>Default validation is low-volume, bounded, and non-disruptive. High-scale assessments are SOC-governed — never self-service attack tooling.</p>
+      </article>
+      <article class="card">
+        <h2>Evidence over assumptions</h2>
+        <p>Every verdict ties to observed probe data, agent observations, health signals, or explicit customer declarations.</p>
+      </article>
+    </section>
+  </main>
+  <footer class="public-footer muted">
+    AstraNull is a defensive readiness platform. Account requests are reviewed before provisioning.
+  </footer>
+  <script type="module" src="/public-site.js"></script>
+</body>
+</html>

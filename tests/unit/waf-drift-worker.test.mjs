@@ -285,6 +285,52 @@ describe('single-asset drift check', () => {
   });
 });
 
+describe('tenant drift scan', () => {
+  it('runDriftScan creates drift events from connector snapshot changes', () => {
+    Object.assign(process.env, wafEnabledEnv());
+    freshStore();
+    seedWafAsset();
+
+    seedConnectorSnapshots([
+      {
+        id: 'snap_prev',
+        tenant_id: 'ten_demo',
+        connector_id: 'conn_1',
+        summary_json: {
+          hostnames: ['waf-app.example.com'],
+          policy_mode: 'blocking',
+          rule_count: 150,
+        },
+        observed_at: '2026-05-01T00:00:00.000Z',
+        created_at: '2026-05-01T00:00:00.000Z',
+      },
+      {
+        id: 'snap_curr',
+        tenant_id: 'ten_demo',
+        connector_id: 'conn_1',
+        summary_json: {
+          hostnames: ['waf-app.example.com'],
+          policy_mode: 'monitor',
+          rule_count: 120,
+        },
+        observed_at: '2026-06-01T00:00:00.000Z',
+        created_at: '2026-06-01T00:00:00.000Z',
+      },
+    ]);
+
+    const outcome = runDriftScan(demoCtx());
+    assert.ok(outcome.scan_result);
+    assert.equal(outcome.scan_result.assets_scanned, 1);
+    assert.ok(outcome.scan_result.drifts_detected >= 1);
+    assert.ok(getStore().wafDriftEvents.length >= 1);
+    assert.ok(getStore().wafDriftScanResults.length >= 1);
+
+    const audit = getStore().auditLog.find((e) => e.action === 'waf.drift_scan.completed');
+    assert.ok(audit);
+    assert.equal(audit.tenant_id, 'ten_demo');
+  });
+});
+
 describe('scheduled drift scans', () => {
   it('iterates tenants with WAF assets', () => {
     Object.assign(process.env, wafEnabledEnv());

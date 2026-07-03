@@ -14,7 +14,7 @@
  */
 
 import { createHash, createPublicKey, verify } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import http from 'node:http';
 import {
   chmodSync,
@@ -38,9 +38,23 @@ export const AGENT_VERSION = '0.2.0-production-readiness';
 
 export const AGENT_UPDATE_PACKAGE_NAME = 'astranull-agent';
 
+export const PACKAGE_SIGNING_SCHEMA_VERSION = 1;
+export const PACKAGE_SIGNING_ARTIFACT_TYPE = 'agent_package_signing';
+export const PACKAGE_SIGNATURE_FORMATS = Object.freeze([
+  'generic',
+  'tarball',
+  'deb',
+  'rpm',
+  'container',
+]);
+
 const AGENT_UPDATE_DEFAULT_MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
 const AGENT_UPDATE_DEFAULT_DOWNLOAD_TIMEOUT_MS = 30_000;
 const AGENT_UPDATE_MIN_DOWNLOAD_TIMEOUT_MS = 1_000;
+
+export const AGENT_UPDATE_DAEMON_DEFAULT_INTERVAL_MS = 300_000;
+export const AGENT_UPDATE_DAEMON_MIN_INTERVAL_MS = 30_000;
+const AGENT_UPDATE_DAEMON_AGENT_FILENAME = 'astranull-agent.mjs';
 
 const AGENT_UPDATE_SHA256_HEX = /^[a-f0-9]{64}$/i;
 const AGENT_UPDATE_MAX_VERSION_LENGTH = 128;
@@ -290,6 +304,284 @@ export function verifyAgentUpdateManifest({
   };
 }
 
+export function normalizePackageSignatureFormat(format) {
+  if (format === 'generic') {
+    return 'tarball';
+  }
+  return format;
+}
+
+export function validatePackageSigningManifest(
+  signingManifest,
+  { expectedPackage = AGENT_UPDATE_PACKAGE_NAME, expectedVersion } = {},
+) {
+  if (!signingManifest || typeof signingManifest !== 'object' || Array.isArray(signingManifest)) {
+    return { ok: false, error: 'INVALID_SIGNING_MANIFEST' };
+  }
+  if (signingManifest.schema_version !== PACKAGE_SIGNING_SCHEMA_VERSION) {
+    return { ok: false, error: 'UNSUPPORTED_SIGNING_SCHEMA' };
+  }
+  if (signingManifest.artifact_type !== PACKAGE_SIGNING_ARTIFACT_TYPE) {
+    return { ok: false, error: 'INVALID_SIGNING_ARTIFACT_TYPE' };
+  }
+  if (signingManifest.package !== expectedPackage) {
+    return { ok: false, error: 'PACKAGE_MISMATCH' };
+  }
+  if (!isSafeAgentUpdateVersion(signingManifest.version)) {
+    return { ok: false, error: 'INVALID_VERSION' };
+  }
+  if (expectedVersion !== undefined && signingManifest.version !== expectedVersion) {
+    return { ok: false, error: 'VERSION_MISMATCH' };
+  }
+  const artifacts = signingManifest.artifacts;
+  if (!artifacts || typeof artifacts !== 'object' || Array.isArray(artifacts)) {
+    return { ok: false, error: 'INVALID_SIGNING_ARTIFACTS' };
+  }
+  return { ok: true, version: signingManifest.version, artifacts };
+}
+
+function resolveAllowMetadataOnlyTrust(options = {}) {
+  if (options.allowMetadataOnlyTrust === true) return true;
+  const envFlag = process.env.ASTRANULL_AGENT_ALLOW_METADATA_ONLY_TRUST;
+  return envFlag === '1' || envFlag === 'true';
+}
+
+function verifyGpgDetachedSignature(artifactPath, signaturePath, keyReference) {
+  if (!artifactPath || !signaturePath || !existsSync(artifactPath) || !existsSync(signaturePath)) {
+    return { ok: false, error: 'MISSING_GPG_SIGNATURE_MATERIAL' };
+  }
+  try {
+    const args = ['--verify', '--status-fd', '1', '--batch', signaturePath, artifactPath];
+    if (typeof keyReference === 'string' && keyReference.trim()) {
+      args.push('--keyid-format', 'long', '--recipient', keyReference.trim());
+    }
+    const output = execFileSync('gpg', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    if (!/\[GNUPG:\]\s+VALIDSIG\b/m.test(output)) {
+      return { ok: false, error: 'GPG_SIGNATURE_INVALID' };
+    }
+    return { ok: true, trust_anchor: 'gpg' };
+  } catch {
+    return { ok: false, error: 'GPG_VERIFY_FAILED' };
+  }
+}
+
+function verifyCosignImageSignature(imageReference, signerReference) {
+  if (typeof imageReference !== 'string' || !imageReference.trim()) {
+    return { ok: false, error: 'MISSING_COSIGN_IMAGE' };
+  }
+  try {
+    const output = execFileSync(
+      'cosign',
+      ['verify', imageReference.trim(), '--certificate-identity', signerReference.trim()],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    if (!/Verified/i.test(output)) {
+      return { ok: false, error: 'COSIGN_SIGNATURE_INVALID' };
+    }
+    return { ok: true, trust_anchor: 'cosign' };
+  } catch {
+    return { ok: false, error: 'COSIGN_VERIFY_FAILED' };
+  }
+}
+
+function verifyArtifactDigestBinding(artifactPath, expected) {
+  if (!expected || typeof expected !== 'object') {
+    return { ok: false, error: 'MISSING_SIGNING_ARTIFACT_ENTRY' };
+  }
+  if (!artifactPath) {
+    return { ok: false, error: 'MISSING_ARTIFACT_PATH' };
+  }
+  if (!existsSync(artifactPath)) {
+    return { ok: false, error: 'ARTIFACT_NOT_FOUND' };
+  }
+  const data = readFileSync(artifactPath);
+  const digest = createHash('sha256').update(data).digest('hex');
+  if (digest !== String(expected.sha256).toLowerCase()) {
+    return { ok: false, error: 'ARTIFACT_CHECKSUM_MISMATCH' };
+  }
+  if (data.length !== expected.size) {
+    return { ok: false, error: 'ARTIFACT_SIZE_MISMATCH' };
+  }
+  const basename = path.basename(artifactPath);
+  if (expected.name && basename !== expected.name) {
+    return { ok: false, error: 'ARTIFACT_NAME_MISMATCH' };
+  }
+  return { ok: true };
+}
+
+export function verifyPackageSignature({
+  signingManifest,
+  format,
+  artifactPath,
+  trustedPublicKeyDerBase64,
+  trustedGpgFingerprintSha256,
+  trustedCosignSignerReference,
+  updateManifest,
+  signatureBase64,
+  expectedPackage,
+  expectedVersion,
+  allowMetadataOnlyTrust,
+} = {}) {
+  const allowMetadata = resolveAllowMetadataOnlyTrust({ allowMetadataOnlyTrust });
+  const normalizedFormat = normalizePackageSignatureFormat(format);
+  if (!PACKAGE_SIGNATURE_FORMATS.includes(format)) {
+    return { ok: false, error: 'UNSUPPORTED_PACKAGE_FORMAT' };
+  }
+
+  const validated = validatePackageSigningManifest(signingManifest, {
+    expectedPackage,
+    expectedVersion,
+  });
+  if (!validated.ok) {
+    return validated;
+  }
+
+  const entry = validated.artifacts[normalizedFormat];
+  if (!entry || typeof entry !== 'object') {
+    return { ok: false, error: 'MISSING_SIGNING_ARTIFACT_ENTRY' };
+  }
+
+  if (normalizedFormat === 'tarball') {
+    if (!updateManifest || !signatureBase64 || !trustedPublicKeyDerBase64) {
+      return { ok: false, error: 'MISSING_TARBALL_TRUST_MATERIAL' };
+    }
+    const digestCheck = verifyArtifactDigestBinding(artifactPath, entry);
+    if (!digestCheck.ok) {
+      return digestCheck;
+    }
+    const manifestCheck = verifyAgentUpdateManifest({
+      manifest: updateManifest,
+      signatureBase64,
+      trustedPublicKeyDerBase64,
+      artifactPath,
+      expectedPackage,
+      expectedVersion: validated.version,
+    });
+    if (!manifestCheck.ok) {
+      return manifestCheck;
+    }
+    if (entry.ed25519?.signed !== true) {
+      return { ok: false, error: 'TARBALL_SIGNING_NOT_ATTESTED' };
+    }
+    return {
+      ok: true,
+      format: normalizedFormat,
+      version: validated.version,
+      trust_anchor: 'ed25519',
+    };
+  }
+
+  if (normalizedFormat === 'deb' || normalizedFormat === 'rpm') {
+    const gpg = entry.gpg;
+    if (!gpg || gpg.algorithm !== 'gpg') {
+      return { ok: false, error: 'INVALID_GPG_SIGNING_HOOK' };
+    }
+    if (
+      typeof trustedGpgFingerprintSha256 !== 'string'
+      || trustedGpgFingerprintSha256.trim() === ''
+    ) {
+      return { ok: false, error: 'MISSING_TRUSTED_GPG_FINGERPRINT' };
+    }
+    if (gpg.fingerprint_sha256 !== trustedGpgFingerprintSha256.trim().toLowerCase()) {
+      return { ok: false, error: 'TRUSTED_GPG_FINGERPRINT_MISMATCH' };
+    }
+    if (gpg.hook === 'metadata_only' && !allowMetadata) {
+      return { ok: false, error: 'METADATA_ONLY_SIGNING_INSUFFICIENT' };
+    }
+    const digestCheck = verifyArtifactDigestBinding(artifactPath, entry);
+    if (!digestCheck.ok) {
+      return digestCheck;
+    }
+    if (gpg.hook === 'cryptographic' || (gpg.signed === true && gpg.signature_uri)) {
+      const signaturePath = typeof gpg.signature_uri === 'string' && gpg.signature_uri.startsWith('file://')
+        ? gpg.signature_uri.slice('file://'.length)
+        : gpg.signature_uri;
+      const cryptoCheck = verifyGpgDetachedSignature(artifactPath, signaturePath, gpg.key_reference);
+      if (!cryptoCheck.ok) {
+        return cryptoCheck;
+      }
+      return {
+        ok: true,
+        format: normalizedFormat,
+        version: validated.version,
+        trust_anchor: 'gpg',
+      };
+    }
+    if (gpg.hook !== 'metadata_only') {
+      return { ok: false, error: 'INVALID_GPG_SIGNING_HOOK' };
+    }
+    return {
+      ok: true,
+      format: normalizedFormat,
+      version: validated.version,
+      trust_anchor: gpg.key_reference,
+      verification_mode: 'metadata_only',
+    };
+  }
+
+  if (normalizedFormat === 'container') {
+    const cosign = entry.cosign;
+    if (!cosign || cosign.algorithm !== 'cosign') {
+      return { ok: false, error: 'INVALID_COSIGN_SIGNING_HOOK' };
+    }
+    if (
+      typeof trustedCosignSignerReference !== 'string'
+      || trustedCosignSignerReference.trim() === ''
+    ) {
+      return { ok: false, error: 'MISSING_TRUSTED_COSIGN_SIGNER' };
+    }
+    if (cosign.signer_reference !== trustedCosignSignerReference.trim()) {
+      return { ok: false, error: 'TRUSTED_COSIGN_SIGNER_MISMATCH' };
+    }
+    if (cosign.hook === 'metadata_only' && !allowMetadata) {
+      return { ok: false, error: 'METADATA_ONLY_SIGNING_INSUFFICIENT' };
+    }
+    if (cosign.hook === 'cryptographic' || cosign.signed === true) {
+      const imageRef = entry.image ?? null;
+      const cryptoCheck = verifyCosignImageSignature(imageRef, cosign.signer_reference);
+      if (!cryptoCheck.ok) {
+        return cryptoCheck;
+      }
+      return {
+        ok: true,
+        format: normalizedFormat,
+        version: validated.version,
+        trust_anchor: 'cosign',
+        image: entry.image ?? null,
+        digest_sha256: entry.digest_sha256 ?? null,
+      };
+    }
+    if (cosign.hook !== 'metadata_only') {
+      return { ok: false, error: 'INVALID_COSIGN_SIGNING_HOOK' };
+    }
+    if (
+      typeof entry.digest_sha256 === 'string'
+      && AGENT_UPDATE_SHA256_HEX.test(entry.digest_sha256)
+      && artifactPath
+    ) {
+      const digestCheck = verifyArtifactDigestBinding(artifactPath, {
+        name: path.basename(artifactPath),
+        sha256: entry.digest_sha256,
+        size: readFileSync(artifactPath).length,
+      });
+      if (!digestCheck.ok) {
+        return digestCheck;
+      }
+    }
+    return {
+      ok: true,
+      format: normalizedFormat,
+      version: validated.version,
+      trust_anchor: cosign.signer_reference,
+      image: entry.image ?? null,
+      digest_sha256: entry.digest_sha256 ?? null,
+      verification_mode: 'metadata_only',
+    };
+  }
+
+  return { ok: false, error: 'UNSUPPORTED_PACKAGE_FORMAT' };
+}
+
 function agentUpdateArtifactRootName(artifactName) {
   if (typeof artifactName !== 'string') {
     return '';
@@ -398,6 +690,224 @@ export function validateAgentUpdateInstallRoot(installRoot) {
     return { ok: false, error: 'INSTALL_ROOT_UNSAFE' };
   }
   return { ok: true, installRoot: resolved };
+}
+
+export function readAgentCurrentReleaseRecord(installRoot) {
+  const validated = validateAgentUpdateInstallRoot(installRoot);
+  if (!validated.ok) {
+    return validated;
+  }
+  const currentJsonPath = path.join(validated.installRoot, 'current.json');
+  if (!existsSync(currentJsonPath)) {
+    return { ok: false, error: 'CURRENT_RELEASE_NOT_FOUND' };
+  }
+  let record;
+  try {
+    record = JSON.parse(readFileSync(currentJsonPath, 'utf8'));
+  } catch {
+    return { ok: false, error: 'INVALID_CURRENT_RELEASE_FILE' };
+  }
+  if (!record || typeof record !== 'object' || Array.isArray(record)) {
+    return { ok: false, error: 'INVALID_CURRENT_RELEASE_FILE' };
+  }
+  if (!isSafeAgentUpdateVersion(record.version)) {
+    return { ok: false, error: 'INVALID_CURRENT_RELEASE_VERSION' };
+  }
+  if (typeof record.release_dir !== 'string' || record.release_dir.trim() === '') {
+    return { ok: false, error: 'INVALID_CURRENT_RELEASE_DIR' };
+  }
+  const resolvedReleaseDir = path.resolve(record.release_dir);
+  const installPrefix = validated.installRoot.endsWith(path.sep)
+    ? validated.installRoot
+    : `${validated.installRoot}${path.sep}`;
+  if (resolvedReleaseDir !== validated.installRoot && !resolvedReleaseDir.startsWith(installPrefix)) {
+    return { ok: false, error: 'CURRENT_RELEASE_DIR_UNSAFE' };
+  }
+  return {
+    ok: true,
+    installRoot: validated.installRoot,
+    currentJsonPath,
+    version: record.version,
+    releaseDir: resolvedReleaseDir,
+    appliedAt: typeof record.applied_at === 'string' ? record.applied_at : null,
+    artifactSha256:
+      typeof record.artifact_sha256 === 'string' ? record.artifact_sha256.toLowerCase() : null,
+  };
+}
+
+export function resolveAgentExecutableFromCurrentRelease(installRoot) {
+  const current = readAgentCurrentReleaseRecord(installRoot);
+  if (!current.ok) {
+    return current;
+  }
+  const executable = path.join(current.releaseDir, AGENT_UPDATE_DAEMON_AGENT_FILENAME);
+  if (!existsSync(executable)) {
+    return { ok: false, error: 'CURRENT_RELEASE_EXECUTABLE_MISSING', releaseDir: current.releaseDir };
+  }
+  const stat = lstatSync(executable);
+  if (!stat.isFile()) {
+    return { ok: false, error: 'CURRENT_RELEASE_EXECUTABLE_NOT_REGULAR', releaseDir: current.releaseDir };
+  }
+  return {
+    ok: true,
+    executable,
+    version: current.version,
+    releaseDir: current.releaseDir,
+    installRoot: current.installRoot,
+  };
+}
+
+const AGENT_RESTART_ARGV_STRIP = new Set([
+  '--verify-update-manifest',
+  '--apply-update-manifest',
+  '--download-and-apply-update',
+  '--manifest-url',
+  '--signature-url',
+  '--artifact-url',
+  '--signature',
+  '--artifact',
+  '--expected-version',
+  '--once',
+  '--allow-insecure-localhost-api',
+  '--allow-insecure-localhost-downloads',
+]);
+
+const AGENT_RESTART_ENV_STRIP = new Set([
+  'ASTRANULL_AGENT_ALLOW_METADATA_ONLY_TRUST',
+]);
+
+/** Remove test-only trust overrides before spawning a long-lived restarted daemon. */
+export function sanitizeAgentRestartEnv(env = process.env) {
+  const sanitized = { ...env };
+  for (const key of AGENT_RESTART_ENV_STRIP) {
+    delete sanitized[key];
+  }
+  return sanitized;
+}
+
+/** Strip one-shot update CLI flags so a restarted agent keeps daemon/update settings only. */
+export function filterAgentRestartArgv(argv) {
+  if (!Array.isArray(argv)) {
+    return [];
+  }
+  const filtered = [];
+  for (let i = 0; i < argv.length; i += 1) {
+    const token = argv[i];
+    if (AGENT_RESTART_ARGV_STRIP.has(token)) {
+      if (
+        token === '--verify-update-manifest'
+        || token === '--apply-update-manifest'
+        || token === '--manifest-url'
+        || token === '--signature-url'
+        || token === '--artifact-url'
+        || token === '--signature'
+        || token === '--artifact'
+        || token === '--expected-version'
+      ) {
+        i += 1;
+      }
+      continue;
+    }
+    filtered.push(token);
+  }
+  if (!filtered.includes('--run-update-daemon')) {
+    filtered.push('--run-update-daemon');
+  }
+  return filtered;
+}
+
+export function buildAgentRestartCommand({
+  installRoot,
+  argv = process.argv.slice(2),
+  execPath = process.execPath,
+} = {}) {
+  const resolved = resolveAgentExecutableFromCurrentRelease(installRoot);
+  if (!resolved.ok) {
+    return resolved;
+  }
+  return {
+    ok: true,
+    executable: execPath,
+    argv: [resolved.executable, ...filterAgentRestartArgv(argv)],
+    agentExecutable: resolved.executable,
+    version: resolved.version,
+    releaseDir: resolved.releaseDir,
+  };
+}
+
+function defaultRestartAgentProcess({ executable, argv, env, log }) {
+  const child = spawn(executable, argv, {
+    detached: true,
+    stdio: 'ignore',
+    env,
+  });
+  child.unref();
+  log?.(`agent restart: spawned pid=${child.pid ?? 'unknown'} version=${argv[0] ? path.basename(path.dirname(argv[0])) : 'unknown'}`);
+}
+
+function restartAgentViaSystemd({ unitName, log, execFile = execFileSync }) {
+  execFile('systemctl', ['try-restart', unitName], { stdio: 'ignore' });
+  log?.(`agent restart: systemctl try-restart ${unitName}`);
+}
+
+/**
+ * Restart the agent after a successful in-place update.
+ * Default: re-exec Node against the release recorded in current.json.
+ * Optional: ASTRANULL_AGENT_RESTART_VIA_SYSTEMD=1 uses systemctl try-restart.
+ */
+export function restartAgentProcessAfterUpdate({
+  installRoot,
+  argv = process.argv.slice(2),
+  execPath = process.execPath,
+  env = process.env,
+  log,
+  restartFn,
+  exitFn = (code) => process.exit(code),
+  execFile = execFileSync,
+} = {}) {
+  const logFn = log ?? (() => {});
+  const restartViaSystemd = env.ASTRANULL_AGENT_RESTART_VIA_SYSTEMD === '1';
+  const unitName = env.ASTRANULL_AGENT_SYSTEMD_UNIT || 'astranull-agent';
+
+  if (restartViaSystemd) {
+    try {
+      restartAgentViaSystemd({ unitName, log: logFn, execFile });
+      exitFn(0);
+      return { ok: true, mode: 'systemd', unitName };
+    } catch {
+      return { ok: false, error: 'SYSTEMD_RESTART_FAILED', unitName };
+    }
+  }
+
+  const command = buildAgentRestartCommand({ installRoot, argv, execPath });
+  if (!command.ok) {
+    return command;
+  }
+
+  const performRestart = restartFn ?? defaultRestartAgentProcess;
+  performRestart({
+    executable: command.executable,
+    argv: command.argv,
+    env: sanitizeAgentRestartEnv(env),
+    log: logFn,
+    version: command.version,
+    releaseDir: command.releaseDir,
+  });
+  exitFn(0);
+  return { ok: true, mode: 'reexec', version: command.version, releaseDir: command.releaseDir };
+}
+
+export function resolveAgentUpdateDaemonIntervalMs({
+  cliInterval,
+  envValue = process.env.ASTRANULL_AGENT_UPDATE_DAEMON_INTERVAL_MS,
+} = {}) {
+  const candidate = Number.isFinite(cliInterval) && cliInterval > 0
+    ? cliInterval
+    : Number(envValue);
+  if (!Number.isFinite(candidate) || candidate < AGENT_UPDATE_DAEMON_MIN_INTERVAL_MS) {
+    return AGENT_UPDATE_DAEMON_DEFAULT_INTERVAL_MS;
+  }
+  return candidate;
 }
 
 export function applyAgentUpdatePackage({
@@ -1003,6 +1513,12 @@ function parseArgs(argv) {
     else if (argv[i] === '--hostname') out.hostname = argv[++i];
     else if (argv[i] === '--name') out.name = argv[++i];
     else if (argv[i] === '--verify-update-manifest') out.verifyUpdateManifest = argv[++i];
+    else if (argv[i] === '--verify-package-signature') out.verifyPackageSignature = true;
+    else if (argv[i] === '--signing-manifest') out.signingManifest = argv[++i];
+    else if (argv[i] === '--package-format') out.packageFormat = argv[++i];
+    else if (argv[i] === '--trusted-gpg-fingerprint') out.trustedGpgFingerprint = argv[++i];
+    else if (argv[i] === '--trusted-cosign-signer') out.trustedCosignSigner = argv[++i];
+    else if (argv[i] === '--update-manifest') out.updateManifest = argv[++i];
     else if (argv[i] === '--apply-update-manifest') out.applyUpdateManifest = argv[++i];
     else if (argv[i] === '--install-root') out.installRoot = argv[++i];
     else if (argv[i] === '--signature') out.signature = argv[++i];
@@ -1019,8 +1535,35 @@ function parseArgs(argv) {
     else if (argv[i] === '--allow-insecure-localhost-api') {
       out.allowInsecureLocalhostApi = true;
     }
+    else if (argv[i] === '--auto-update') out.autoUpdate = true;
+    else if (argv[i] === '--run-update-daemon') out.runUpdateDaemon = true;
+    else if (argv[i] === '--daemon-interval') out.daemonInterval = Number(argv[++i]);
+    else if (argv[i] === '--update-install-root') out.updateInstallRoot = argv[++i];
+    else if (argv[i] === '--trusted-public-key-file') out.trustedPublicKeyFile = argv[++i];
   }
   return out;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function resolveTrustedPublicKeyDerBase64(options = {}) {
+  if (options.trustedPublicKeyDerBase64) {
+    return options.trustedPublicKeyDerBase64;
+  }
+  const keyFile = options.trustedPublicKeyFile
+    ?? process.env.ASTRANULL_AGENT_UPDATE_TRUST_KEY_FILE
+    ?? null;
+  if (keyFile && existsSync(keyFile)) {
+    return readFileSync(keyFile, 'utf8').trim();
+  }
+  const inline = options.trustedPublicKey
+    ?? process.env.ASTRANULL_AGENT_UPDATE_TRUST_KEY
+    ?? null;
+  return inline?.trim() || null;
 }
 
 function runVerifyUpdateManifestPreflight() {
@@ -1070,6 +1613,84 @@ function runVerifyUpdateManifestPreflight() {
   console.log(`  package: ${AGENT_UPDATE_PACKAGE_NAME}`);
   console.log(`  version: ${result.version}`);
   console.log(`  artifact: ${result.artifact.name}`);
+  process.exit(0);
+}
+
+function runVerifyPackageSignaturePreflight() {
+  const signingManifestPath = args.signingManifest;
+  const packageFormat = args.packageFormat;
+
+  if (!signingManifestPath || !packageFormat) {
+    console.error('package-signature-verify: failed');
+    console.error('  error: MISSING_REQUIRED_ARGS');
+    process.exit(1);
+  }
+
+  let signingManifest;
+  try {
+    signingManifest = JSON.parse(readFileSync(signingManifestPath, 'utf8'));
+  } catch {
+    console.error('package-signature-verify: failed');
+    console.error('  error: INVALID_SIGNING_MANIFEST_FILE');
+    process.exit(1);
+  }
+
+  let updateManifest;
+  const updateManifestPath = args.updateManifest ?? args.verifyUpdateManifest ?? null;
+  if (updateManifestPath) {
+    try {
+      updateManifest = JSON.parse(readFileSync(updateManifestPath, 'utf8'));
+    } catch {
+      console.error('package-signature-verify: failed');
+      console.error('  error: INVALID_MANIFEST_FILE');
+      process.exit(1);
+    }
+  }
+
+  let signatureBase64;
+  if (args.signature) {
+    try {
+      signatureBase64 = readFileSync(args.signature, 'utf8').trim();
+    } catch {
+      console.error('package-signature-verify: failed');
+      console.error('  error: INVALID_SIGNATURE_FILE');
+      process.exit(1);
+    }
+  }
+
+  const trustedPublicKey = resolveTrustedPublicKeyDerBase64({
+    trustedPublicKey: args.trustedPublicKey,
+    trustedPublicKeyFile: args.trustedPublicKeyFile,
+  });
+
+  const result = verifyPackageSignature({
+    signingManifest,
+    format: packageFormat,
+    artifactPath: args.artifact,
+    trustedPublicKeyDerBase64: trustedPublicKey,
+    trustedGpgFingerprintSha256: args.trustedGpgFingerprint,
+    trustedCosignSignerReference: args.trustedCosignSigner,
+    updateManifest,
+    signatureBase64,
+    expectedVersion: args.expectedVersion,
+  });
+
+  if (!result.ok) {
+    console.error('package-signature-verify: failed');
+    console.error(`  error: ${result.error}`);
+    process.exit(1);
+  }
+
+  console.log('package-signature-verify: ok');
+  console.log(`  package: ${AGENT_UPDATE_PACKAGE_NAME}`);
+  console.log(`  format: ${result.format}`);
+  console.log(`  version: ${result.version}`);
+  if (result.trust_anchor) {
+    console.log(`  trust_anchor: ${result.trust_anchor}`);
+  }
+  if (result.image) {
+    console.log(`  image: ${result.image}`);
+  }
   process.exit(0);
 }
 
@@ -1399,6 +2020,107 @@ export async function pollAndWork(agentId, options = {}) {
   }
 }
 
+/**
+ * Poll control-plane update channel and optionally download/apply a signed release.
+ * Reports metadata-only statuses (`downloaded`, `verified`, `applied`, `failed`) to
+ * `POST /v1/agents/:id/update-status`. Staged rollout eligibility is enforced by the
+ * control plane on poll. Does not restart the agent unless the caller handles restart.
+ */
+export async function pollAndMaybeApplyUpdate(agentId, options = {}) {
+  const apiFn = options.api ?? api;
+  const logFn = options.log ?? console.log;
+  const trustedPublicKeyDerBase64 = resolveTrustedPublicKeyDerBase64(options);
+  const installRoot = options.installRoot ?? options.updateInstallRoot ?? null;
+
+  if (!trustedPublicKeyDerBase64 || !installRoot) {
+    return { applied: false, skipped: 'missing_update_config' };
+  }
+
+  const poll = await apiFn('GET', `/v1/agents/${agentId}/update`);
+  if (!poll?.update) {
+    return { applied: false, update: null };
+  }
+
+  const { release_id: releaseId, action, version, download } = poll.update;
+  if (!download?.manifest_url || !download?.signature_url || !download?.artifact_url) {
+    return { applied: false, error: 'missing_download_urls' };
+  }
+
+  const recordStatus = async (status, extra = {}) => {
+    await apiFn('POST', `/v1/agents/${agentId}/update-status`, {
+      release_id: releaseId,
+      status,
+      action,
+      ...extra,
+    });
+  };
+
+  try {
+    await recordStatus('downloaded');
+    const result = await downloadAndApplyAgentUpdatePackage({
+      manifestUrl: download.manifest_url,
+      signatureUrl: download.signature_url,
+      artifactUrl: download.artifact_url,
+      trustedPublicKeyDerBase64,
+      installRoot,
+      expectedVersion: version,
+      allowInsecureLocalhost: Boolean(options.allowInsecureLocalhostDownloads),
+      ...(options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {}),
+      ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+    });
+
+    if (!result.ok) {
+      await recordStatus('failed', { error_code: String(result.error || 'apply_failed').toLowerCase() });
+      return { applied: false, error: result.error, version };
+    }
+
+    await recordStatus('verified');
+    await recordStatus('applied', { installed_version: version });
+    logFn(`agent update applied version=${version} action=${action}`);
+    return { applied: true, version, action, releaseId };
+  } catch (err) {
+    const code = String(err?.message || 'update_failed').slice(0, 32).toLowerCase().replace(/[^a-z0-9_]/g, '_');
+    try {
+      await recordStatus('failed', { error_code: code || 'update_failed' });
+    } catch {
+      /* best-effort */
+    }
+    return { applied: false, error: err?.message || 'update_failed' };
+  }
+}
+
+export async function runAgentDaemonCycle(agentId, options = {}) {
+  const heartbeatFn = options.heartbeat ?? heartbeat;
+  const pollWorkFn = options.pollAndWork ?? pollAndWork;
+  const pollUpdateFn = options.pollAndMaybeApplyUpdate ?? pollAndMaybeApplyUpdate;
+  const logFn = options.log ?? console.log;
+
+  await heartbeatFn(agentId);
+  await pollWorkFn(agentId, options);
+  if (options.autoUpdate) {
+    const updateResult = await pollUpdateFn(agentId, options);
+    if (updateResult.applied) {
+      if (options.restartAfterUpdate) {
+        logFn(`daemon: update applied (${updateResult.version}); restarting agent`);
+        const restartResult = restartAgentProcessAfterUpdate({
+          installRoot: options.installRoot ?? options.updateInstallRoot,
+          argv: options.argv,
+          env: options.env,
+          log: logFn,
+          restartFn: options.restartFn,
+          exitFn: options.exitFn,
+          execFile: options.execFile,
+        });
+        if (!restartResult.ok) {
+          logFn(`daemon: update applied (${updateResult.version}); restart failed (${restartResult.error})`);
+        }
+        return { ...updateResult, restart: restartResult };
+      }
+      logFn(`daemon: update applied (${updateResult.version}); restart service to run new release`);
+    }
+  }
+}
+
 async function main() {
   try {
     if (args.downloadAndApplyUpdate) {
@@ -1408,6 +2130,11 @@ async function main() {
 
     if (args.applyUpdateManifest) {
       runApplyUpdateManifest();
+      return;
+    }
+
+    if (args.verifyPackageSignature) {
+      runVerifyPackageSignaturePreflight();
       return;
     }
 
@@ -1456,13 +2183,67 @@ async function main() {
       console.log(`registered agent ${identity.agent_id}`);
     }
 
-    await heartbeat(identity.agent_id);
-    await pollAndWork(identity.agent_id);
+    const runUpdateDaemon = Boolean(args.runUpdateDaemon);
+    const daemonIntervalMs = runUpdateDaemon
+      ? resolveAgentUpdateDaemonIntervalMs({ cliInterval: args.daemonInterval })
+      : (Number.isFinite(args.daemonInterval) && args.daemonInterval > 0 ? args.daemonInterval : null);
+    const updateInstallRoot = args.updateInstallRoot ?? args.installRoot ?? null;
+    const trustedPublicKeyDerBase64 = resolveTrustedPublicKeyDerBase64({
+      trustedPublicKey: args.trustedPublicKey,
+      trustedPublicKeyFile: args.trustedPublicKeyFile,
+    });
+
+    if (runUpdateDaemon) {
+      if (!updateInstallRoot) {
+        console.error('update-daemon: failed');
+        console.error('  error: MISSING_UPDATE_INSTALL_ROOT');
+        process.exit(1);
+      }
+      if (!trustedPublicKeyDerBase64) {
+        console.error('update-daemon: failed');
+        console.error('  error: MISSING_TRUSTED_PUBLIC_KEY');
+        process.exit(1);
+      }
+      const installValidated = validateAgentUpdateInstallRoot(updateInstallRoot);
+      if (!installValidated.ok) {
+        console.error('update-daemon: failed');
+        console.error(`  error: ${installValidated.error}`);
+        process.exit(1);
+      }
+    }
+
+    const daemonOptions = {
+      autoUpdate: Boolean(args.autoUpdate) || runUpdateDaemon,
+      restartAfterUpdate: runUpdateDaemon,
+      installRoot: updateInstallRoot,
+      updateInstallRoot,
+      trustedPublicKey: args.trustedPublicKey ?? null,
+      trustedPublicKeyFile: args.trustedPublicKeyFile ?? null,
+      trustedPublicKeyDerBase64,
+      allowInsecureLocalhostDownloads: Boolean(args.allowInsecureLocalhostDownloads),
+      stores: defaultStores,
+      argv: process.argv.slice(2),
+      env: process.env,
+      log: console.log,
+    };
+
+    if (daemonIntervalMs) {
+      const modeLabel = runUpdateDaemon ? 'update-daemon' : 'agent daemon';
+      console.log(
+        `${modeLabel} started (interval=${daemonIntervalMs}ms, auto_update=${daemonOptions.autoUpdate}, restart_after_update=${daemonOptions.restartAfterUpdate})`,
+      );
+      while (true) {
+        await runAgentDaemonCycle(identity.agent_id, daemonOptions);
+        await sleep(daemonIntervalMs);
+      }
+    }
+
+    await runAgentDaemonCycle(identity.agent_id, daemonOptions);
 
     if (args.once) {
       process.exit(0);
     } else {
-      console.log('agent idle (use --once for single pass)');
+      console.log('agent idle (use --once for single pass or --daemon-interval for continuous polling)');
     }
   } catch (err) {
     console.error(redact(err.message));

@@ -174,7 +174,44 @@ describe('supply chain risk API', () => {
     assert.ok(ticket.json.ticket.id);
     assert.equal(ticket.json.ticket.hostname, risk.hostname);
     assert.equal(ticket.json.ticket.owner_hint, 'secops');
-    assert.match(ticket.json.ticket.retest_link, new RegExp(`/v1/supply-chain/risks/${risk.id}/retest`));
+    assert.equal(ticket.json.ticket.phase, 'AP1_ticket_workflow');
+    assert.equal(
+      ticket.json.ticket.retest_link,
+      `/v1/waf/supply-chain/risks?risk_id=${encodeURIComponent(risk.id)}`,
+    );
+
+    const fetched = await request(baseUrl, 'GET', `/v1/waf/supply-chain/risks/${risk.id}`, {
+      headers: engineer,
+    });
+    assert.equal(fetched.status, 200);
+    assert.equal(fetched.json.risk.phase, 'AP1_ticket_workflow');
+  });
+
+  it('reads a single supply chain risk by id and retest query link', async () => {
+    const engineer = demoHeaders('engineer');
+    const risk = await createRisk(baseUrl, engineer, { hostname: 'single.example.com' });
+
+    const byPath = await request(baseUrl, 'GET', `/v1/waf/supply-chain/risks/${risk.id}`, {
+      headers: engineer,
+    });
+    assert.equal(byPath.status, 200);
+    assert.equal(byPath.json.risk.id, risk.id);
+    assert.equal(byPath.json.risk.hostname, 'single.example.com');
+
+    const byQuery = await request(
+      baseUrl,
+      'GET',
+      `/v1/waf/supply-chain/risks?risk_id=${encodeURIComponent(risk.id)}`,
+      { headers: engineer },
+    );
+    assert.equal(byQuery.status, 200);
+    assert.equal(byQuery.json.risk.id, risk.id);
+
+    const missing = await request(baseUrl, 'GET', '/v1/waf/supply-chain/risks/risk_missing', {
+      headers: engineer,
+    });
+    assert.equal(missing.status, 404);
+    assert.equal(missing.json.error, 'supply_chain_risk_not_found');
   });
 
   it('assesses dangling CNAME risk', async () => {
@@ -196,6 +233,51 @@ describe('supply chain risk API', () => {
     assert.equal(res.json.risk.hostname, 'dangling.example.com');
   });
 
+  it('ingests supply chain source batches', async () => {
+    const engineer = demoHeaders('engineer');
+    const res = await request(baseUrl, 'POST', '/v1/waf/supply-chain/sources/ingest', {
+      headers: engineer,
+      body: {
+        source: 'dangling_cname',
+        records: [
+          {
+            hostname: 'dangling.example.com',
+            source_type: 'dangling_cname',
+            cname_chain_hash: 'cname_hash_1',
+            provider_error_signature_id: 'provider_sig_1',
+            connector_confirmation: true,
+            observed_at: '2026-07-03T10:00:00.000Z',
+          },
+        ],
+      },
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.json.ingested, 1);
+    assert.equal(res.json.created, 1);
+    assert.equal(res.json.results[0].exposure_type, 'dangling_cname');
+    assert.ok(res.json.results[0].risk);
+
+    const vendorRes = await request(baseUrl, 'POST', '/v1/waf/supply-chain/sources/ingest', {
+      headers: engineer,
+      body: {
+        source: 'vendor_dependency',
+        records: [
+          {
+            hostname: 'app.example.com',
+            source_type: 'vendor_dependency',
+            script_host: 'widgets.vendor.example',
+            dependency_url_hash: 'dep_hash_2',
+            status_code: 404,
+            observed_at: '2026-07-03T11:00:00.000Z',
+          },
+        ],
+      },
+    });
+    assert.equal(vendorRes.status, 200);
+    assert.equal(vendorRes.json.created, 1);
+    assert.equal(vendorRes.json.results[0].exposure_type, 'vendor_dependency_risk');
+  });
+
   it('assesses dangling dependency risk', async () => {
     const engineer = demoHeaders('engineer');
     const res = await request(baseUrl, 'POST', '/v1/waf/supply-chain/assess/dangling-dependency', {
@@ -213,6 +295,181 @@ describe('supply chain risk API', () => {
     assert.ok(res.json.risk);
     assert.equal(res.json.risk.exposure_type, 'dangling_script_inclusion');
     assert.equal(res.json.risk.hostname, 'app.example.com');
+  });
+
+  it('records AP2 phase authorization after ticket workflow', async () => {
+    const engineer = demoHeaders('engineer');
+    const admin = demoHeaders('admin');
+    const risk = await createRisk(baseUrl, engineer, {
+      evidence_summary: {
+        cname_chain_hash: 'chain_hash_confirm',
+        provider_error_signature_id: 'sig_provider_1',
+        data_source: 'dns_cname_chain',
+        connector_confirmation: true,
+      },
+      confidence: 0.85,
+      state: 'confirmed',
+    });
+
+    const ticket = await request(
+      baseUrl,
+      'POST',
+      `/v1/waf/supply-chain/risks/${risk.id}/ticket`,
+      { headers: engineer, body: { owner_hint: 'secops' } },
+    );
+    assert.equal(ticket.status, 201);
+
+    const denied = await request(
+      baseUrl,
+      'POST',
+      `/v1/waf/supply-chain/risks/${risk.id}/phase-authorization`,
+      {
+        headers: engineer,
+        body: {
+          target_phase: 'AP2_manual_custody',
+          customer_approval_reference: 'cust-approval-1',
+          customer_signed_at: '2026-07-03T12:00:00.000Z',
+          custody_ids: ['custody://doc-1'],
+          manual_workflow_owner: 'dns-team',
+        },
+      },
+    );
+    assert.equal(denied.status, 403);
+    assert.equal(denied.json.permission, 'supply_chain:authorize');
+
+    const authorized = await request(
+      baseUrl,
+      'POST',
+      `/v1/waf/supply-chain/risks/${risk.id}/phase-authorization`,
+      {
+        headers: admin,
+        body: {
+          target_phase: 'AP2_manual_custody',
+          customer_approval_reference: 'cust-approval-1',
+          customer_signed_at: '2026-07-03T12:00:00.000Z',
+          custody_ids: ['custody://doc-1'],
+          manual_workflow_owner: 'dns-team',
+        },
+      },
+    );
+    assert.equal(authorized.status, 201);
+    assert.equal(authorized.json.risk.phase, 'AP2_manual_custody');
+    assert.equal(authorized.json.risk.state, 'customer_custody');
+    assert.equal(authorized.json.authorization.target_phase, 'AP2_manual_custody');
+
+    const listed = await request(
+      baseUrl,
+      'GET',
+      `/v1/waf/supply-chain/risks/${risk.id}/phase-authorization`,
+      { headers: engineer },
+    );
+    assert.equal(listed.status, 200);
+    assert.equal(listed.json.phase_authorizations.length, 1);
+  });
+
+  it('completes AP3 governed active authorization after AP2 manual custody', async () => {
+    const engineer = demoHeaders('engineer');
+    const admin = demoHeaders('admin');
+    const risk = await createRisk(baseUrl, engineer, {
+      evidence_summary: {
+        cname_chain_hash: 'chain_hash_confirm',
+        provider_error_signature_id: 'sig_provider_1',
+        data_source: 'dns_cname_chain',
+        connector_confirmation: true,
+      },
+      confidence: 0.85,
+      state: 'confirmed',
+      hostname: 'governed.example.com',
+    });
+
+    const ticket = await request(
+      baseUrl,
+      'POST',
+      `/v1/waf/supply-chain/risks/${risk.id}/ticket`,
+      { headers: engineer, body: { owner_hint: 'secops' } },
+    );
+    assert.equal(ticket.status, 201);
+
+    const ap2 = await request(
+      baseUrl,
+      'POST',
+      `/v1/waf/supply-chain/risks/${risk.id}/phase-authorization`,
+      {
+        headers: admin,
+        body: {
+          target_phase: 'AP2_manual_custody',
+          customer_approval_reference: 'cust-approval-1',
+          customer_signed_at: '2026-07-03T12:00:00.000Z',
+          custody_ids: ['custody://doc-1'],
+          manual_workflow_owner: 'dns-team',
+        },
+      },
+    );
+    assert.equal(ap2.status, 201);
+    assert.equal(ap2.json.risk.phase, 'AP2_manual_custody');
+    assert.equal(ap2.json.risk.state, 'customer_custody');
+
+    const ap3Denied = await request(
+      baseUrl,
+      'POST',
+      `/v1/waf/supply-chain/risks/${risk.id}/phase-authorization`,
+      {
+        headers: engineer,
+        body: {
+          target_phase: 'AP3_governed_active',
+          customer_approval_reference: 'cust-approval-2',
+          legal_approval_reference: 'legal-approval-1',
+          legal_signed_at: '2026-07-03T13:00:00.000Z',
+          provider_terms_reference: 'provider-terms-v3',
+          custody_ids: ['custody://doc-2'],
+          insurance_review_reference: 'insurance-review-1',
+          release_back_workflow_reference: 'release-back-runbook-1',
+        },
+      },
+    );
+    assert.equal(ap3Denied.status, 403);
+    assert.equal(ap3Denied.json.permission, 'supply_chain:authorize');
+
+    const ap3 = await request(
+      baseUrl,
+      'POST',
+      `/v1/waf/supply-chain/risks/${risk.id}/phase-authorization`,
+      {
+        headers: admin,
+        body: {
+          target_phase: 'AP3_governed_active',
+          customer_approval_reference: 'cust-approval-2',
+          legal_approval_reference: 'legal-approval-1',
+          legal_signed_at: '2026-07-03T13:00:00.000Z',
+          provider_terms_reference: 'provider-terms-v3',
+          custody_ids: ['custody://doc-2'],
+          insurance_review_reference: 'insurance-review-1',
+          release_back_workflow_reference: 'release-back-runbook-1',
+          provider_path: 'provider-safe-hold',
+        },
+      },
+    );
+    assert.equal(ap3.status, 201);
+    assert.equal(ap3.json.risk.phase, 'AP3_governed_active');
+    assert.equal(ap3.json.authorization.target_phase, 'AP3_governed_active');
+    assert.equal(ap3.json.authorization.authorization.legal_approval_reference, 'legal-approval-1');
+
+    const fetched = await request(baseUrl, 'GET', `/v1/waf/supply-chain/risks/${risk.id}`, {
+      headers: engineer,
+    });
+    assert.equal(fetched.status, 200);
+    assert.equal(fetched.json.risk.phase, 'AP3_governed_active');
+    assert.equal(fetched.json.risk.phase_authorizations.length, 2);
+
+    const listed = await request(
+      baseUrl,
+      'GET',
+      `/v1/waf/supply-chain/risks/${risk.id}/phase-authorization`,
+      { headers: engineer },
+    );
+    assert.equal(listed.status, 200);
+    assert.equal(listed.json.phase, 'AP3_governed_active');
+    assert.equal(listed.json.phase_authorizations.length, 2);
   });
 
   it('enforces RBAC on write operations', async () => {
@@ -236,6 +493,21 @@ describe('supply chain risk API', () => {
     });
     assert.equal(assess.status, 403);
     assert.equal(assess.json.permission, 'waf:write');
+
+    const ingest = await request(baseUrl, 'POST', '/v1/waf/supply-chain/sources/ingest', {
+      headers: viewer,
+      body: {
+        source: 'dangling_cname',
+        records: [{
+          hostname: 'denied.example.com',
+          source_type: 'dangling_cname',
+          connector_confirmation: true,
+          observed_at: '2026-07-03T10:00:00.000Z',
+        }],
+      },
+    });
+    assert.equal(ingest.status, 403);
+    assert.equal(ingest.json.permission, 'waf:write');
 
     const patch = await request(
       baseUrl,

@@ -8,6 +8,8 @@ Route WAF posture findings and recommendations to the tools teams already use.
 
 AstraNull should group related findings into action items to reduce ticket noise.
 
+Action items are persisted in dev-json and Postgres with tenant-scoped storage and dedupe on `(tenant_id, waf_asset_id, primary_reason)` when a WAF asset is linked. `buildRemediationPayload` produces redacted connector payloads for Jira, ServiceNow, Splunk HEC, Sentinel, XSOAR, Slack, Teams, email, and generic webhook shapes. Outbound delivery is **safe-by-default** through `src/lib/remediationDelivery.mjs` and `POST /v1/waf/action-items/:id/deliver` (defaults to `dry_run` / metadata-only preview; no network I/O unless delivery mode and destination are explicitly configured).
+
 | Field | Meaning |
 |---|---|
 | `action_item_id` | Stable remediation item. |
@@ -25,8 +27,8 @@ AstraNull should group related findings into action items to reduce ticket noise
 
 | Connector | Direction | Data sent | Data pulled back |
 |---|---|---|---|
-| Jira | AstraNull -> Jira | Action item title, severity, asset, owner, evidence, recommendation, retest link, labels. | Issue key/status/comments if enabled. |
-| ServiceNow | AstraNull -> ServiceNow | Incident/task/change with same action item fields and urgency/category mapping. | Ticket status/assignment if enabled. |
+| Jira | AstraNull -> Jira | Action item title, severity, asset, owner, evidence, recommendation, retest link, labels. | Issue key/status/comments if enabled (bidirectional sync tracked in WAF Milestone 4). |
+| ServiceNow | AstraNull -> ServiceNow | Incident/task/change with same action item fields and urgency/category mapping. | Ticket status/assignment if enabled (bidirectional sync tracked in WAF Milestone 4). |
 | Generic ticket webhook | AstraNull -> customer | Redacted JSON payload. | Optional callback. |
 
 ## SIEM connectors
@@ -118,10 +120,35 @@ Important: Do not close AstraNull finding solely because external ticket says do
 | Same CVE + same owner | One CVE mitigation ticket for owner scope. |
 | Same origin bypass path | One origin restriction task for shared origin. |
 
+## Outbound delivery (implemented slice)
+
+`deliverActionItem(ctx, actionItemId, channel, options)` builds a connector payload via `buildRemediationPayload`, then hands off to `executeRemediationDelivery` with the same safety patterns as `notificationDelivery.mjs`:
+
+| Control | Behavior |
+|---|---|
+| Default API body | `{ "channel": "jira\|servicenow\|slack\|webhook\|siem", "dry_run": true }` — returns redacted payload preview only. |
+| Delivery mode | `ASTRANULL_REMEDIATION_DELIVERY_MODE` (default `metadata_only`). Opt-in comma-separated channels or `all`. |
+| Destinations | Per-channel HTTPS env URLs: `ASTRANULL_REMEDIATION_JIRA_URL`, `..._SERVICENOW_URL`, `..._SLACK_URL`, `..._WEBHOOK_URL`, `..._SIEM_URL`. |
+| SIEM provider | `ASTRANULL_REMEDIATION_SIEM_PROVIDER` = `splunk_hec` (default) or `sentinel` when `channel=siem`. |
+| Transport | HTTPS-only remote destinations (dev/test `http://127.0.0.1`, `http://localhost`, `*.invalid` allowed); rejects URL-embedded credentials; no redirects; bounded timeout and payload size; redacted JSON bodies. |
+| Audit | `waf.action_item.delivered` records channel, connector, status, `dry_run`, and `destination_preview` only (no full URLs, tokens, or raw evidence). |
+
+Delivery statuses:
+
+| Status | Meaning |
+|---|---|
+| `metadata_only` | Dry-run preview (`dry_run=true`). |
+| `queued_provider_not_configured` | Live request blocked by default mode or missing destination URL. |
+| `delivered_provider` | Bounded HTTPS POST succeeded when mode + destination are configured and `dry_run=false`. |
+| `provider_retry_scheduled` / `provider_failed_dlq` | Provider HTTP/validation failure metadata (no secrets in API response). |
+
+API: `POST /v1/waf/action-items/:id/deliver` requires `waf:write`. Response shape: `{ delivery: { action_item_id, channel, connector, status, reason, dry_run, destination_preview?, payload?, payload_byte_length? } }`.
+
 ## Done criteria
 
-- Jira and ServiceNow action-item creation implemented first.
-- Splunk/Sentinel event streaming uses redacted schema.
-- XSOAR supports pull-style action item feed.
+- Jira and ServiceNow action-item payload builders and opt-in outbound delivery implemented.
+- Splunk/Sentinel event streaming uses redacted `astranull.waf_event.v1` schema.
+- XSOAR supports pull-style action item feed (payload builder); push delivery remains optional follow-up.
 - Ticket status sync is optional and never replaces retest proof.
 - Notification rules support severity, owner, entity, and reason filters.
+- **Open:** staging delivery evidence for configured customer endpoints, credential vault integration, and bidirectional ticket status sync.

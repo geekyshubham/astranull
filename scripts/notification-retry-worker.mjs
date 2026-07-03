@@ -6,6 +6,7 @@ import {
   rejectWebhookDestinationWithCredentials,
   WEBHOOK_MAX_ATTEMPTS,
 } from '../src/lib/notificationDelivery.mjs';
+import { latestDeliveryAttemptsByRule } from '../src/lib/notificationRetry.mjs';
 import { redactObject } from '../src/lib/redact.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -325,9 +326,7 @@ export function planNotificationRetries(input) {
 
   for (const event of input.ledger.events) {
     if (!event || typeof event !== 'object') continue;
-    const attempts = Array.isArray(event.delivery_attempts) ? event.delivery_attempts : [];
-    for (const attempt of attempts) {
-      if (!attempt || typeof attempt !== 'object') continue;
+    for (const attempt of latestDeliveryAttemptsByRule(event).values()) {
       if (attempt.status !== 'provider_retry_scheduled') continue;
 
       const nextRetryAt = attempt.next_retry_at;

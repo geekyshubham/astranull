@@ -204,13 +204,14 @@ describe('external discovery API', () => {
 
   it('approves and rejects candidates with state transitions', async () => {
     const engineer = demoHeaders('engineer');
+    const admin = demoHeaders('admin');
     const candidate = await createCandidate(baseUrl, engineer);
 
     const approved = await request(
       baseUrl,
       'POST',
       `/v1/discovery/candidates/${candidate.id}/approve`,
-      { headers: engineer, body: {} },
+      { headers: admin, body: {} },
     );
     assert.equal(approved.status, 200);
     assert.equal(approved.json.candidate.state, 'approved_target');
@@ -225,7 +226,7 @@ describe('external discovery API', () => {
       baseUrl,
       'POST',
       `/v1/discovery/candidates/${rejectCandidate.id}/reject`,
-      { headers: engineer, body: { reason: 'out_of_scope' } },
+      { headers: admin, body: { reason: 'out_of_scope' } },
     );
     assert.equal(rejected.status, 200);
     assert.equal(rejected.json.candidate.state, 'rejected');
@@ -244,6 +245,276 @@ describe('external discovery API', () => {
     assert.equal(res.status, 400);
     assert.equal(res.json.error, 'unsafe_discovery_candidate');
     assert.equal(getStore().discoveryCandidates?.length ?? 0, before);
+  });
+
+  it('ingests passive discovery source records into inbox pending approval', async () => {
+    const engineer = demoHeaders('engineer');
+    const beforeTargets = getStore().targets.length;
+
+    const ingest = await request(baseUrl, 'POST', '/v1/discovery/sources/ingest', {
+      headers: engineer,
+      body: {
+        source: 'passive_dns',
+        records: [
+          {
+            hostname: 'passive.example.com',
+            source_type: 'passive_dns',
+            confidence: 0.43,
+            observed_at: '2026-07-03T10:00:00.000Z',
+          },
+          {
+            hostname: 'ct.example.com',
+            source_type: 'passive_dns',
+            confidence: 0.5,
+            observed_at: '2026-07-03T11:00:00.000Z',
+          },
+        ],
+      },
+    });
+    assert.equal(ingest.status, 200);
+    assert.equal(ingest.json.source, 'passive_dns');
+    assert.equal(ingest.json.created, 2);
+    assert.equal(ingest.json.updated, 0);
+    assert.equal(ingest.json.candidates.length, 2);
+    assert.equal(ingest.json.candidates[0].approval_status, 'pending');
+    assert.equal(ingest.json.candidates[0].state, 'candidate');
+
+    const ctIngest = await request(baseUrl, 'POST', '/v1/discovery/sources/ingest', {
+      headers: engineer,
+      body: {
+        source: 'certificate_transparency',
+        records: [
+          {
+            hostname: 'tls.example.com',
+            source_type: 'certificate_transparency',
+            confidence: 0.68,
+            observed_at: '2026-07-03T12:00:00.000Z',
+          },
+        ],
+      },
+    });
+    assert.equal(ctIngest.status, 200);
+    assert.equal(ctIngest.json.candidates[0].source_type, 'ct_log');
+
+    const inbox = await request(baseUrl, 'GET', '/v1/discovery/inbox', { headers: engineer });
+    assert.equal(inbox.status, 200);
+    assert.equal(inbox.json.count, 3);
+
+    const auditEntry = getStore().auditLog.findLast((entry) => entry.action === 'discovery.source_ingested');
+    assert.ok(auditEntry);
+    assert.equal(auditEntry.metadata.source, 'certificate_transparency');
+    assert.equal(getStore().targets.length, beforeTargets);
+  });
+
+  it('rejects unsafe passive source payloads at ingest', async () => {
+    const engineer = demoHeaders('engineer');
+    const before = getStore().discoveryCandidates?.length ?? 0;
+
+    const res = await request(baseUrl, 'POST', '/v1/discovery/sources/ingest', {
+      headers: engineer,
+      body: {
+        source: 'certificate_transparency',
+        records: [
+          {
+            hostname: 'unsafe.example.com',
+            source_type: 'certificate_transparency',
+            confidence: 0.5,
+            observed_at: '2026-07-03T12:00:00.000Z',
+            raw_log: 'must-not-store',
+          },
+        ],
+      },
+    });
+    assert.equal(res.status, 400);
+    assert.equal(res.json.error, 'unsafe_discovery_source_record');
+    assert.equal(getStore().discoveryCandidates?.length ?? 0, before);
+  });
+
+  it('imports approved candidate into target group with linked WAF asset', async () => {
+    const engineer = demoHeaders('engineer');
+    const admin = demoHeaders('admin');
+    const candidate = await createCandidate(baseUrl, engineer, {
+      candidate_id: 'cand_import',
+      hostname: 'import.example.com',
+    });
+    const approved = await request(
+      baseUrl,
+      'POST',
+      `/v1/discovery/candidates/${candidate.id}/approve`,
+      { headers: admin, body: {} },
+    );
+    assert.equal(approved.status, 200);
+    assert.equal(approved.json.candidate.state, 'approved_target');
+
+    const beforeTargets = getStore().targets.length;
+    const beforeWafAssets = getStore().wafAssets?.length ?? 0;
+
+    const imported = await request(
+      baseUrl,
+      'POST',
+      `/v1/discovery/candidates/${candidate.id}/import`,
+      {
+        headers: admin,
+        body: {
+          target_group_id: 'tg_1',
+          environment_id: 'env_demo',
+          create_waf_asset: true,
+        },
+      },
+    );
+    assert.equal(imported.status, 200);
+    assert.equal(imported.json.target.kind, 'fqdn');
+    assert.equal(imported.json.target.value, 'import.example.com');
+    assert.equal(imported.json.target.target_group_id, 'tg_1');
+    assert.ok(imported.json.waf_asset);
+    assert.equal(imported.json.waf_asset.target_id, imported.json.target.id);
+    assert.equal(imported.json.candidate.approved_target_id, imported.json.target.id);
+    assert.equal(imported.json.candidate.approval_status, 'approved');
+
+    assert.equal(getStore().targets.length, beforeTargets + 1);
+    assert.equal(getStore().wafAssets.length, beforeWafAssets + 1);
+
+    const auditEntry = getStore().auditLog.findLast(
+      (entry) => entry.action === 'discovery.candidate_imported',
+    );
+    assert.ok(auditEntry);
+    assert.equal(auditEntry.metadata.target_group_id, 'tg_1');
+    assert.equal(auditEntry.metadata.hostname, 'import.example.com');
+
+    const duplicate = await request(
+      baseUrl,
+      'POST',
+      `/v1/discovery/candidates/${candidate.id}/import`,
+      { headers: admin, body: { target_group_id: 'tg_1' } },
+    );
+    assert.equal(duplicate.status, 409);
+    assert.equal(duplicate.json.error, 'discovery_candidate_already_imported');
+  });
+
+  it('rejects import for unapproved candidates', async () => {
+    const engineer = demoHeaders('engineer');
+    const admin = demoHeaders('admin');
+    const candidate = await createCandidate(baseUrl, engineer, {
+      candidate_id: 'cand_import_denied',
+      hostname: 'pending.example.com',
+    });
+
+    const imported = await request(
+      baseUrl,
+      'POST',
+      `/v1/discovery/candidates/${candidate.id}/import`,
+      { headers: admin, body: { target_group_id: 'tg_1' } },
+    );
+    assert.equal(imported.status, 403);
+    assert.equal(imported.json.error, 'discovery_candidate_not_approved');
+  });
+
+  it('returns metadata-only discovery report summary scoped to tenant', async () => {
+    const engineer = demoHeaders('engineer');
+    const admin = demoHeaders('admin');
+    await createCandidate(baseUrl, engineer, {
+      candidate_id: 'cand_report_dns',
+      hostname: 'report-dns.example.com',
+      source_type: 'dns',
+      confidence: 0.82,
+      approval_status: 'not_requested',
+    });
+    await createCandidate(baseUrl, engineer, {
+      candidate_id: 'cand_report_ct',
+      hostname: 'report-ct.example.com',
+      source_type: 'ct_log',
+      confidence: 0.67,
+      approval_status: 'pending',
+    });
+    await createCandidate(baseUrl, engineer, {
+      candidate_id: 'cand_report_passive',
+      hostname: 'report-passive.example.com',
+      source_type: 'passive_dns',
+      confidence: 0.35,
+      approval_status: 'pending',
+    });
+    const approved = await createCandidate(baseUrl, engineer, {
+      candidate_id: 'cand_report_approved',
+      hostname: 'report-approved.example.com',
+      source_type: 'connector',
+      confidence: 0.91,
+      approval_status: 'not_requested',
+      state: 'candidate',
+    });
+    await request(baseUrl, 'POST', `/v1/discovery/candidates/${approved.id}/approve`, {
+      headers: admin,
+      body: {},
+    });
+    await createCandidate(baseUrl, engineer, {
+      candidate_id: 'cand_report_rejected',
+      hostname: 'report-rejected.example.com',
+      source_type: 'registry',
+      confidence: 0.18,
+      approval_status: 'not_requested',
+    });
+    const rejectCandidate = await createCandidate(baseUrl, engineer, {
+      candidate_id: 'cand_report_reject_flow',
+      hostname: 'report-reject-flow.example.com',
+      source_type: 'page_link',
+      confidence: 0.55,
+      approval_status: 'not_requested',
+    });
+    await request(baseUrl, 'POST', `/v1/discovery/candidates/${rejectCandidate.id}/reject`, {
+      headers: admin,
+      body: { reason: 'out_of_scope' },
+    });
+
+    seedOtherTenant();
+    await createCandidate(baseUrl, demoHeaders('engineer', 'ten_other', 'usr_other'), {
+      candidate_id: 'cand_other_report',
+      hostname: 'other-report.example.com',
+      source_type: 'dns',
+      confidence: 0.99,
+      approval_status: 'approved',
+    });
+
+    const res = await request(baseUrl, 'GET', '/v1/discovery/reports/summary', {
+      headers: engineer,
+    });
+    assert.equal(res.status, 200);
+    assert.ok(res.json.summary);
+    assert.equal(res.json.summary.total_candidates, 6);
+    assert.equal(res.json.summary.candidate_sources.dns, 1);
+    assert.equal(res.json.summary.candidate_sources.ct_log, 1);
+    assert.equal(res.json.summary.candidate_sources.passive_dns, 1);
+    assert.equal(res.json.summary.candidate_sources.connector, 1);
+    assert.equal(res.json.summary.candidate_sources.registry, 1);
+    assert.equal(res.json.summary.candidate_sources.page_link, 1);
+    assert.equal(res.json.summary.approval_states.pending, 2);
+    assert.equal(res.json.summary.approval_states.approved, 1);
+    assert.equal(res.json.summary.approval_states.rejected, 1);
+    assert.equal(res.json.summary.confidence_histogram['0.0-0.2'], 1);
+    assert.equal(res.json.summary.confidence_histogram['0.2-0.4'], 1);
+    assert.equal(res.json.summary.confidence_histogram['0.4-0.6'], 1);
+    assert.equal(res.json.summary.confidence_histogram['0.6-0.8'], 1);
+    assert.equal(res.json.summary.confidence_histogram['0.8-1.0'], 2);
+    assert.ok(res.json.summary.generated_at);
+
+    const payload = JSON.stringify(res.json);
+    assert.ok(!payload.includes('report-dns.example.com'));
+    assert.ok(!payload.includes('dns_ref_1'));
+    assert.ok(!payload.includes('raw_log'));
+    assert.ok(!payload.includes('dns_zone_file'));
+    assert.ok(!payload.includes('dns_record_type'));
+  });
+
+  it('allows discovery:read viewers to fetch discovery report summary', async () => {
+    const engineer = demoHeaders('engineer');
+    await createCandidate(baseUrl, engineer, {
+      candidate_id: 'cand_viewer_report',
+      hostname: 'viewer-report.example.com',
+      source_type: 'dns',
+      confidence: 0.5,
+    });
+    const viewer = demoHeaders('viewer', 'ten_demo', 'usr_viewer');
+    const res = await request(baseUrl, 'GET', '/v1/discovery/reports/summary', { headers: viewer });
+    assert.equal(res.status, 200);
+    assert.equal(res.json.summary.total_candidates, 1);
   });
 
   it('enforces RBAC on write operations', async () => {
@@ -268,6 +539,24 @@ describe('external discovery API', () => {
       { headers: viewer, body: {} },
     );
     assert.equal(approve.status, 403);
-    assert.equal(approve.json.permission, 'discovery:write');
+    assert.equal(approve.json.permission, 'discovery:approve');
+
+    const reject = await request(
+      baseUrl,
+      'POST',
+      `/v1/discovery/candidates/${candidate.id}/reject`,
+      { headers: engineer, body: { reason: 'needs_owner_approval' } },
+    );
+    assert.equal(reject.status, 403);
+    assert.equal(reject.json.permission, 'discovery:approve');
+
+    const importAttempt = await request(
+      baseUrl,
+      'POST',
+      `/v1/discovery/candidates/${candidate.id}/import`,
+      { headers: viewer, body: { target_group_id: 'tg_1' } },
+    );
+    assert.equal(importAttempt.status, 403);
+    assert.equal(importAttempt.json.permission, 'discovery:approve');
   });
 });

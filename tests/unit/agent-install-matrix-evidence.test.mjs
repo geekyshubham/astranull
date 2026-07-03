@@ -34,6 +34,14 @@ function checkPassed(extra = {}) {
 
 function buildRow(format, overrides = {}) {
   const { checks: checkOverrides, ...rest } = overrides;
+  const signingFormat = format === 'generic' ? 'tarball' : format;
+  const trustAnchorByFormat = {
+    generic: 'ed25519://tenant/agent-update-trust-key',
+    deb: 'gpg://astranull/agent-package-signing',
+    rpm: 'gpg://astranull/agent-package-signing',
+    container: 'cosign://astranull/agent-release-signer',
+    kubernetes: 'cosign://astranull/agent-release-signer',
+  };
   const checks = {
     install: checkPassed(),
     heartbeat: checkPassed({ heartbeat_count: 2 }),
@@ -42,15 +50,29 @@ function buildRow(format, overrides = {}) {
     revoke: checkPassed(),
     uninstall: checkPassed(),
     no_inbound_port: checkPassed({ inbound_listener_count: 0 }),
+    signature_verify: checkPassed({
+      signing_format: signingFormat,
+      trust_anchor_reference: trustAnchorByFormat[format],
+    }),
     ...checkOverrides,
   };
-  return {
+  const row = {
     format,
     environment: 'staging',
     agent_id_redacted: 'ag_…01',
     checks,
     ...rest,
   };
+  if (format === 'container') {
+    row.runtime = row.runtime ?? 'docker';
+    row.image_reference_redacted = row.image_reference_redacted ?? 'registry.example/astranull-agent@sha256:…01';
+  }
+  if (format === 'kubernetes') {
+    row.runtime = row.runtime ?? 'kubernetes';
+    row.deployment_mode = row.deployment_mode ?? 'daemonset';
+    row.namespace_redacted = row.namespace_redacted ?? 'astranull-…';
+  }
+  return row;
 }
 
 function completeMatrixRows() {
@@ -204,6 +226,28 @@ describe('agent install matrix evidence utility', () => {
     assert.equal(blob.includes('postgres://secret'), false);
     assert.equal(blob.includes('ast_v1.fake.fake.fake'), false);
     assert.equal(blob.includes('database_url'), false);
+  });
+
+  it('requires docker and kubernetes scenario metadata', () => {
+    assert.throws(
+      () => validateMatrixEvidence({
+        rows: [buildRow('container', { runtime: '' })],
+      }),
+      /runtime required for container scenario/,
+    );
+    assert.throws(
+      () => validateMatrixEvidence({
+        rows: [buildRow('kubernetes', { deployment_mode: '' })],
+      }),
+      /deployment_mode required for kubernetes scenario/,
+    );
+    const summary = createAgentInstallMatrixSummary({ rows: completeMatrixRows() });
+    const container = summary.rows.find((r) => r.format === 'container');
+    const kubernetes = summary.rows.find((r) => r.format === 'kubernetes');
+    assert.equal(container.runtime, 'docker');
+    assert.equal(kubernetes.runtime, 'kubernetes');
+    assert.equal(kubernetes.deployment_mode, 'daemonset');
+    assert.equal(container.checks.signature_verify, 'passed');
   });
 
   it('redacts token-like strings in allowed metadata fields', () => {

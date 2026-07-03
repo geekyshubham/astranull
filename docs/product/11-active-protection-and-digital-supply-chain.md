@@ -22,7 +22,7 @@ This is not part of WAF posture MVP. Treat it as a later governed module.
 | Phase | Behavior |
 |---|---|
 | AP0 - Detect only | Detect and report dangling/custody risks. No automated acquisition. |
-| AP1 - Ticket workflow | Create owner-routed remediation tickets with evidence. |
+| AP1 - Ticket workflow | Create owner-routed remediation tickets with evidence; include a risk review/retest reference at `/v1/waf/supply-chain/risks?risk_id=<id>` (WAF namespace, not legacy `/v1/supply-chain/...`). |
 | AP2 - Manual custody workflow | If customer approves, guide customer to reclaim/remove dangling resource. |
 | AP3 - Governed active protection | Future: AstraNull may acquire/hold at-risk resource only after legal/customer approval and provider-specific process. |
 
@@ -36,6 +36,28 @@ This is not part of WAF posture MVP. Treat it as a later governed module.
 | Page dependency scan | Third-party scripts, CSS, redirects, web inclusions. |
 | Cloud connectors | Confirms whether resource exists in customer's cloud account. |
 | Customer imports | Owner, business criticality, approved domains. |
+
+## Passive source ingestion (metadata-only)
+
+Dangling CNAME and vendor dependency feeds may be ingested as **metadata-only** supply chain signals. Ingestion never performs DNS lookups, never scrapes pages, and never stores raw URLs, page bodies, or DNS zone files.
+
+| API | Permission | Request | Response |
+|---|---|---|---|
+| `POST /v1/waf/supply-chain/sources/ingest` | `waf:write` | `{ source, records[] }` | `{ source, ingested, assessed, created, deduplicated, skipped_below_threshold, results[] }` |
+
+| `source` value | Risk `exposure_type` | Required record fields |
+|---|---|---|
+| `dangling_cname` | `dangling_cname` | `hostname`, `source_type`, `observed_at` |
+| `vendor_dependency` | `vendor_dependency_risk` | `hostname`, `source_type`, `observed_at` |
+
+Optional metadata fields include `cname_chain_hash`, `provider_error_signature_id`, `connector_confirmation`, `script_host`, `dependency_url_hash`, `status_code`, `page_type`, `confidence`, and `owner_hint`. Raw dependency URLs and DNS responses are rejected.
+
+Ingestion behavior:
+
+- Parsed records run through existing AP0 assess paths; risks below the confidence threshold are skipped without error.
+- Duplicate hostname + exposure type pairs deduplicate to the existing risk record.
+- Audit event: `supply_chain.source_ingested` with source name and created/deduplicated/skipped counts.
+- No automated acquisition, DNS modification, or outbound probing occurs in ingest code paths.
 
 ## Risk scoring
 
@@ -72,3 +94,4 @@ This is not part of WAF posture MVP. Treat it as a later governed module.
 - Findings route to owners with remediation steps.
 - Retest confirms DNS/dependency cleanup.
 - UI clearly separates `suspected`, `confirmed`, and `customer-approved custody` states.
+- Dangling CNAME and vendor dependency metadata can be ingested via `POST /v1/waf/supply-chain/sources/ingest` without DNS lookups or page scraping.

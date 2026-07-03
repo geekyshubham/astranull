@@ -9,6 +9,11 @@ import {
 } from '../../contracts/wafPosture.mjs';
 import { newId } from '../../lib/ids.mjs';
 import { redactObject } from '../../lib/redact.mjs';
+import {
+  executeRemediationDelivery,
+  normalizeRemediationDeliverChannel,
+  resolveRemediationConnectorType,
+} from '../../lib/remediationDelivery.mjs';
 import { createActionItemRepository } from './actionItemRepository.mjs';
 import { createAuditRepository } from './auditRepository.mjs';
 import { createWafPostureRepository } from './wafPostureRepository.mjs';
@@ -92,6 +97,17 @@ function severityToJiraPriority(severity) {
 function severityToServiceNowUrgency(severity) {
   const map = { critical: '1', high: '2', medium: '3', low: '4' };
   return map[String(severity ?? '').toLowerCase()] ?? '3';
+}
+
+function parseRemediationDryRunDefault(options = {}) {
+  if (options.dry_run !== undefined || options.dryRun !== undefined) {
+    const value = options.dry_run ?? options.dryRun;
+    if (typeof value === 'boolean') return value;
+    if (value === '1' || value === 1 || value === 'true') return true;
+    if (value === '0' || value === 0 || value === 'false') return false;
+    return true;
+  }
+  return true;
 }
 
 /**
@@ -183,11 +199,12 @@ export function createPostgresActionItemServices(pool, options = {}) {
           primary_reason: primaryReason,
         };
 
-        const existing = await actionRepo.findOpenActionItemByDedupe(ctx, assetDisplay, primaryReason);
+        const existing = await actionRepo.findOpenActionItemByDedupe(ctx, wafAssetId, primaryReason);
         if (existing) {
           const mergedFindingIds = [...new Set([...(existing.finding_ids ?? []), finding.id])];
           const updated = await actionRepo.insertActionItem(ctx, {
             ...existing,
+            waf_asset_id: wafAssetId,
             title: fields.title,
             severity: fields.severity,
             owner: fields.owner,
@@ -195,6 +212,8 @@ export function createPostgresActionItemServices(pool, options = {}) {
             recommended_solution: fields.recommended_solution,
             retest_url: fields.retest_url,
             finding_ids: mergedFindingIds,
+            dedupe_key: dedupeKey,
+            primary_reason: primaryReason,
             updated_at: now,
           });
           await auditRepo.appendAuditEvent({
@@ -217,6 +236,7 @@ export function createPostgresActionItemServices(pool, options = {}) {
         const record = await actionRepo.insertActionItem(ctx, {
           ...normalized,
           tenant_id: ctx.tenantId,
+          waf_asset_id: wafAssetId,
           dedupe_key: dedupeKey,
           primary_reason: primaryReason,
           asset_display: assetDisplay,
@@ -283,6 +303,76 @@ export function createPostgresActionItemServices(pool, options = {}) {
         }),
       });
       return { action_item: formatActionItem(patched) };
+    },
+
+    async deliverActionItem(ctx, actionItemId, channel, options = {}) {
+      try {
+        assertNoRawWafEvidence(options);
+      } catch (err) {
+        return contractError(err);
+      }
+
+      const normalizedChannel = normalizeRemediationDeliverChannel(channel);
+      if (!normalizedChannel) {
+        return {
+          error: 'invalid_request',
+          status: 400,
+          message: 'channel must be one of: jira, servicenow, slack, webhook, siem.',
+        };
+      }
+
+      const record = await actionRepo.getActionItem(ctx, actionItemId);
+      if (!record) {
+        return { error: 'waf_action_item_not_found', status: 404 };
+      }
+
+      const dryRun = parseRemediationDryRunDefault(options);
+      const connectorType = resolveRemediationConnectorType(normalizedChannel, options);
+      const actionItem = {
+        ...formatActionItem(record),
+        tenant_id: record.tenant_id ?? ctx.tenantId,
+        finding_ids: record.finding_ids,
+      };
+
+      let payload;
+      try {
+        payload = this.buildRemediationPayload(actionItem, connectorType);
+      } catch (err) {
+        return contractError(err, err.status ?? 400);
+      }
+
+      const delivery = await executeRemediationDelivery({
+        channel: normalizedChannel,
+        connectorType,
+        payload,
+        dryRun,
+        deliveryMode: options.deliveryMode,
+        fetchFn: options.fetchFn,
+        destination: options.destination,
+      });
+
+      await auditRepo.appendAuditEvent({
+        tenant_id: ctx.tenantId,
+        actor_user_id: ctx.userId,
+        actor_role: ctx.role,
+        action: 'waf.action_item.delivered',
+        resource_type: 'waf_action_item',
+        resource_id: record.action_item_id,
+        metadata: redactObject({
+          channel: normalizedChannel,
+          connector: connectorType,
+          status: delivery.status,
+          dry_run: delivery.dry_run,
+          ...(delivery.destination_preview ? { destination_preview: delivery.destination_preview } : {}),
+        }),
+      });
+
+      return {
+        delivery: {
+          action_item_id: record.action_item_id,
+          ...delivery,
+        },
+      };
     },
 
     buildRemediationPayload(actionItem, connectorType) {

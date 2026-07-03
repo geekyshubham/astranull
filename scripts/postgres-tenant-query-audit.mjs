@@ -55,6 +55,28 @@ export const TENANT_SCOPED_TABLES = Object.freeze([
   'soc_reports',
   'notification_delivery_attempts',
   'production_release_evidence',
+  'external_asset_candidates',
+  'waf_assets',
+  'waf_fingerprints',
+  'waf_validation_runs',
+  'waf_scenario_results',
+  'waf_posture_snapshots',
+  'waf_baselines',
+  'waf_validation_plans',
+  'waf_baseline_approvals',
+  'waf_retest_requests',
+  'waf_drift_events',
+  'waf_drift_scan_results',
+  'waf_connectors',
+  'waf_connector_snapshots',
+  'cve_pipeline_items',
+  'cve_asset_matches',
+  'waf_rule_recommendations',
+  'discovery_entities',
+  'supply_chain_risks',
+  'waf_action_items',
+  'waf_coverage_daily_rollups',
+  'waf_scenario_intakes',
 ]);
 
 const TENANT_TABLE_RE = new RegExp(
@@ -215,9 +237,14 @@ export function buildQueryLabel(sql, table) {
  * @param {string} table
  * @param {string} contextBefore
  */
+const CROSS_TENANT_ENUMERATION_RE = /\bSELECT\s+DISTINCT\s+tenant_id\b/i;
+
 export function hasTenantContext(sql, table, contextBefore) {
   if (ALLOW_COMMENT_RE.test(contextBefore)) return true;
-  if (/\btenant_id\b/i.test(sql)) return true;
+  if (CROSS_TENANT_ENUMERATION_RE.test(sql) && !/\bwithTenantContext\b/.test(contextBefore)) {
+    return false;
+  }
+  if (/\btenant_id\b/i.test(sql) && !CROSS_TENANT_ENUMERATION_RE.test(sql)) return true;
   if (/app\.tenant_id|set_config\s*\(\s*['"]app\.tenant_id['"]|current_setting\s*\(\s*['"]app\.tenant_id['"]/i.test(
     `${contextBefore}\n${sql}`,
   )) {

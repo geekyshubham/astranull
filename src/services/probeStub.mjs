@@ -5,6 +5,7 @@
 
 import { generateNonce, hashNonce } from '../lib/crypto.mjs';
 import { newId } from '../lib/ids.mjs';
+import { enrichProbeMetadataWithWafCatalog } from '../lib/wafProductCatalog.mjs';
 
 export function simulateProbeResult(check, target, overrideProfile) {
   const nonce = generateNonce();
@@ -29,13 +30,16 @@ export function simulateProbeResult(check, target, overrideProfile) {
     nonce_hash,
     target_id: target.id,
     check_id: check.check_id,
-    metadata: {
-      simulation: 'SAFE_PROBE_SIMULATION',
-      check_id: check.check_id,
-      vector_family: check.vector_family,
-      probe_profile_kind: probeProfileKind,
-      note: 'Metadata-only safe probe simulation — no live traffic to customer targets.',
-      target_value: target.value,
-    },
+    metadata: enrichProbeMetadataWithWafCatalog(
+      {
+        simulation: 'SAFE_PROBE_SIMULATION',
+        check_id: check.check_id,
+        vector_family: check.vector_family,
+        probe_profile_kind: probeProfileKind,
+        note: 'Metadata-only safe probe simulation — no live traffic to customer targets.',
+        target_value: target.value,
+      },
+      check.check_id,
+    ),
   };
 }

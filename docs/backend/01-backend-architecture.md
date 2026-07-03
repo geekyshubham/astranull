@@ -14,13 +14,14 @@
 ## High-level services
 
 ```text
-Frontend Portal / SOC Console
+Public Landing / Customer Portal / Internal Management / SOC Console
         |
 API Gateway + Auth/RBAC
         |
 +----------------------+----------------------+----------------------+
-| Tenant/Target Service | Agent Service        | Check Catalog        |
-| Test Planner          | Probe Coordinator    | SOC Approval Service |
+| Public Intake Service | Tenant/Target Service| Agent Service        |
+| Check Catalog         | Test Planner         | Probe Coordinator    |
+| SOC Approval Service  | Internal Management  | Subscription Service |
 | Event Ingestion       | Correlation Engine   | Verdict/Finding      |
 | Score Engine          | Report Generator     | Notification Service |
 +----------------------+----------------------+----------------------+
@@ -34,7 +35,10 @@ Database + Event Bus + Evidence Object Store + Audit Log
 |---|---|
 | API Gateway | REST/GraphQL entry, auth enforcement, rate limiting, request logging. |
 | Auth/RBAC | Users, roles, sessions, SSO, permissions. |
+| Public Intake Service | Public sign-up request validation, deduplication, and handoff to staff review. |
 | Tenant Service | Organizations, environments, settings, retention. |
+| Internal Management Service | AstraNull staff-only tenant lifecycle, sign-up review, subscription, entitlement, and support operations. |
+| Subscription Service | Plan metadata, billing status references, entitlement limits, and service-layer feature enforcement. |
 | Target Service | Target groups, targets, expected behavior, schedules. |
 | Agent Service | Bootstrap tokens, registration, identities, heartbeats, capabilities. |
 | Agent Control Channel | Outbound WebSocket/long-poll job delivery to agents. |
@@ -71,6 +75,8 @@ Database + Event Bus + Evidence Object Store + Audit Log
 - A verdict must be tied to evidence or explicitly marked inconclusive.
 - Bootstrap token values are shown once and stored only as hashes.
 - No high-scale execution adapter can be called directly by customer APIs.
+- Customer principals can never satisfy internal management permissions.
+- Subscription and entitlement limits must be enforced by backend services, not only by hidden UI.
 
 ## Suggested deployment architecture
 

@@ -4,7 +4,9 @@ Read:
 
 1. `docs/ux/13-waf-posture-ux.md`
 2. `docs/backend/13-waf-posture-api-contract.md`
-3. `docs/product/09-waf-posture-management.md`
+3. `docs/backend/14-waf-risk-coverage-analytics.md`
+4. `docs/product/09-waf-posture-management.md`
+5. `docs/product/12-waf-compliance-audit-evidence.md`
 
 Your task:
 

@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import {
+  buildDiscoveryReportSummary,
   canTransition,
+  confidenceHistogramBucket,
   createCandidate,
   createEntity,
   scoreConfidence,
@@ -9,6 +11,7 @@ import {
 } from '../../src/contracts/externalDiscovery.mjs';
 import * as targetGroups from '../../src/services/targetGroups.mjs';
 import * as externalDiscovery from '../../src/services/externalDiscovery.mjs';
+
 import { getStore, resetStoreForTests } from '../../src/store.mjs';
 
 const adminCtx = {
@@ -149,6 +152,37 @@ describe('external discovery contract', () => {
     assert.equal(canTransition('posture_tracked', 'tested'), false);
   });
 
+  it('maps confidence scores into histogram buckets', () => {
+    assert.equal(confidenceHistogramBucket(0), '0.0-0.2');
+    assert.equal(confidenceHistogramBucket(0.19), '0.0-0.2');
+    assert.equal(confidenceHistogramBucket(0.2), '0.2-0.4');
+    assert.equal(confidenceHistogramBucket(0.67), '0.6-0.8');
+    assert.equal(confidenceHistogramBucket(1), '0.8-1.0');
+  });
+
+  it('builds metadata-only discovery report summary aggregates', () => {
+    const summary = buildDiscoveryReportSummary(
+      [
+        { source_type: 'dns', confidence: 0.82, approval_status: 'not_requested' },
+        { source_type: 'ct_log', confidence: 0.67, approval_status: 'pending' },
+        { source_type: 'passive_dns', confidence: 0.35, approval_status: 'pending' },
+        { source_type: 'connector', confidence: 0.91, approval_status: 'approved' },
+        { source_type: 'registry', confidence: 0.18, approval_status: 'rejected' },
+        { source_type: 'page_link', confidence: 0.55, approval_status: 'exception' },
+      ],
+      { generated_at: '2026-07-03T12:00:00.000Z' },
+    );
+    assert.equal(summary.generated_at, '2026-07-03T12:00:00.000Z');
+    assert.equal(summary.total_candidates, 6);
+    assert.equal(summary.candidate_sources.dns, 1);
+    assert.equal(summary.candidate_sources.ct_log, 1);
+    assert.equal(summary.approval_states.pending, 2);
+    assert.equal(summary.approval_states.approved, 1);
+    assert.equal(summary.confidence_histogram['0.8-1.0'], 2);
+    assert.equal(summary.hostname, undefined);
+    assert.equal(summary.evidence_summary, undefined);
+  });
+
   it('scores confidence from weighted signal sources', () => {
     assert.equal(scoreConfidence({ customer_provided_target: true }), 0.95);
     assert.equal(scoreConfidence({ connector_owned_asset: true }), 0.85);
@@ -178,6 +212,32 @@ describe('external discovery service', () => {
     } else {
       process.env.ASTRANULL_EXTERNAL_DISCOVERY_ENABLED = originalDiscoveryFlag;
     }
+  });
+
+  it('returns metadata-only discovery report summary for tenant candidates', () => {
+    externalDiscovery.createCandidate(adminCtx, validCandidateInput({
+      candidate_id: 'cand_summary_1',
+      hostname: 'summary-a.example.com',
+      source_type: 'dns',
+      confidence: 0.8,
+      approval_status: 'pending',
+    }));
+    externalDiscovery.createCandidate(adminCtx, validCandidateInput({
+      candidate_id: 'cand_summary_2',
+      hostname: 'summary-b.example.com',
+      source_type: 'ct_log',
+      confidence: 0.45,
+      approval_status: 'not_requested',
+    }));
+
+    const result = externalDiscovery.getDiscoveryReportSummary(adminCtx);
+    assert.equal(result.summary.total_candidates, 2);
+    assert.equal(result.summary.candidate_sources.dns, 1);
+    assert.equal(result.summary.candidate_sources.ct_log, 1);
+    assert.equal(result.summary.approval_states.pending, 1);
+    assert.equal(result.summary.approval_states.not_requested, 1);
+    assert.equal(result.summary.hostname, undefined);
+    assert.equal(result.summary.evidence_summary, undefined);
   });
 
   it('filters discovery inbox to candidate and needs_review states only', () => {
@@ -291,6 +351,127 @@ describe('external discovery service', () => {
     assert.equal(allowed.candidate.state, 'tested');
     assert.equal(externalDiscovery.canImportCandidateToTargetGroup(created.candidate), false);
     assert.equal(externalDiscovery.canImportCandidateToTargetGroup(approved.candidate), true);
+  });
+
+  it('ingests passive source records into inbox without creating targets', () => {
+    const beforeTargets = getStore().targets.length;
+    const beforeGroups = getStore().targetGroups.length;
+
+    const result = externalDiscovery.ingestDiscoveryCandidates(adminCtx, 'passive_dns', [
+      {
+        hostname: 'passive-a.example.com',
+        source_type: 'passive_dns',
+        confidence: 0.45,
+        observed_at: '2026-07-03T10:00:00.000Z',
+      },
+      {
+        hostname: 'ct-b.example.com',
+        source_type: 'certificate_transparency',
+        confidence: 0.62,
+        observed_at: '2026-07-03T11:00:00.000Z',
+      },
+    ]);
+    assert.equal(result.error, 'invalid_discovery_source_record');
+
+    const ingest = externalDiscovery.ingestDiscoveryCandidates(adminCtx, 'certificate_transparency', [
+      {
+        hostname: 'ct-b.example.com',
+        source_type: 'certificate_transparency',
+        confidence: 0.62,
+        observed_at: '2026-07-03T11:00:00.000Z',
+      },
+    ]);
+    assert.equal(ingest.created, 1);
+    assert.equal(ingest.candidates[0].source_type, 'ct_log');
+    assert.equal(ingest.candidates[0].approval_status, 'pending');
+
+    const passive = externalDiscovery.ingestDiscoveryCandidates(adminCtx, 'passive_dns', [
+      {
+        hostname: 'passive-a.example.com',
+        source_type: 'passive_dns',
+        confidence: 0.45,
+        observed_at: '2026-07-03T10:00:00.000Z',
+      },
+    ]);
+    assert.equal(passive.created, 1);
+
+    const inbox = externalDiscovery.getDiscoveryInbox(adminCtx);
+    assert.equal(inbox.count, 2);
+
+    const auditEntry = latestAudit('discovery.source_ingested');
+    assert.ok(auditEntry);
+    assert.equal(auditEntry.metadata.source, 'passive_dns');
+    assert.equal(auditEntry.metadata.created_count, 1);
+
+    assert.equal(getStore().targets.length, beforeTargets);
+    assert.equal(getStore().targetGroups.length, beforeGroups);
+  });
+
+  it('imports approved candidate into target group with optional WAF asset', () => {
+    const created = externalDiscovery.createCandidate(adminCtx, validCandidateInput({
+      candidate_id: 'cand_import_1',
+      hostname: 'import-me.example.com',
+    }));
+    const approved = externalDiscovery.approveCandidateToTarget(adminCtx, created.candidate.id);
+    const beforeTargets = getStore().targets.length;
+    const beforeWafAssets = getStore().wafAssets?.length ?? 0;
+
+    const imported = externalDiscovery.importCandidateToTargetGroup(adminCtx, approved.candidate.id, {
+      target_group_id: 'tg_demo',
+      environment_id: 'env_demo',
+      create_waf_asset: true,
+    });
+    assert.equal(imported.target.kind, 'fqdn');
+    assert.equal(imported.target.value, 'import-me.example.com');
+    assert.equal(imported.target.target_group_id, 'tg_demo');
+    assert.ok(imported.waf_asset);
+    assert.equal(imported.waf_asset.target_id, imported.target.id);
+    assert.equal(imported.candidate.approved_target_id, imported.target.id);
+    assert.equal(imported.candidate.approval_status, 'approved');
+    assert.equal(imported.candidate.state, 'approved_target');
+
+    assert.equal(getStore().targets.length, beforeTargets + 1);
+    assert.equal(getStore().wafAssets.length, beforeWafAssets + 1);
+
+    const auditEntry = latestAudit('discovery.candidate_imported');
+    assert.ok(auditEntry);
+    assert.equal(auditEntry.metadata.target_group_id, 'tg_demo');
+    assert.equal(auditEntry.metadata.target_id, imported.target.id);
+    assert.equal(auditEntry.metadata.waf_asset_id, imported.waf_asset.id);
+
+    const duplicate = externalDiscovery.importCandidateToTargetGroup(adminCtx, approved.candidate.id, {
+      target_group_id: 'tg_demo',
+    });
+    assert.equal(duplicate.error, 'discovery_candidate_already_imported');
+    assert.equal(duplicate.status, 409);
+  });
+
+  it('rejects import for unapproved candidates', () => {
+    const created = externalDiscovery.createCandidate(adminCtx, validCandidateInput({
+      candidate_id: 'cand_import_blocked',
+      hostname: 'not-approved.example.com',
+    }));
+    const blocked = externalDiscovery.importCandidateToTargetGroup(adminCtx, created.candidate.id, {
+      target_group_id: 'tg_demo',
+    });
+    assert.equal(blocked.error, 'discovery_candidate_not_approved');
+    assert.equal(blocked.status, 403);
+  });
+
+  it('imports approved candidate without WAF asset when create_waf_asset is false', () => {
+    const created = externalDiscovery.createCandidate(adminCtx, validCandidateInput({
+      candidate_id: 'cand_import_no_waf',
+      hostname: 'no-waf.example.com',
+    }));
+    const approved = externalDiscovery.approveCandidateToTarget(adminCtx, created.candidate.id);
+    const beforeWafAssets = getStore().wafAssets?.length ?? 0;
+
+    const imported = externalDiscovery.importCandidateToTargetGroup(adminCtx, approved.candidate.id, {
+      target_group_id: 'tg_demo',
+      create_waf_asset: false,
+    });
+    assert.equal(imported.waf_asset, undefined);
+    assert.equal(getStore().wafAssets?.length ?? 0, beforeWafAssets);
   });
 
   it('keeps declared-only mode from changing existing target group behavior', () => {

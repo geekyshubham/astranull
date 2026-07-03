@@ -10,6 +10,7 @@ import {
   sanitizeWorkerProbeMetadata,
   validateProbeResultBody,
 } from '../lib/probeResultValidation.mjs';
+import { enrichProbeMetadataWithWafCatalog } from '../lib/wafProductCatalog.mjs';
 import { getStore, persistStore } from '../store.mjs';
 import { recordEvidence } from './evidence.mjs';
 
@@ -121,6 +122,16 @@ export function authenticateProbeWorker(headers, method, path, bodyText, runtime
       body: { error: 'unauthorized', message: 'Missing probe worker authentication headers.' },
     };
   }
+  if (!tenantId || String(tenantId).trim() === '') {
+    return {
+      ok: false,
+      status: 401,
+      body: {
+        error: 'unauthorized',
+        message: 'Missing x-probe-tenant-id for signed probe worker requests.',
+      },
+    };
+  }
 
   const ts = Number(timestamp);
   if (!Number.isFinite(ts)) {
@@ -162,7 +173,7 @@ export function authenticateProbeWorker(headers, method, path, bodyText, runtime
     workerCtx: {
       workerId: String(workerId),
       role: 'probe_worker',
-      ...(tenantId != null && tenantId !== '' ? { tenantId: String(tenantId) } : {}),
+      tenantId: String(tenantId),
     },
   };
 }
@@ -179,7 +190,13 @@ function jobForWorkerResponse(job) {
 export function listPendingProbeJobsForWorker(workerCtx, runtimeConfig) {
   const store = getStore();
   const now = new Date().toISOString();
-  const jobs = store.probeJobs.filter((j) => j.status === 'pending');
+  const tenantId = workerCtx?.tenantId;
+  if (!tenantId) {
+    return [];
+  }
+  const jobs = store.probeJobs.filter(
+    (j) => j.status === 'pending' && j.tenant_id === tenantId,
+  );
   for (const job of jobs) {
     job.status = 'leased';
     job.leased_at = now;
@@ -193,6 +210,9 @@ export function ingestProbeResult(workerCtx, jobId, body, runtimeConfig) {
   const store = getStore();
   const job = store.probeJobs.find((j) => j.id === jobId);
   if (!job) return { error: 'job_not_found', status: 404 };
+  if (workerCtx?.tenantId && job.tenant_id !== workerCtx.tenantId) {
+    return { error: 'job_not_found', status: 404 };
+  }
 
   const runForJob = store.testRuns.find(
     (r) => r.id === job.test_run_id && r.tenant_id === job.tenant_id,
@@ -250,6 +270,16 @@ export function ingestProbeResult(workerCtx, jobId, body, runtimeConfig) {
     job.leased_by = workerCtx.workerId;
   }
 
+  const probeMetadata = enrichProbeMetadataWithWafCatalog(
+    {
+      ...workerMetadata,
+      external_result: externalResult,
+      probe_worker_id: workerCtx.workerId,
+      safety_attestation: safetyAttestation,
+    },
+    job.check_id,
+  );
+
   const probeEvent = {
     id: newId('event'),
     tenant_id: run.tenant_id,
@@ -260,12 +290,7 @@ export function ingestProbeResult(workerCtx, jobId, body, runtimeConfig) {
     signal_type: 'probe_result',
     timestamp: new Date().toISOString(),
     nonce_hash: job.nonce_hash,
-    metadata: {
-      ...workerMetadata,
-      external_result: externalResult,
-      probe_worker_id: workerCtx.workerId,
-      safety_attestation: safetyAttestation,
-    },
+    metadata: probeMetadata,
   };
   store.events.push(probeEvent);
 
@@ -274,13 +299,16 @@ export function ingestProbeResult(workerCtx, jobId, body, runtimeConfig) {
     {
       test_run_id: run.id,
       label: 'probe_worker_evidence',
-      metadata: {
-        probe_job_id: job.id,
-        probe_event_id: probeEvent.id,
-        external_result: externalResult,
-        vector_family: job.vector_family,
-        safety_attestation: safetyAttestation,
-      },
+      metadata: enrichProbeMetadataWithWafCatalog(
+        {
+          probe_job_id: job.id,
+          probe_event_id: probeEvent.id,
+          external_result: externalResult,
+          vector_family: job.vector_family,
+          safety_attestation: safetyAttestation,
+        },
+        job.check_id,
+      ),
       related_event_id: probeEvent.id,
     },
   );

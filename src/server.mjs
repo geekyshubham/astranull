@@ -1,7 +1,19 @@
 import http from 'node:http';
-import { loadRuntimeConfig } from './config.mjs';
+import { isConnectorsEnabledForTenant, loadRuntimeConfig } from './config.mjs';
+import { getBundledStagingJwksDocument, isBundledStagingOidcEnabled } from './lib/bundledStagingOidc.mjs';
 import { requireAgentAuth } from './lib/agentAuth.mjs';
 import { resolveHumanApiAuth } from './context.mjs';
+import {
+  isInternalAdminApiRoute,
+  isInternalAdminPageRoute,
+  isPublicApiRoute,
+  resolveStaffAuth,
+} from './lib/staffAuth.mjs';
+import { requireStaffPermission } from './lib/staffRbac.mjs';
+import * as signupIntake from './services/signupIntake.mjs';
+import * as internalManagement from './services/internalManagement.mjs';
+import * as publicSite from './services/publicSite.mjs';
+import { readArtifactUploadBody } from './lib/authorizationArtifactLedger.mjs';
 import { HttpBodyError, json, parseUrl, readBodyText, readJsonBody, serveStatic, text } from './lib/http.mjs';
 import { isProbeWorkerRoute } from './context.mjs';
 import * as probeCoordinator from './services/probeCoordinator.mjs';
@@ -18,17 +30,29 @@ import * as tokens from './services/tokens.mjs';
 import * as serviceAccounts from './services/serviceAccounts.mjs';
 import * as secretVault from './services/secretVault.mjs';
 import * as state from './services/state.mjs';
+import * as placement from './services/placement.mjs';
 import * as findings from './services/findings.mjs';
 import * as tenants from './services/tenants.mjs';
 import * as events from './services/events.mjs';
 import * as evidence from './services/evidence.mjs';
 import * as productionReleaseEvidence from './services/productionReleaseEvidence.mjs';
 import * as custodyVerification from './services/custodyVerification.mjs';
+import * as evidenceSnapshotSigning from './services/evidenceSnapshotSigning.mjs';
 import * as wafPosture from './services/wafPosture.mjs';
+import * as wafOrchestrator from './services/wafOrchestrator.mjs';
+import {
+  blockPostgresWafDriftScanRoute,
+  tryHandleWafDriftScanRoutes,
+} from './routes/wafDriftRoutes.mjs';
+import { resolveCveFeedItems } from './lib/cveFeedIngest.mjs';
+import { formatNotificationRuleForRead } from './lib/notifications.mjs';
 import * as cvePipeline from './services/cvePipeline.mjs';
 import * as externalDiscovery from './services/externalDiscovery.mjs';
 import * as supplyChainRisk from './services/supplyChainRisk.mjs';
+import * as notificationProviderCredentials from './services/notificationProviderCredentials.mjs';
 import * as notifications from './services/notifications.mjs';
+import * as notificationRetry from './services/notificationRetry.mjs';
+import * as notificationDlqRedrive from './services/notificationDlqRedrive.mjs';
 import {
   metricsPlaintext,
   observabilityFromState,
@@ -41,8 +65,10 @@ import {
   isAgentUpdateRoute,
   isNotificationManagementRoute,
   isHighScaleRoute,
+  isPlacementRoute,
   requiredAgentUpdateServiceMethods,
   requiredHighScaleServiceMethods,
+  requiredPlacementServiceMethods,
 } from './lib/postgresRouteGuard.mjs';
 
 function defaultServiceDeps() {
@@ -64,12 +90,15 @@ function defaultServiceDeps() {
     secretVault,
     events,
     notifications,
+    notificationProviderCredentials,
     productionReleaseEvidence,
     custodyVerification,
+    evidenceSnapshotSigning,
     wafPosture,
     cvePipeline,
     externalDiscovery,
     supplyChainRisk,
+    placement,
   };
 }
 
@@ -78,6 +107,7 @@ function buildServiceDeps(runtimeConfig, injectedServices) {
     return {
       agentAuth: { requireAgentAuth },
       custodyVerification,
+      evidenceSnapshotSigning,
       ...(injectedServices ?? {}),
     };
   }
@@ -88,14 +118,77 @@ function respondPostgresRouteNotWired(res) {
   return json(res, 503, { error: 'postgres_route_not_wired' });
 }
 
+function isConnectorRoute(path) {
+  return path === '/v1/connectors' || path.startsWith('/v1/connectors/');
+}
+
 function isWafPostureRoute(path) {
-  return path.startsWith('/v1/waf/') || path === '/v1/connectors' || path.startsWith('/v1/connectors/');
+  if (isConnectorRoute(path)) return false;
+  return path.startsWith('/v1/waf/');
+}
+
+function isWafActionItemRoute(path) {
+  return (
+    path === '/v1/waf/action-items'
+    || /^\/v1\/waf\/action-items\/[^/]+$/.test(path)
+    || /^\/v1\/waf\/action-items\/[^/]+\/deliver$/.test(path)
+  );
+}
+
+function isWafCvePipelineRoute(path) {
+  return path === '/v1/waf/cve-pipeline' || path.startsWith('/v1/waf/cve-pipeline/');
+}
+
+function isWafSupplyChainRoute(path) {
+  return path.startsWith('/v1/waf/supply-chain');
+}
+
+function isWafOrchestratorRoute(path) {
+  if (path === '/v1/waf/validation-plans' || path === '/v1/waf/validation-plans/scheduled') {
+    return true;
+  }
+  if (/^\/v1\/waf\/validation-plans\/[^/]+\/(execute|cancel)$/.test(path)) {
+    return true;
+  }
+  if (/^\/v1\/waf\/baselines\/[^/]+\/approve$/.test(path)) {
+    return true;
+  }
+  if (/^\/v1\/waf\/drift-events\/[^/]+\/retest$/.test(path)) {
+    return true;
+  }
+  if (path === '/v1/waf/retests') {
+    return true;
+  }
+  if (/^\/v1\/waf\/retests\/[^/]+\/execute$/.test(path)) {
+    return true;
+  }
+  if (/^\/v1\/waf\/retests\/[^/]+\/complete$/.test(path)) {
+    return true;
+  }
+  return false;
+}
+
+function isWafCorePostureRoute(path) {
+  if (!isWafPostureRoute(path)) return false;
+  if (path === '/v1/waf/drift-scans/run' || path === '/v1/waf/drift-scans/latest') return false;
+  if (isWafActionItemRoute(path)) return false;
+  if (isWafCvePipelineRoute(path)) return false;
+  if (isWafSupplyChainRoute(path)) return false;
+  if (isWafOrchestratorRoute(path)) return false;
+  return true;
 }
 
 function blockWafFeatureDisabled(runtimeConfig, path, res) {
-  if (!isWafPostureRoute(path)) return false;
+  if (!isWafPostureRoute(path) && !isConnectorRoute(path)) return false;
   if (runtimeConfig.featureFlags.wafPostureEnabled === true) return false;
   json(res, 404, { error: 'waf_feature_disabled' });
+  return true;
+}
+
+function blockConnectorFeatureDisabled(runtimeConfig, ctx, path, res) {
+  if (!isConnectorRoute(path)) return false;
+  if (isConnectorsEnabledForTenant(runtimeConfig, ctx.tenantId)) return false;
+  json(res, 404, { error: 'connector_feature_disabled' });
   return true;
 }
 
@@ -110,10 +203,50 @@ function blockDiscoveryFeatureDisabled(runtimeConfig, path, res) {
   return true;
 }
 
+function blockPostgresWafOrchestratorRoute(runtimeConfig, serviceDeps, path, res) {
+  if (runtimeConfig.persistenceMode !== 'postgres') return false;
+  if (!isWafOrchestratorRoute(path)) return false;
+  if (serviceDeps.wafOrchestrator) return false;
+  json(res, 503, { error: 'postgres_waf_orchestrator_unavailable' });
+  return true;
+}
+
 function blockPostgresWafPostureRoute(runtimeConfig, serviceDeps, path, res) {
   if (runtimeConfig.persistenceMode !== 'postgres') return false;
-  if (!isWafPostureRoute(path)) return false;
+  if (!isWafCorePostureRoute(path)) return false;
   if (serviceDeps.wafPosture) return false;
+  respondPostgresRouteNotWired(res);
+  return true;
+}
+
+function blockPostgresWafActionItemsRoute(runtimeConfig, serviceDeps, path, res) {
+  if (runtimeConfig.persistenceMode !== 'postgres') return false;
+  if (!isWafActionItemRoute(path)) return false;
+  if (serviceDeps.actionItems) return false;
+  respondPostgresRouteNotWired(res);
+  return true;
+}
+
+function blockPostgresWafCvePipelineRoute(runtimeConfig, serviceDeps, path, res) {
+  if (runtimeConfig.persistenceMode !== 'postgres') return false;
+  if (!isWafCvePipelineRoute(path)) return false;
+  if (serviceDeps.cvePipeline) return false;
+  respondPostgresRouteNotWired(res);
+  return true;
+}
+
+function blockPostgresWafSupplyChainRoute(runtimeConfig, serviceDeps, path, res) {
+  if (runtimeConfig.persistenceMode !== 'postgres') return false;
+  if (!isWafSupplyChainRoute(path)) return false;
+  if (serviceDeps.supplyChainRisk) return false;
+  respondPostgresRouteNotWired(res);
+  return true;
+}
+
+function blockPostgresDiscoveryRoute(runtimeConfig, serviceDeps, path, res) {
+  if (runtimeConfig.persistenceMode !== 'postgres') return false;
+  if (!isDiscoveryRoute(path)) return false;
+  if (serviceDeps.externalDiscovery) return false;
   respondPostgresRouteNotWired(res);
   return true;
 }
@@ -121,6 +254,11 @@ function blockPostgresWafPostureRoute(runtimeConfig, serviceDeps, path, res) {
 function resolveWafPostureService(runtimeConfig, serviceDeps) {
   if (runtimeConfig.persistenceMode === 'postgres') return serviceDeps.wafPosture;
   return wafPosture;
+}
+
+function resolveWafOrchestratorService(runtimeConfig, serviceDeps) {
+  if (runtimeConfig.persistenceMode === 'postgres') return serviceDeps.wafOrchestrator;
+  return wafOrchestrator;
 }
 
 function resolveCvePipelineService(runtimeConfig, serviceDeps) {
@@ -136,6 +274,11 @@ function resolveExternalDiscoveryService(runtimeConfig, serviceDeps) {
 function resolveSupplyChainRiskService(runtimeConfig, serviceDeps) {
   if (runtimeConfig.persistenceMode === 'postgres') return serviceDeps.supplyChainRisk;
   return supplyChainRisk;
+}
+
+function resolveActionItemsService(runtimeConfig, serviceDeps) {
+  if (runtimeConfig.persistenceMode === 'postgres') return serviceDeps.actionItems;
+  return wafPosture;
 }
 
 function resolveHighScaleService(runtimeConfig, serviceDeps) {
@@ -199,6 +342,16 @@ function blockPostgresEventsRoute(runtimeConfig, serviceDeps, path, method, res)
 
 function blockPostgresNotificationRoute(runtimeConfig, serviceDeps, path, method, res) {
   if (runtimeConfig.persistenceMode !== 'postgres') return false;
+  if (path === '/v1/notifications/retries/process' && method === 'POST') {
+    if (typeof serviceDeps.notifications?.processDueNotificationRetries === 'function') return false;
+    respondPostgresRouteNotWired(res);
+    return true;
+  }
+  if (path === '/v1/notifications/dlq/redrive' && method === 'POST') {
+    if (typeof serviceDeps.notifications?.redriveNotificationDlq === 'function') return false;
+    respondPostgresRouteNotWired(res);
+    return true;
+  }
   if (!isNotificationManagementRoute(path, method)) return false;
   if (typeof serviceDeps.notifications?.listNotifications === 'function'
     && typeof serviceDeps.notifications?.createNotificationRule === 'function') {
@@ -212,6 +365,18 @@ function blockPostgresStateRoute(runtimeConfig, serviceDeps, path, method, res) 
   if (runtimeConfig.persistenceMode !== 'postgres') return false;
   if (method !== 'GET' || path !== '/v1/state') return false;
   if (typeof serviceDeps.state?.getState === 'function') return false;
+  respondPostgresRouteNotWired(res);
+  return true;
+}
+
+function blockPostgresPlacementRoute(runtimeConfig, serviceDeps, path, method, res) {
+  if (runtimeConfig.persistenceMode !== 'postgres') return false;
+  if (!isPlacementRoute(path, method)) return false;
+  const required = requiredPlacementServiceMethods(path, method);
+  const svc = serviceDeps.placement;
+  if (required.every((name) => typeof svc?.[name] === 'function')) {
+    return false;
+  }
   respondPostgresRouteNotWired(res);
   return true;
 }
@@ -322,8 +487,9 @@ function respondRateLimited(res, retryAfterSeconds) {
 }
 
 export function createServer(options = {}) {
+  const env = options.env ?? process.env;
   const runtimeConfig =
-    options.runtimeConfig ?? loadRuntimeConfig(options.env ?? process.env);
+    options.runtimeConfig ?? loadRuntimeConfig(env);
   const serviceDeps = buildServiceDeps(runtimeConfig, options.services);
   const runtimeHealth = options.runtimeHealth ?? options.persistenceRuntime?.health;
   if (runtimeConfig.persistenceMode !== 'postgres') {
@@ -344,6 +510,16 @@ export function createServer(options = {}) {
       if (req.method === 'GET' && url.pathname === '/health') {
         incMetric('http_requests_total');
         json(res, 200, { status: 'ok', service: 'astranull' });
+        return;
+      }
+
+      if (
+        req.method === 'GET'
+        && url.pathname === '/.well-known/jwks.json'
+        && isBundledStagingOidcEnabled(env)
+      ) {
+        incMetric('http_requests_total');
+        json(res, 200, getBundledStagingJwksDocument(env));
         return;
       }
 
@@ -379,16 +555,40 @@ export function createServer(options = {}) {
         return;
       }
 
+      if (isInternalAdminPageRoute(url.pathname, req.method)) {
+        const served = await serveStatic(req, res, url);
+        if (served) return;
+      }
+
       if (url.pathname.startsWith('/v1') || url.pathname.startsWith('/internal')) {
+        const clientKey = deriveClientKey(req, {
+          trustProxyHeaders: runtimeConfig.rateLimit.trustProxyHeaders,
+        });
         if (rateLimiter) {
-          const decision = rateLimiter.check(
-            deriveClientKey(req, { trustProxyHeaders: runtimeConfig.rateLimit.trustProxyHeaders }),
-          );
+          const decision = rateLimiter.check(clientKey);
           if (!decision.allowed) {
             incMetric('api_rate_limited_total');
             respondRateLimited(res, decision.retryAfterSeconds);
             return;
           }
+        }
+        if (isPublicApiRoute(url.pathname, req.method)) {
+          await handlePublicApi(req, res, url, runtimeConfig, {
+            clientKey,
+            services: serviceDeps,
+          });
+          return;
+        }
+        if (isInternalAdminApiRoute(url.pathname, req.method)) {
+          const staffAuth = await resolveStaffAuth(req.headers, runtimeConfig);
+          if (!staffAuth.ok) {
+            json(res, staffAuth.status, staffAuth.body);
+            return;
+          }
+          await handleInternalAdminApi(req, res, url, staffAuth.ctx, runtimeConfig, {
+            services: serviceDeps,
+          });
+          return;
         }
         let probeBodyText = '';
         if (
@@ -515,14 +715,23 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
     if (!item) return json(res, 404, { error: 'not_found' });
     return json(res, 200, item);
   }
+  if (path === '/v1/evidence/snapshots/sign' && method === 'POST') {
+    const gate = requirePermission(ctx, 'evidence:write');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+    const result = await serviceDeps.evidenceSnapshotSigning.signEvidenceSnapshotCustody(ctx, body);
+    if (result.error) return json(res, result.status ?? 400, result);
+    return json(res, 201, result);
+  }
 
   if (blockDiscoveryFeatureDisabled(runtimeConfig, path, res)) return;
+  if (blockPostgresDiscoveryRoute(runtimeConfig, serviceDeps, path, res)) return;
   const discoverySvc = resolveExternalDiscoveryService(runtimeConfig, serviceDeps);
 
   if (method === 'GET' && path === '/v1/discovery/entities') {
     const gate = requirePermission(ctx, 'discovery:read');
     if (!gate.ok) return json(res, gate.status, gate.body);
-    const result = discoverySvc.listEntities(ctx);
+    const result = await discoverySvc.listEntities(ctx);
     if (result?.error) return json(res, result.status ?? 400, result);
     return json(res, 200, { items: result });
   }
@@ -530,14 +739,14 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
     const gate = requirePermission(ctx, 'discovery:write');
     if (!gate.ok) return json(res, gate.status, gate.body);
     const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
-    const result = discoverySvc.createEntity(ctx, body);
+    const result = await discoverySvc.createEntity(ctx, body);
     if (result.error) return json(res, result.status ?? 400, result);
     return json(res, 201, result);
   }
   if (method === 'GET' && path === '/v1/discovery/candidates') {
     const gate = requirePermission(ctx, 'discovery:read');
     if (!gate.ok) return json(res, gate.status, gate.body);
-    const result = discoverySvc.listCandidates(ctx);
+    const result = await discoverySvc.listCandidates(ctx);
     if (result?.error) return json(res, result.status ?? 400, result);
     return json(res, 200, { items: result });
   }
@@ -545,41 +754,167 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
     const gate = requirePermission(ctx, 'discovery:write');
     if (!gate.ok) return json(res, gate.status, gate.body);
     const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
-    const result = discoverySvc.createCandidate(ctx, body);
+    const result = await discoverySvc.createCandidate(ctx, body);
     if (result.error) return json(res, result.status ?? 400, result);
     return json(res, 201, result);
+  }
+  if (method === 'POST' && path === '/v1/discovery/sources/ingest') {
+    const gate = requirePermission(ctx, 'discovery:write');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+    const result = await discoverySvc.ingestDiscoveryCandidates(ctx, body?.source, body?.records);
+    if (result.error) return json(res, result.status ?? 400, result);
+    return json(res, 200, result);
   }
   if (method === 'GET' && path === '/v1/discovery/inbox') {
     const gate = requirePermission(ctx, 'discovery:read');
     if (!gate.ok) return json(res, gate.status, gate.body);
-    const result = discoverySvc.getDiscoveryInbox(ctx);
+    const result = await discoverySvc.getDiscoveryInbox(ctx);
+    if (result?.error) return json(res, result.status ?? 400, result);
+    return json(res, 200, result);
+  }
+  if (method === 'GET' && path === '/v1/discovery/reports/summary') {
+    const gate = requirePermission(ctx, 'discovery:read');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const result = await discoverySvc.getDiscoveryReportSummary(ctx);
     if (result?.error) return json(res, result.status ?? 400, result);
     return json(res, 200, result);
   }
   const discoveryApproveMatch = path.match(/^\/v1\/discovery\/candidates\/([^/]+)\/approve$/);
   if (discoveryApproveMatch && method === 'POST') {
-    const gate = requirePermission(ctx, 'discovery:write');
+    const gate = requirePermission(ctx, 'discovery:approve');
     if (!gate.ok) return json(res, gate.status, gate.body);
     const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
-    const result = discoverySvc.approveCandidateToTarget(ctx, discoveryApproveMatch[1], body);
+    const result = await discoverySvc.approveCandidateToTarget(ctx, discoveryApproveMatch[1], body);
     if (result.error) return json(res, result.status ?? 400, result);
     return json(res, 200, result);
   }
   const discoveryRejectMatch = path.match(/^\/v1\/discovery\/candidates\/([^/]+)\/reject$/);
   if (discoveryRejectMatch && method === 'POST') {
-    const gate = requirePermission(ctx, 'discovery:write');
+    const gate = requirePermission(ctx, 'discovery:approve');
     if (!gate.ok) return json(res, gate.status, gate.body);
     const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
-    const result = discoverySvc.rejectCandidate(ctx, discoveryRejectMatch[1], body);
+    const result = await discoverySvc.rejectCandidate(ctx, discoveryRejectMatch[1], body);
+    if (result.error) return json(res, result.status ?? 400, result);
+    return json(res, 200, result);
+  }
+  const discoveryImportMatch = path.match(/^\/v1\/discovery\/candidates\/([^/]+)\/import$/);
+  if (discoveryImportMatch && method === 'POST') {
+    const gate = requirePermission(ctx, 'discovery:approve');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+    const result = await discoverySvc.importCandidateToTargetGroup(ctx, discoveryImportMatch[1], body);
     if (result.error) return json(res, result.status ?? 400, result);
     return json(res, 200, result);
   }
 
   if (blockWafFeatureDisabled(runtimeConfig, path, res)) return;
+  if (blockConnectorFeatureDisabled(runtimeConfig, ctx, path, res)) return;
+  if (blockPostgresWafOrchestratorRoute(runtimeConfig, serviceDeps, path, res)) return;
   if (blockPostgresWafPostureRoute(runtimeConfig, serviceDeps, path, res)) return;
+  if (blockPostgresWafDriftScanRoute(runtimeConfig, serviceDeps, path, res)) return;
+  if (blockPostgresWafActionItemsRoute(runtimeConfig, serviceDeps, path, res)) return;
+  if (blockPostgresWafCvePipelineRoute(runtimeConfig, serviceDeps, path, res)) return;
+  if (blockPostgresWafSupplyChainRoute(runtimeConfig, serviceDeps, path, res)) return;
   const wafSvc = resolveWafPostureService(runtimeConfig, serviceDeps);
   const cveSvc = resolveCvePipelineService(runtimeConfig, serviceDeps);
   const supplyChainSvc = resolveSupplyChainRiskService(runtimeConfig, serviceDeps);
+  const actionItemsSvc = resolveActionItemsService(runtimeConfig, serviceDeps);
+  const wafOrchestratorSvc = resolveWafOrchestratorService(runtimeConfig, serviceDeps);
+
+  if (method === 'GET' && path === '/v1/waf/validation-plans') {
+    const gate = requirePermission(ctx, 'waf:read');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const result = await wafOrchestratorSvc.listValidationPlans(ctx);
+    if (result.error) return json(res, result.status ?? 400, result);
+    return json(res, 200, { items: result.plans ?? [] });
+  }
+  if (method === 'POST' && path === '/v1/waf/validation-plans') {
+    const gate = requirePermission(ctx, 'waf:run');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+    const result = await wafOrchestratorSvc.createValidationPlan(ctx, body);
+    if (result.error) return json(res, result.status ?? 400, result);
+    return json(res, 201, { validation_plan: result.validation_plan });
+  }
+  if (method === 'GET' && path === '/v1/waf/validation-plans/scheduled') {
+    const gate = requirePermission(ctx, 'waf:read');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const result = await wafOrchestratorSvc.getScheduledPlans(ctx);
+    if (result.error) return json(res, result.status ?? 400, result);
+    return json(res, 200, { items: result.plans ?? [] });
+  }
+  const wafPlanExecuteMatch = path.match(/^\/v1\/waf\/validation-plans\/([^/]+)\/execute$/);
+  if (wafPlanExecuteMatch && method === 'POST') {
+    const gate = requirePermission(ctx, 'waf:run');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const result = await wafOrchestratorSvc.executeValidationPlan(
+      ctx,
+      wafPlanExecuteMatch[1],
+      runtimeConfig,
+    );
+    if (result.error) return json(res, result.status ?? 400, result);
+    return json(res, 200, result);
+  }
+  const wafPlanCancelMatch = path.match(/^\/v1\/waf\/validation-plans\/([^/]+)\/cancel$/);
+  if (wafPlanCancelMatch && method === 'POST') {
+    const gate = requirePermission(ctx, 'waf:run');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const result = await wafOrchestratorSvc.cancelValidationPlan(ctx, wafPlanCancelMatch[1]);
+    if (result.error) return json(res, result.status ?? 400, result);
+    return json(res, 200, { validation_plan: result.validation_plan });
+  }
+  const wafBaselineApproveMatch = path.match(/^\/v1\/waf\/baselines\/([^/]+)\/approve$/);
+  if (wafBaselineApproveMatch && method === 'POST') {
+    const gate = requirePermission(ctx, 'waf:write');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+    const result = await wafOrchestratorSvc.approveBaseline(ctx, wafBaselineApproveMatch[1], body);
+    if (result.error) return json(res, result.status ?? 400, result);
+    return json(res, 200, result);
+  }
+  const wafDriftRetestMatch = path.match(/^\/v1\/waf\/drift-events\/([^/]+)\/retest$/);
+  if (wafDriftRetestMatch && method === 'POST') {
+    const gate = requirePermission(ctx, 'waf:run');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+    const result = await wafOrchestratorSvc.requestRetest(ctx, wafDriftRetestMatch[1], body);
+    if (result.error) return json(res, result.status ?? 400, result);
+    return json(res, 201, { retest_request: result.retest_request });
+  }
+  if (method === 'GET' && path === '/v1/waf/retests') {
+    const gate = requirePermission(ctx, 'waf:read');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const result = await wafOrchestratorSvc.listRetests(ctx, {
+      drift_event_id: url.searchParams.get('drift_event_id') || undefined,
+      waf_asset_id: url.searchParams.get('waf_asset_id') || undefined,
+      status: url.searchParams.get('status') || undefined,
+    });
+    if (result.error) return json(res, result.status ?? 400, result);
+    return json(res, 200, { items: result.items ?? [] });
+  }
+  const wafRetestExecuteMatch = path.match(/^\/v1\/waf\/retests\/([^/]+)\/execute$/);
+  if (wafRetestExecuteMatch && method === 'POST') {
+    const gate = requirePermission(ctx, 'waf:run');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+    const result = await wafOrchestratorSvc.executeRetest(
+      ctx,
+      wafRetestExecuteMatch[1],
+      body,
+      runtimeConfig,
+    );
+    if (result.error) return json(res, result.status ?? 400, result);
+    return json(res, 200, result);
+  }
+  const wafRetestCompleteMatch = path.match(/^\/v1\/waf\/retests\/([^/]+)\/complete$/);
+  if (wafRetestCompleteMatch && method === 'POST') {
+    const gate = requirePermission(ctx, 'waf:run');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const result = await wafOrchestratorSvc.completeRetest(ctx, wafRetestCompleteMatch[1]);
+    if (result.error) return json(res, result.status ?? 400, result);
+    return json(res, 200, result);
+  }
 
   if (method === 'GET' && path === '/v1/waf/assets') {
     const gate = requirePermission(ctx, 'waf:read');
@@ -613,7 +948,83 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
   if (method === 'GET' && path === '/v1/waf/coverage') {
     const gate = requirePermission(ctx, 'waf:read');
     if (!gate.ok) return json(res, gate.status, gate.body);
-    return json(res, 200, await wafSvc.getWafCoverage(ctx));
+    const windowDays = url.searchParams.get('window_days');
+    return json(res, 200, await wafSvc.getWafCoverage(ctx, {
+      ...(windowDays ? { window_days: windowDays } : {}),
+    }));
+  }
+  if (method === 'GET' && path === '/v1/waf/coverage/vendors') {
+    const gate = requirePermission(ctx, 'waf:read');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    return json(res, 200, await wafSvc.getWafCoverageVendors(ctx));
+  }
+  if (method === 'GET' && path === '/v1/waf/coverage/entities') {
+    const gate = requirePermission(ctx, 'waf:read');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const entityType = url.searchParams.get('entity_type');
+    return json(res, 200, await wafSvc.getWafCoverageEntities(ctx, {
+      ...(entityType ? { entity_type: entityType } : {}),
+    }));
+  }
+  if (method === 'GET' && path === '/v1/waf/coverage/geography') {
+    const gate = requirePermission(ctx, 'waf:read');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const regionCode = url.searchParams.get('region_code');
+    return json(res, 200, await wafSvc.getWafCoverageGeography(ctx, {
+      ...(regionCode ? { region_code: regionCode } : {}),
+    }));
+  }
+  if (method === 'GET' && path === '/v1/waf/coverage/criticality') {
+    const gate = requirePermission(ctx, 'waf:read');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const criticality = url.searchParams.get('business_criticality') ?? url.searchParams.get('criticality');
+    return json(res, 200, await wafSvc.getWafCoverageCriticality(ctx, {
+      ...(criticality ? { business_criticality: criticality } : {}),
+    }));
+  }
+  if (method === 'GET' && path === '/v1/waf/coverage/risk-roadmap') {
+    const gate = requirePermission(ctx, 'waf:read');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const query = {
+      entity_id: url.searchParams.get('entity_id') || undefined,
+      region_code: url.searchParams.get('region_code') || undefined,
+      vendor: url.searchParams.get('vendor') || undefined,
+      min_score: url.searchParams.get('min_score') || undefined,
+      limit_per_tier: url.searchParams.get('limit_per_tier') || undefined,
+    };
+    return json(res, 200, await wafSvc.getWafRiskRoadmap(ctx, query));
+  }
+  if (method === 'GET' && path === '/v1/waf/coverage/vendor-consolidation') {
+    const gate = requirePermission(ctx, 'waf:read');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    return json(res, 200, await wafSvc.getWafVendorConsolidation(ctx));
+  }
+  if (method === 'GET' && path === '/v1/waf/products') {
+    const gate = requirePermission(ctx, 'waf:read');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    if (typeof wafSvc.listWafProducts !== 'function') {
+      return json(res, 503, { error: 'postgres_route_not_wired' });
+    }
+    return json(res, 200, await wafSvc.listWafProducts(ctx));
+  }
+  if (method === 'GET' && path === '/v1/waf/scenario-intake') {
+    const gate = requirePermission(ctx, 'waf:read');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    if (typeof wafSvc.listScenarioIntakes !== 'function') {
+      return json(res, 503, { error: 'postgres_route_not_wired' });
+    }
+    return json(res, 200, await wafSvc.listScenarioIntakes(ctx));
+  }
+  if (method === 'POST' && path === '/v1/waf/scenario-intake') {
+    const gate = requirePermission(ctx, 'waf:write');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    if (typeof wafSvc.submitScenarioIntake !== 'function') {
+      return json(res, 503, { error: 'postgres_route_not_wired' });
+    }
+    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+    const result = await wafSvc.submitScenarioIntake(ctx, body);
+    if (result.error) return json(res, result.status ?? 400, result);
+    return json(res, 202, result);
   }
   if (method === 'POST' && path === '/v1/waf/validations') {
     const gate = requirePermission(ctx, 'waf:run');
@@ -645,10 +1056,24 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
     if (result.error) return json(res, result.status ?? 400, result);
     return json(res, 200, result);
   }
+  if (await tryHandleWafDriftScanRoutes(req, res, url, ctx, runtimeConfig, serviceDeps)) return;
   if (method === 'GET' && path === '/v1/waf/drift-events') {
     const gate = requirePermission(ctx, 'waf:read');
     if (!gate.ok) return json(res, gate.status, gate.body);
     return json(res, 200, { items: await wafSvc.listWafDriftEvents(ctx) });
+  }
+  const wafReportExportMatch = path.match(/^\/v1\/waf\/reports\/([^/]+)\/export$/);
+  if (wafReportExportMatch && method === 'GET') {
+    const gate = requirePermission(ctx, 'waf:read');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const format = url.searchParams.get('format') || 'json';
+    const out = await wafSvc.exportWafReport(ctx, wafReportExportMatch[1], format);
+    if (out?.error) return json(res, out.status ?? 400, out);
+    if (format === 'markdown') {
+      text(res, 200, out.content, 'text/markdown; charset=utf-8');
+      return;
+    }
+    return json(res, 200, { payload: out.payload, custody: out.custody });
   }
   const wafDriftMatch = path.match(/^\/v1\/waf\/drift-events\/([^/]+)$/);
   if (wafDriftMatch && method === 'PATCH') {
@@ -711,7 +1136,7 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
   if (method === 'GET' && path === '/v1/waf/cve-pipeline') {
     const gate = requirePermission(ctx, 'waf:read');
     if (!gate.ok) return json(res, gate.status, gate.body);
-    const result = cveSvc.listCvePipelineItems(ctx);
+    const result = await cveSvc.listCvePipelineItems(ctx);
     if (result?.error) return json(res, result.status ?? 400, result);
     return json(res, 200, result);
   }
@@ -719,15 +1144,31 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
     const gate = requirePermission(ctx, 'waf:write');
     if (!gate.ok) return json(res, gate.status, gate.body);
     const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
-    const result = cveSvc.createCvePipelineItem(ctx, body);
+    const result = await cveSvc.createCvePipelineItem(ctx, body);
     if (result.error) return json(res, result.status ?? 400, result);
     return json(res, 201, result);
+  }
+  if (method === 'POST' && path === '/v1/waf/cve-pipeline/ingest') {
+    const gate = requirePermission(ctx, 'waf:write');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+    try {
+      const feedItems = await resolveCveFeedItems(body);
+      const result = await cveSvc.ingestCveFeed(ctx, feedItems);
+      if (result.error) return json(res, result.status ?? 400, result);
+      return json(res, 202, result);
+    } catch (err) {
+      return json(res, 400, {
+        error: err.code ?? 'invalid_cve_feed_request',
+        message: err.message,
+      });
+    }
   }
   const cveTriageMatch = path.match(/^\/v1\/waf\/cve-pipeline\/([^/]+)\/triage$/);
   if (cveTriageMatch && method === 'POST') {
     const gate = requirePermission(ctx, 'waf:write');
     if (!gate.ok) return json(res, gate.status, gate.body);
-    const result = cveSvc.triageCvePipelineItem(ctx, cveTriageMatch[1]);
+    const result = await cveSvc.triageCvePipelineItem(ctx, cveTriageMatch[1]);
     if (result.error) return json(res, result.status ?? 400, result);
     return json(res, 200, result);
   }
@@ -735,16 +1176,62 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
   if (cveMatchMatch && method === 'POST') {
     const gate = requirePermission(ctx, 'waf:write');
     if (!gate.ok) return json(res, gate.status, gate.body);
-    const result = cveSvc.matchCveAssets(ctx, cveMatchMatch[1]);
+    const result = await cveSvc.matchCveAssets(ctx, cveMatchMatch[1]);
     if (result.error) return json(res, result.status ?? 400, result);
     return json(res, 200, result);
+  }
+  const cveValidateMatch = path.match(/^\/v1\/waf\/cve-pipeline\/([^/]+)\/validate$/);
+  if (cveValidateMatch && method === 'POST') {
+    const gate = requirePermission(ctx, 'waf:run');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+    const result = await cveSvc.executeSafeCveValidation(ctx, cveValidateMatch[1], body);
+    if (result.error) return json(res, result.status ?? 400, result);
+    return json(res, 201, result);
+  }
+  const cveRetestMatch = path.match(/^\/v1\/waf\/cve-pipeline\/([^/]+)\/retest$/);
+  if (cveRetestMatch && method === 'POST') {
+    const gate = requirePermission(ctx, 'waf:run');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+    const result = await cveSvc.executeCvePostMitigationRetest(ctx, cveRetestMatch[1], body);
+    if (result.error) return json(res, result.status ?? 400, result);
+    const status = result.closure?.ready ? 200 : 201;
+    return json(res, status, result);
+  }
+  const cvePlaybookMatch = path.match(/^\/v1\/waf\/cve-pipeline\/([^/]+)\/playbook$/);
+  if (cvePlaybookMatch && method === 'GET') {
+    const gate = requirePermission(ctx, 'waf:read');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const result = await cveSvc.getCveMitigationPlaybook(ctx, cvePlaybookMatch[1]);
+    if (result.error) return json(res, result.status ?? 400, result);
+    return json(res, 200, result);
+  }
+  const cvePlaybookApproveMatch = path.match(/^\/v1\/waf\/cve-pipeline\/([^/]+)\/playbook\/approve$/);
+  if (cvePlaybookApproveMatch && method === 'POST') {
+    const gate = requirePermission(ctx, 'waf:write');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+    const result = await cveSvc.approveCveMitigationPlaybook(ctx, cvePlaybookApproveMatch[1], body);
+    if (result.error) return json(res, result.status ?? 400, result);
+    return json(res, 200, result);
+  }
+  const cveCoordinatedRetestMatch = path.match(/^\/v1\/waf\/cve-pipeline\/([^/]+)\/coordinated-retest$/);
+  if (cveCoordinatedRetestMatch && method === 'POST') {
+    const gate = requirePermission(ctx, 'waf:run');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+    const result = await cveSvc.executeCoordinatedCveRetest(ctx, cveCoordinatedRetestMatch[1], body);
+    if (result.error) return json(res, result.status ?? 400, result);
+    const status = result.closure?.ready ? 200 : 201;
+    return json(res, status, result);
   }
   const cveRecommendMatch = path.match(/^\/v1\/waf\/cve-pipeline\/([^/]+)\/recommend$/);
   if (cveRecommendMatch && method === 'POST') {
     const gate = requirePermission(ctx, 'waf:write');
     if (!gate.ok) return json(res, gate.status, gate.body);
     const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
-    const result = cveSvc.createRecommendation(ctx, cveRecommendMatch[1], body.vendor);
+    const result = await cveSvc.createRecommendation(ctx, cveRecommendMatch[1], body.vendor);
     if (result.error) return json(res, result.status ?? 400, result);
     return json(res, 201, result);
   }
@@ -753,7 +1240,7 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
     const gate = requirePermission(ctx, 'waf:write');
     if (!gate.ok) return json(res, gate.status, gate.body);
     const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
-    const result = cveSvc.patchCveItemStage(ctx, cveStageMatch[1], body.stage);
+    const result = await cveSvc.patchCveItemStage(ctx, cveStageMatch[1], body.stage);
     if (result.error) return json(res, result.status ?? 400, result);
     return json(res, 200, result);
   }
@@ -761,15 +1248,29 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
   if (method === 'GET' && path === '/v1/waf/supply-chain/risks') {
     const gate = requirePermission(ctx, 'waf:read');
     if (!gate.ok) return json(res, gate.status, gate.body);
-    const result = supplyChainSvc.listSupplyChainRisks(ctx);
+    const riskId = url.searchParams.get('risk_id');
+    if (riskId) {
+      const result = await supplyChainSvc.getSupplyChainRisk(ctx, riskId);
+      if (result?.error) return json(res, result.status ?? 400, result);
+      return json(res, 200, result);
+    }
+    const result = await supplyChainSvc.listSupplyChainRisks(ctx);
     if (result?.error) return json(res, result.status ?? 400, result);
     return json(res, 200, { items: result });
+  }
+  const supplyChainRiskMatch = path.match(/^\/v1\/waf\/supply-chain\/risks\/([^/]+)$/);
+  if (supplyChainRiskMatch && method === 'GET') {
+    const gate = requirePermission(ctx, 'waf:read');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const result = await supplyChainSvc.getSupplyChainRisk(ctx, supplyChainRiskMatch[1]);
+    if (result?.error) return json(res, result.status ?? 400, result);
+    return json(res, 200, result);
   }
   if (method === 'POST' && path === '/v1/waf/supply-chain/risks') {
     const gate = requirePermission(ctx, 'waf:write');
     if (!gate.ok) return json(res, gate.status, gate.body);
     const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
-    const result = supplyChainSvc.createSupplyChainRisk(ctx, body);
+    const result = await supplyChainSvc.createSupplyChainRisk(ctx, body);
     if (result.error) return json(res, result.status ?? 400, result);
     return json(res, 201, result);
   }
@@ -777,7 +1278,7 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
     const gate = requirePermission(ctx, 'waf:write');
     if (!gate.ok) return json(res, gate.status, gate.body);
     const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
-    const result = supplyChainSvc.assessDanglingCname(ctx, body);
+    const result = await supplyChainSvc.assessDanglingCname(ctx, body);
     if (result.error) return json(res, result.status ?? 400, result);
     return json(res, 200, result);
   }
@@ -785,7 +1286,15 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
     const gate = requirePermission(ctx, 'waf:write');
     if (!gate.ok) return json(res, gate.status, gate.body);
     const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
-    const result = supplyChainSvc.assessDanglingDependency(ctx, body);
+    const result = await supplyChainSvc.assessDanglingDependency(ctx, body);
+    if (result.error) return json(res, result.status ?? 400, result);
+    return json(res, 200, result);
+  }
+  if (method === 'POST' && path === '/v1/waf/supply-chain/sources/ingest') {
+    const gate = requirePermission(ctx, 'waf:write');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+    const result = await supplyChainSvc.ingestSupplyChainSignals(ctx, body?.source, body?.records);
     if (result.error) return json(res, result.status ?? 400, result);
     return json(res, 200, result);
   }
@@ -794,7 +1303,7 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
     const gate = requirePermission(ctx, 'waf:write');
     if (!gate.ok) return json(res, gate.status, gate.body);
     const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
-    const result = supplyChainSvc.patchRiskState(ctx, supplyChainStateMatch[1], body.state, body);
+    const result = await supplyChainSvc.patchRiskState(ctx, supplyChainStateMatch[1], body.state, body);
     if (result.error) return json(res, result.status ?? 400, result);
     return json(res, 200, result);
   }
@@ -803,7 +1312,27 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
     const gate = requirePermission(ctx, 'waf:write');
     if (!gate.ok) return json(res, gate.status, gate.body);
     const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
-    const result = supplyChainSvc.createRemediationTicket(ctx, supplyChainTicketMatch[1], body);
+    const result = await supplyChainSvc.createRemediationTicket(ctx, supplyChainTicketMatch[1], body);
+    if (result.error) return json(res, result.status ?? 400, result);
+    return json(res, 201, result);
+  }
+  const supplyChainPhaseAuthMatch = path.match(/^\/v1\/waf\/supply-chain\/risks\/([^/]+)\/phase-authorization$/);
+  if (supplyChainPhaseAuthMatch && method === 'GET') {
+    const gate = requirePermission(ctx, 'waf:read');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const result = await supplyChainSvc.getPhaseAuthorizations(ctx, supplyChainPhaseAuthMatch[1]);
+    if (result.error) return json(res, result.status ?? 400, result);
+    return json(res, 200, result);
+  }
+  if (supplyChainPhaseAuthMatch && method === 'POST') {
+    const gate = requirePermission(ctx, 'supply_chain:authorize');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+    const result = await supplyChainSvc.submitPhaseAuthorization(
+      ctx,
+      supplyChainPhaseAuthMatch[1],
+      body,
+    );
     if (result.error) return json(res, result.status ?? 400, result);
     return json(res, 201, result);
   }
@@ -811,7 +1340,7 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
   if (method === 'GET' && path === '/v1/waf/action-items') {
     const gate = requirePermission(ctx, 'waf:read');
     if (!gate.ok) return json(res, gate.status, gate.body);
-    return json(res, 200, { items: wafSvc.listActionItems(ctx) });
+    return json(res, 200, { items: await actionItemsSvc.listActionItems(ctx) });
   }
   if (method === 'POST' && path === '/v1/waf/action-items') {
     const gate = requirePermission(ctx, 'waf:write');
@@ -820,7 +1349,7 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
     const findingId = body.finding_id ?? body.findingId;
     const finding = findingId ? await serviceDeps.findings.getFinding(ctx, findingId) : null;
     if (!finding) return json(res, 404, { error: 'not_found' });
-    const result = wafSvc.createActionItemFromFinding(ctx, finding, body);
+    const result = await actionItemsSvc.createActionItemFromFinding(ctx, finding, body);
     if (result.error) return json(res, result.status ?? 400, result);
     return json(res, result.created ? 201 : 200, result);
   }
@@ -829,7 +1358,23 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
     const gate = requirePermission(ctx, 'waf:write');
     if (!gate.ok) return json(res, gate.status, gate.body);
     const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
-    const result = wafSvc.patchActionItemStatus(ctx, actionItemMatch[1], body);
+    const result = await actionItemsSvc.patchActionItemStatus(ctx, actionItemMatch[1], body);
+    if (result.error) return json(res, result.status ?? 400, result);
+    return json(res, 200, result);
+  }
+  const actionItemDeliverMatch = path.match(/^\/v1\/waf\/action-items\/([^/]+)\/deliver$/);
+  if (actionItemDeliverMatch && method === 'POST') {
+    const gate = requirePermission(ctx, 'waf:write');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+    const channel = body.channel ?? body.connector;
+    const dryRun = body.dry_run !== false && body.dryRun !== false;
+    const result = await actionItemsSvc.deliverActionItem(
+      ctx,
+      actionItemDeliverMatch[1],
+      channel,
+      { dry_run: dryRun, body },
+    );
     if (result.error) return json(res, result.status ?? 400, result);
     return json(res, 200, result);
   }
@@ -888,7 +1433,59 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
       serviceDeps.notifications?.createNotificationRule ?? notifications.createNotificationRule;
     const result = await createFn(ctx, body);
     if (result.error) return json(res, result.status ?? 400, result);
-    return json(res, 201, result);
+    return json(res, 201, formatNotificationRuleForRead(result));
+  }
+  if (method === 'POST' && path === '/v1/notifications/retries/process') {
+    const gate = requirePermission(ctx, 'notification:write');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    if (blockPostgresNotificationRoute(runtimeConfig, serviceDeps, path, method, res)) return;
+    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+    const processFn =
+      serviceDeps.notifications?.processDueNotificationRetries
+      ?? notificationRetry.processDueNotificationRetries;
+    const result = await processFn(ctx, {
+      dryRun: body.dry_run === true,
+      asOf: body.as_of,
+      deliveryMode: 'metadata_only',
+    });
+    return json(res, 200, result);
+  }
+  if (method === 'POST' && path === '/v1/notifications/dlq/redrive') {
+    const gate = requirePermission(ctx, 'notification:write');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    if (blockPostgresNotificationRoute(runtimeConfig, serviceDeps, path, method, res)) return;
+    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+    const redriveFn =
+      serviceDeps.notifications?.redriveNotificationDlq
+      ?? notificationDlqRedrive.redriveNotificationDlq;
+    const result = await redriveFn(ctx, {
+      attemptIds: Array.isArray(body.attempt_ids) ? body.attempt_ids.map(String) : undefined,
+      ruleId: body.rule_id,
+      dryRun: body.dry_run === true,
+      forceMetadataOnly: true,
+    });
+    return json(res, 200, result);
+  }
+  if (method === 'POST' && path === '/v1/notifications/provider-credentials') {
+    const gate = requirePermission(ctx, 'notification:write');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    if (runtimeConfig.persistenceMode === 'postgres' && !serviceDeps.secretVault) {
+      return respondPostgresRouteNotWired(res);
+    }
+    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+    const upsertFn =
+      serviceDeps.notificationProviderCredentials?.upsertNotificationProviderCredential
+      ?? notificationProviderCredentials.upsertNotificationProviderCredential;
+    const result = await upsertFn(
+      ctx,
+      body,
+      runtimeConfig.secretEncryptionKey,
+      { secretVault: serviceDeps.secretVault },
+    );
+    if (result.error) {
+      return json(res, result.status ?? 400, { error: result.error, message: result.message });
+    }
+    return json(res, result.rotated ? 200 : 201, { provider_credential: result.provider_credential });
   }
 
   if (method === 'GET' && path === '/v1/state') {
@@ -899,6 +1496,22 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
       runtimeConfig.persistenceMode === 'postgres' ? serviceDeps.state.getState : state.getState;
     const payload = await getStateFn(ctx);
     return json(res, 200, payload);
+  }
+
+  if (method === 'GET' && path === '/v1/placement/reviews') {
+    const gate = requirePermission(ctx, 'target_group:read');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    if (blockPostgresPlacementRoute(runtimeConfig, serviceDeps, path, method, res)) return;
+    const listReviewsFn =
+      runtimeConfig.persistenceMode === 'postgres'
+        ? serviceDeps.placement.listPlacementReviews
+        : placement.listPlacementReviews;
+    const targetGroupId = url.searchParams.get('target_group_id');
+    const result = await Promise.resolve(
+      listReviewsFn(ctx, { target_group_id: targetGroupId }),
+    );
+    if (result?.error) return json(res, result.status ?? 404, result);
+    return json(res, 200, result);
   }
 
   if (path === '/v1/target-groups' && method === 'GET') {
@@ -920,6 +1533,22 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
     if (!g) return json(res, 404, { error: 'not_found' });
     return json(res, 200, g);
   }
+  if (tgMatch && method === 'PATCH') {
+    const gate = requirePermission(ctx, 'target_group:write');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+    const g = await serviceDeps.targetGroups.patchTargetGroup(ctx, tgMatch[1], body);
+    if (!g) return json(res, 404, { error: 'not_found' });
+    return json(res, 200, g);
+  }
+  if (tgMatch && method === 'DELETE') {
+    const gate = requirePermission(ctx, 'target_group:write');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const result = await serviceDeps.targetGroups.archiveTargetGroup(ctx, tgMatch[1]);
+    if (!result) return json(res, 404, { error: 'not_found' });
+    if (result.error) return json(res, result.status ?? 400, result);
+    return json(res, 200, result);
+  }
   const tgtMatch = path.match(/^\/v1\/target-groups\/([^/]+)\/targets$/);
   if (tgtMatch && method === 'POST') {
     const gate = requirePermission(ctx, 'target_group:write');
@@ -928,6 +1557,23 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
     const t = await serviceDeps.targetGroups.addTarget(ctx, tgtMatch[1], body);
     if (!t) return json(res, 404, { error: 'not_found' });
     return json(res, 201, t);
+  }
+  const tgtIdMatch = path.match(/^\/v1\/target-groups\/([^/]+)\/targets\/([^/]+)$/);
+  if (tgtIdMatch && method === 'PATCH') {
+    const gate = requirePermission(ctx, 'target_group:write');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+    const t = await serviceDeps.targetGroups.patchTarget(ctx, tgtIdMatch[1], tgtIdMatch[2], body);
+    if (!t) return json(res, 404, { error: 'not_found' });
+    return json(res, 200, t);
+  }
+  if (tgtIdMatch && method === 'DELETE') {
+    const gate = requirePermission(ctx, 'target_group:write');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const result = await serviceDeps.targetGroups.deleteTarget(ctx, tgtIdMatch[1], tgtIdMatch[2]);
+    if (!result) return json(res, 404, { error: 'not_found' });
+    if (result.error) return json(res, result.status ?? 400, result);
+    return json(res, 200, result);
   }
 
   if (path === '/v1/bootstrap-tokens' && method === 'POST') {
@@ -1315,12 +1961,21 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
   }
   const hsArtPost = path.match(/^\/v1\/high-scale-requests\/([^/]+)\/artifacts$/);
   if (hsArtPost && method === 'POST') {
-    const gate = requirePermission(ctx, 'high_scale:request');
+    const gate = requirePermission(ctx, 'high_scale:write');
     if (!gate.ok) return json(res, gate.status, gate.body);
     if (blockPostgresHighScaleRoute(runtimeConfig, serviceDeps, path, method, res)) return;
-    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
-    const art = await Promise.resolve(hsSvc.addArtifact(ctx, hsArtPost[1], body));
+    let upload;
+    try {
+      upload = await readArtifactUploadBody(req, runtimeConfig.maxJsonBodyBytes);
+    } catch (err) {
+      if (err instanceof HttpBodyError) return json(res, err.status, { error: err.code });
+      throw err;
+    }
+    const art = await Promise.resolve(
+      hsSvc.addArtifact(ctx, hsArtPost[1], upload.body, { uploadEnvelope: upload.envelope }),
+    );
     if (!art) return json(res, 404, { error: 'not_found' });
+    if (art.error) return json(res, art.status ?? 400, art);
     return json(res, 201, art);
   }
   if (hsArtPost && method === 'GET') {
@@ -1371,6 +2026,19 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
         : adapterStub.status(ctx, hsAdapter[1]);
     if (!status) return json(res, 404, { error: 'not_found' });
     return json(res, 200, status);
+  }
+  const hsTelemetryIngest = path.match(/^\/internal\/soc\/high-scale\/([^/]+)\/telemetry\/ingest$/);
+  if (hsTelemetryIngest && method === 'POST') {
+    const gate = requirePermission(ctx, 'soc:high_scale');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    if (blockPostgresHighScaleRoute(runtimeConfig, serviceDeps, path, method, res)) return;
+    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+    const result = await Promise.resolve(
+      hsSvc.ingestGovernedAdapterTelemetry(ctx, hsTelemetryIngest[1], body),
+    );
+    if (!result) return json(res, 404, { error: 'not_found' });
+    if (result.error) return json(res, result.status ?? 400, result);
+    return json(res, 201, result);
   }
   const hsTelemetry = path.match(/^\/internal\/soc\/high-scale\/([^/]+)\/telemetry$/);
   if (hsTelemetry && method === 'POST') {
@@ -1488,4 +2156,232 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
   }
 
   json(res, 404, { error: 'not_found' });
+}
+
+async function handlePublicApi(req, res, url, runtimeConfig, options = {}) {
+  const path = url.pathname;
+  const method = req.method;
+  incMetric('http_requests_total');
+  const signupService = options.services?.signupIntake
+    ?? options.services?.internalManagement
+    ?? signupIntake;
+
+  if (method === 'GET' && path === '/v1/public/site-config') {
+    return json(res, 200, publicSite.getPublicSiteConfig(runtimeConfig));
+  }
+
+  if (method === 'POST' && path === '/v1/signup-requests') {
+    if (runtimeConfig.publicSite?.signupEnabled === false) {
+      return json(res, 403, { error: 'signup_disabled' });
+    }
+    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+    const result = await signupService.createSignupRequest(body, { clientKey: options.clientKey });
+    if (result.error === 'validation_failed') {
+      return json(res, 400, result);
+    }
+    if (result.error === 'rate_limited') {
+      res.setHeader('Retry-After', String(result.retry_after_seconds ?? 60));
+      return json(res, 429, { error: 'rate_limited' });
+    }
+    if (result.error === 'duplicate_request') {
+      return json(res, 409, result);
+    }
+    return json(res, 201, result);
+  }
+
+  const signupGet = path.match(/^\/v1\/signup-requests\/([^/]+)$/);
+  if (signupGet && method === 'GET') {
+    const record = await signupService.getSignupRequest(signupGet[1]);
+    if (!record) return json(res, 404, { error: 'not_found' });
+    return json(res, 200, { request: signupService.sanitizeSignupForPublic(record) });
+  }
+
+  return json(res, 404, { error: 'not_found' });
+}
+
+async function handleInternalAdminApi(req, res, url, ctx, runtimeConfig, options = {}) {
+  const path = url.pathname;
+  const method = req.method;
+  incMetric('http_requests_total');
+  const managementService = options.services?.internalManagement ?? internalManagement;
+  const signupService = options.services?.signupIntake
+    ?? options.services?.internalManagement
+    ?? signupIntake;
+
+  if (runtimeConfig.persistenceMode === 'postgres' && !options.services?.internalManagement) {
+    return json(res, 503, { error: 'postgres_internal_admin_not_wired' });
+  }
+
+  if (method === 'GET' && path === '/internal/admin/overview') {
+    const gate = requireStaffPermission(ctx, 'staff:signup:read');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    return json(res, 200, await managementService.getInternalOverview());
+  }
+
+  if (method === 'GET' && path === '/internal/admin/signup-requests') {
+    const gate = requireStaffPermission(ctx, 'staff:signup:read');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const state = url.searchParams.get('state') ?? undefined;
+    return json(res, 200, { items: await managementService.listSignupRequests({ state }) });
+  }
+
+  const signupApprove = path.match(/^\/internal\/admin\/signup-requests\/([^/]+)\/approve$/);
+  if (signupApprove && method === 'POST') {
+    const gate = requireStaffPermission(ctx, 'staff:signup:decide', {
+      resource_type: 'signup_request',
+      resource_id: signupApprove[1],
+    });
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+    const result = await signupService.approveSignupRequest(ctx, signupApprove[1], body);
+    if (!result) return json(res, 404, { error: 'not_found' });
+    if (result.error) return json(res, 409, result);
+    return json(res, 200, result);
+  }
+
+  const signupReject = path.match(/^\/internal\/admin\/signup-requests\/([^/]+)\/reject$/);
+  if (signupReject && method === 'POST') {
+    const gate = requireStaffPermission(ctx, 'staff:signup:decide', {
+      resource_type: 'signup_request',
+      resource_id: signupReject[1],
+    });
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+    const result = await signupService.rejectSignupRequest(ctx, signupReject[1], body);
+    if (!result) return json(res, 404, { error: 'not_found' });
+    if (result.error) return json(res, 409, result);
+    return json(res, 200, result);
+  }
+
+  if (method === 'GET' && path === '/internal/admin/tenants') {
+    const gate = requireStaffPermission(ctx, 'staff:tenant:read');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    return json(res, 200, {
+      items: await managementService.listTenants({ q: url.searchParams.get('q') ?? undefined }),
+    });
+  }
+
+  const tenantDetail = path.match(/^\/internal\/admin\/tenants\/([^/]+)$/);
+  if (tenantDetail && method === 'GET') {
+    const gate = requireStaffPermission(ctx, 'staff:tenant:read');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const detail = await managementService.getTenantDetail(tenantDetail[1]);
+    if (!detail) return json(res, 404, { error: 'not_found' });
+    return json(res, 200, detail);
+  }
+
+  if (tenantDetail && method === 'PATCH') {
+    const gate = requireStaffPermission(ctx, 'staff:tenant:write', {
+      resource_type: 'tenant',
+      resource_id: tenantDetail[1],
+    });
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+    const detail = await managementService.patchTenant(ctx, tenantDetail[1], body);
+    if (!detail) return json(res, 404, { error: 'not_found' });
+    if (detail.error) return json(res, 400, detail);
+    return json(res, 200, detail);
+  }
+
+  const tenantSubscription = path.match(/^\/internal\/admin\/tenants\/([^/]+)\/subscription$/);
+  if (tenantSubscription && method === 'GET') {
+    const gate = requireStaffPermission(ctx, 'staff:subscription:read');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const subscription = await managementService.getTenantSubscription(tenantSubscription[1]);
+    if (!subscription) return json(res, 404, { error: 'not_found' });
+    return json(res, 200, subscription);
+  }
+
+  if (tenantSubscription && method === 'PATCH') {
+    const gate = requireStaffPermission(ctx, 'staff:subscription:write', {
+      resource_type: 'tenant_subscription',
+      resource_id: tenantSubscription[1],
+    });
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+    const subscription = await managementService.patchTenantSubscription(
+      ctx,
+      tenantSubscription[1],
+      body,
+    );
+    if (!subscription) return json(res, 404, { error: 'not_found' });
+    if (subscription.error) return json(res, 400, subscription);
+    return json(res, 200, subscription);
+  }
+
+  const tenantEntitlements = path.match(/^\/internal\/admin\/tenants\/([^/]+)\/entitlements$/);
+  if (tenantEntitlements && method === 'POST') {
+    const gate = requireStaffPermission(ctx, 'staff:entitlement:write', {
+      resource_type: 'entitlement_grant',
+      resource_id: tenantEntitlements[1],
+    });
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+    const grant = await managementService.upsertEntitlementGrant(ctx, tenantEntitlements[1], body);
+    if (grant.error) return json(res, 400, grant);
+    return json(res, 200, grant);
+  }
+
+  const resendInvite = path.match(/^\/internal\/admin\/tenants\/([^/]+)\/users\/([^/]+)\/resend-invite$/);
+  if (resendInvite && method === 'POST') {
+    const gate = requireStaffPermission(ctx, 'staff:support:write');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+    const result = await managementService.resendOwnerInvite(ctx, resendInvite[1], {
+      ...body,
+      user_id: resendInvite[2],
+    });
+    if (!result) return json(res, 404, { error: 'not_found' });
+    return json(res, 200, result);
+  }
+
+  const disableUser = path.match(/^\/internal\/admin\/tenants\/([^/]+)\/users\/([^/]+)\/disable$/);
+  if (disableUser && method === 'POST') {
+    const gate = requireStaffPermission(ctx, 'staff:support:write');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+    const result = await managementService.disableTenantUser(ctx, disableUser[1], disableUser[2], body);
+    if (!result) return json(res, 404, { error: 'not_found' });
+    return json(res, 200, result);
+  }
+
+  if (method === 'GET' && path === '/internal/admin/approval-requests') {
+    const gate = requireStaffPermission(ctx, 'staff:approval:read');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    return json(res, 200, {
+      items: await managementService.listApprovalRequests({
+        state: url.searchParams.get('state') ?? undefined,
+        kind: url.searchParams.get('kind') ?? undefined,
+      }),
+    });
+  }
+
+  const approvalDecision = path.match(/^\/internal\/admin\/approval-requests\/([^/]+)\/decision$/);
+  if (approvalDecision && method === 'POST') {
+    const gate = requireStaffPermission(ctx, 'staff:approval:decide', {
+      resource_type: 'internal_approval_request',
+      resource_id: approvalDecision[1],
+    });
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+    const result = await managementService.decideApprovalRequest(ctx, approvalDecision[1], body);
+    if (!result) return json(res, 404, { error: 'not_found' });
+    if (result.error) return json(res, 409, result);
+    return json(res, 200, result);
+  }
+
+  if (method === 'GET' && path === '/internal/admin/audit-log') {
+    const gate = requireStaffPermission(ctx, 'staff:audit:read');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    return json(res, 200, {
+      items: await managementService.listInternalAudit({
+        tenant_id: url.searchParams.get('tenant_id') ?? undefined,
+        staff_id: url.searchParams.get('staff_id') ?? undefined,
+        action: url.searchParams.get('action') ?? undefined,
+        limit: Number(url.searchParams.get('limit') ?? 100),
+      }),
+    });
+  }
+
+  return json(res, 404, { error: 'not_found' });
 }

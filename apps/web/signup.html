@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sign up — AstraNull</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body class="public-page">
+  <header class="public-header">
+    <div class="public-brand"><a href="/">AstraNull</a></div>
+    <nav class="public-nav">
+      <a href="/app" class="btn secondary">Log in</a>
+    </nav>
+  </header>
+  <main class="public-form-shell">
+    <section class="card public-form-card" id="signupFormPanel">
+      <h1>Request an AstraNull account</h1>
+      <p class="muted">Account creation is approval-gated. We review organization details before provisioning a tenant.</p>
+      <form id="signupForm" class="public-form">
+        <label>Organization name
+          <input name="organization_name" required minlength="2" placeholder="Acme Corp" />
+        </label>
+        <label>Work email
+          <input name="contact_email" type="email" required placeholder="you@company.com" />
+        </label>
+        <label>Primary contact
+          <input name="contact_name" required minlength="2" placeholder="Jordan Lee" />
+        </label>
+        <label>Requested plan
+          <select name="requested_plan">
+            <option value="starter">Starter</option>
+            <option value="professional">Professional</option>
+            <option value="enterprise">Enterprise</option>
+          </select>
+        </label>
+        <label>Intended use
+          <textarea name="intended_use" required minlength="8" rows="3" placeholder="Defensive DDoS readiness validation for declared production origins."></textarea>
+        </label>
+        <label>Region / data residency preference
+          <select name="region">
+            <option value="us">United States</option>
+            <option value="eu">European Union</option>
+            <option value="uk">United Kingdom</option>
+            <option value="apac">Asia-Pacific</option>
+          </select>
+        </label>
+        <label class="checkbox-row">
+          <input name="high_scale_interest" type="checkbox" />
+          <span>We may need SOC-governed high-scale validation (does not grant execution rights)</span>
+        </label>
+        <button type="submit" class="btn">Submit request</button>
+      </form>
+      <p id="signupError" class="public-error" hidden></p>
+    </section>
+    <section class="card public-form-card" id="signupSuccessPanel" hidden>
+      <h1>Request submitted</h1>
+      <p>Your account request is under review. You can check status with your request ID.</p>
+      <dl class="public-kv">
+        <dt>Request ID</dt><dd id="submittedRequestId">—</dd>
+        <dt>Status</dt><dd id="submittedRequestState">submitted</dd>
+      </dl>
+      <p class="muted" id="submittedCustomerNotice"></p>
+      <a href="/" class="btn secondary">Back to landing</a>
+    </section>
+  </main>
+  <script type="module" src="/signup.js"></script>
+</body>
+</html>

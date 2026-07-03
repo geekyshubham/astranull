@@ -63,6 +63,7 @@ When limited, the API returns HTTP `429` with JSON `{ "error": "rate_limited" }`
 | GET | `/`, `/app.js`, `/styles.css` | — | Static web UI. |
 | GET | `/v1/checks` | — | Global check catalog. **Production gate:** tenant-aware RBAC if catalog is customized per tenant. |
 | GET | `/v1/state` | `tenant:read` | Dashboard aggregate. In `postgres` mode uses `runtime.services.state.getState` (evidence-backed readiness from Postgres repositories); high-scale counts and kill-switch state return explicit not-wired metadata until those route families migrate. |
+| GET | `/v1/placement/reviews` | `target_group:read` | Optional query `target_group_id`. Metadata-only per-target-group placement diagnostics (`proven`, `needs_baseline`, `missing_agent`, `misplaced_risk`) with summary counts, bound/online agent ids, recent observation counts, and warnings. `404` `not_found` when `target_group_id` is not declared for the tenant. Postgres mode uses `runtime.services.placement.listPlacementReviews`. |
 
 ## Tenant and environments
 
@@ -85,6 +86,8 @@ When limited, the API returns HTTP `429` with JSON `{ "error": "rate_limited" }`
 
 ## WAF posture add-on
 
+**OpenAPI (contract draft):** [`docs/api/waf-posture-openapi.json`](api/waf-posture-openapi.json) — OpenAPI 3.1 artifact for WAF assets, coverage, safe validations, orchestrator execute/retest/cancel paths, action items, RBAC, and metadata-only safety notes. Coverage analytics and CVE playbook routes are contracted in [WAF API Contract](backend/13-waf-posture-api-contract.md) and land in OpenAPI under **WAF-022**. Check locally with `npm run api:waf:openapi:check`. This artifact does **not** close staging/live orchestrator, provider, or security/release signoff gates.
+
 Disabled by default. `ASTRANULL_WAF_POSTURE_ENABLED=1` enables the current route family; when disabled, `/v1/waf/*` returns `404 { "error": "waf_feature_disabled" }`. The add-on does **not** require cloud/WAF credentials for core no-access mode. PostgreSQL schema, migration support (`0008_waf_posture`), repository primitives, and `runtime.services.wafPosture` adapters exist for the WAF asset/coverage/validation/drift routes; in custom Postgres servers without an injected WAF service the API still fails closed with `503 { "error": "postgres_route_not_wired" }`.
 
 WAF evidence is metadata-only. WAF validation contracts reject raw payload/body/header/packet fields, secrets, exploit material, SOC-gated profiles, prohibited profiles, automatic discovery approval, and protected-posture finalization without bound safe test-run evidence or explicit metadata-only scenario evidence.
@@ -95,13 +98,28 @@ WAF evidence is metadata-only. WAF validation contracts reject raw payload/body/
 | POST | `/v1/waf/assets` | `waf:write` | `{ target_group_id, canonical_url? \| hostname?, target_id?, owner_hint?, expected_waf_required? }` | `201 { asset }`. Discovery candidates cannot be auto-approved through this route. |
 | GET | `/v1/waf/assets/:id` | `waf:read` | — | `{ asset, current_posture? }` or `404`. |
 | PATCH | `/v1/waf/assets/:id` | `waf:write` | metadata fields only | `{ asset }`; unsafe/raw fields are rejected. |
-| GET | `/v1/waf/coverage` | `waf:read` | — | `{ total_assets, protected, underprotected, unprotected, unknown, excluded, percentages }`. |
+| GET | `/v1/waf/coverage` | `waf:read` | `window_days?` | Today: status counts and `percentages`. **Planned (WAF-014):** add `coverage_ratio` and `trend[]` — see [WAF API Contract](backend/13-waf-posture-api-contract.md). |
 | POST | `/v1/waf/validations` | `waf:run` | `{ waf_asset_id, modes?, probe_profile?, marker_profile? }` | `201 { validation_run }`. Safe marker profiles enforce `max_requests` 1-5 and `timeout_ms` 100-5000. |
 | GET | `/v1/waf/validations` | `waf:read` | — | `{ items }` validation runs. |
 | GET | `/v1/waf/validations/:id` | `waf:read` | — | `{ validation_run, scenario_results }` or `404`. |
 | POST | `/v1/waf/validations/:id/finalize` | `waf:run` | metadata-only summary and `scenario_results[]` | `{ validation_run, posture }`; writes a current posture snapshot, refreshes WAF posture findings for underprotected/unprotected outcomes, and creates/refreshes behavior-drift events when previously protected posture weakens. `protected` is returned only when WAF is detected and validation passes with corroborating metadata evidence. |
 | GET | `/v1/waf/drift-events` | `waf:read` | — | `{ items }` open and historical behavior-drift events. |
 | PATCH | `/v1/waf/drift-events/:id` | `waf:write` | `{ status, notes? }` | `{ drift_event }`; allowed statuses are `open`, `acknowledged`, `remediation_started`, `retest_pending`, `resolved`, `accepted_risk`, and `false_positive`. |
+
+### WAF coverage analytics (planned — WAF-014)
+
+Contracted in [WAF API Contract](backend/13-waf-posture-api-contract.md); not yet routed in `server.mjs` or `waf-posture-openapi.json` until WAF-014/WAF-022 land.
+
+| Method | Path | Permission | Response summary |
+|---|---|---|---|
+| GET | `/v1/waf/coverage/vendors` | `waf:read` | Vendor/product mix and counts. |
+| GET | `/v1/waf/coverage/entities` | `waf:read` | Business-unit/subsidiary rollups. |
+| GET | `/v1/waf/coverage/criticality` | `waf:read` | Coverage by `business_criticality`. |
+| GET | `/v1/waf/coverage/geography` | `waf:read` | Coverage by declared region. |
+| GET | `/v1/waf/coverage/risk-roadmap` | `waf:read` | Tier 1–4 deployment priorities. |
+| GET | `/v1/waf/coverage/vendor-consolidation` | `waf:read` | Read-only multi-vendor advisory. |
+
+CVE playbook routes (`/v1/waf/cve-pipeline/:id/playbook`, etc.) are specified in [Multi-Vendor CVE Playbook](detection/17-multi-vendor-cve-mitigation-playbook.md) (WAF-020).
 
 ### WAF connector framework
 
@@ -277,8 +295,10 @@ Both CLIs reject secrets, raw payloads, logs, packet captures, SQL dumps, IP inv
 
 | Method | Path | Permission | Request | Response |
 |---|---|---|---|---|
-| GET | `/v1/notifications` | `notification:read` | — | `{ rules, events }` for the caller’s tenant. Events include `delivery_attempts` (channel, `destination_preview`, status, timestamps). No cross-tenant data. |
-| POST | `/v1/notifications` | `notification:write` | `{ channel?, destination?, triggers?, enabled? }` | Created rule on success. Validates `channel` (`in_app`, `webhook`, `email`, `slack`, `teams`), `triggers` (allowed set), and webhook `destination` (`https://` or dev-only `http` hosts). Non-`in_app` rules require a non-empty `destination`. Invalid input returns HTTP `400` with `{ error, status: 400 }`. **Default:** external channels record `queued_provider_not_configured` (no outbound send). **Opt-in:** set `ASTRANULL_NOTIFICATION_DELIVERY_MODE=webhook` to POST redacted event JSON to webhook rules only (`delivered_provider` / `provider_retry_scheduled` / `provider_failed_dlq`); email/Slack/Teams remain metadata-only. |
+| GET | `/v1/notifications` | `notification:read` | — | `{ rules, events }` for the caller’s tenant. Rules expose `destination_preview` only; events include `delivery_attempts` (channel, `destination_preview`, status, timestamps). No cross-tenant data and no full provider destinations. |
+| POST | `/v1/notifications` | `notification:write` | `{ channel?, destination?, triggers?, enabled? }` | Created rule on success with `destination_preview` only in the HTTP response. Validates `channel` (`in_app`, `webhook`, `email`, `slack`, `teams`), `triggers` (allowed set), and webhook `destination` (`https://` or dev-only `http` hosts). Non-`in_app` rules require a non-empty `destination`. Invalid input returns HTTP `400` with `{ error, status: 400 }`. **Default:** external channels record `queued_provider_not_configured` (no outbound send). **Opt-in:** set `ASTRANULL_NOTIFICATION_DELIVERY_MODE=webhook` to POST redacted event JSON to webhook rules only (`delivered_provider` / `provider_retry_scheduled` / `provider_failed_dlq`); email/Slack/Teams remain metadata-only. |
+| POST | `/v1/notifications/retries/process` | `notification:write` | `{ dry_run?, as_of? }` | Processes due `provider_retry_scheduled` attempts in forced metadata-only mode. Returns safe retry summary without internal `delivery_record`, full destinations, provider URLs, request/response bodies, logs, tokens, or secrets. Production still uses an externally scheduled runner plus provider/staging evidence. |
+| POST | `/v1/notifications/dlq/redrive` | `notification:write` | `{ dry_run?, attempt_ids?, rule_id? }` | Requeues selected `provider_failed_dlq` attempts through the HTTP/UI metadata-only path. Client-supplied provider-delivery overrides are ignored; response strips internal `delivery_record`, full destinations, provider URLs, request/response bodies, logs, tokens, and secrets. |
 
 ## High-scale (customer)
 
@@ -305,7 +325,8 @@ Requires `soc:high_scale` or `soc:kill_switch`. **Customer roles (engineer, view
 | POST | `/internal/soc/high-scale/:id/artifacts/:artifactId/review` | `soc:high_scale` | `{ status: accepted\|rejected }` | SOC review. |
 | GET/POST | `/internal/soc/high-scale/:id/notes` | `soc:high_scale` | `{ body }` on POST | SOC transcript notes (redacted on export). |
 | GET | `/internal/soc/high-scale/:id/adapter-status` | `soc:high_scale` | — | Adapter status; production must reflect real fleet state. |
-| POST | `/internal/soc/high-scale/:id/telemetry` | `soc:high_scale` | `{ category, live_status?, observed_at?, source?, metrics? }` | Metadata-only SOC telemetry during governed runs. Allowed when request `state` is `scheduled`, `running`, `stopped`, or `closed`; otherwise `409` `telemetry_not_active`. Categories: `external_availability`, `agent_health`, `service_health`, `mitigation`, `stop_evidence`, `adapter_metric`. Optional `live_status`: `stable`, `mitigating`, `degraded`, `breached_threshold`, `stopping`, `stopped`, `inconclusive`. Rejects nested raw/payload/header/log/body fields in `metrics` with `400` `forbidden_telemetry_fields`. Customer/engineer roles receive `403`. Audit: `high_scale.telemetry_recorded` (category, live status, request id only). **Production gate:** live provider/staging telemetry feeds and automated ingestion. |
+| POST | `/internal/soc/high-scale/:id/telemetry` | `soc:high_scale` | `{ category, live_status?, observed_at?, source?, metrics? }` | Metadata-only SOC telemetry during governed runs. Allowed when request `state` is `scheduled`, `running`, `stopped`, or `closed`; otherwise `409` `telemetry_not_active`. Categories: `external_availability`, `agent_health`, `service_health`, `mitigation`, `stop_evidence`, `adapter_metric`. Optional `live_status`: `stable`, `mitigating`, `degraded`, `breached_threshold`, `stopping`, `stopped`, `inconclusive`. Rejects nested raw/payload/header/log/body fields in `metrics` with `400` `forbidden_telemetry_fields`. Customer/engineer roles receive `403`. Audit: `high_scale.telemetry_recorded` (category, live status, request id only). **Production gate:** live provider/staging telemetry feeds. |
+| POST | `/internal/soc/high-scale/:id/telemetry/ingest` | `soc:high_scale` | `{ adapter_id, adapter_type?, provider_key?, provider_run_id?, snapshots: [{ category, live_status?, observed_at?, metrics? }] }` | Batch governed-adapter telemetry ingest. Same active-state gate as manual telemetry. Rejects forbidden attack/payload/header/log fields in envelope and snapshots. Audit: `high_scale.adapter_telemetry_ingested` (adapter id, snapshot count, ingestion id only). Scheduled operator helper: `scripts/governed-adapter-telemetry-ingest-runner.mjs` / `npm run soc:adapter-telemetry:ingest`. **Production gate:** live partner/provider adapter feeds wired to the scheduled ingest manifest. |
 | GET | `/internal/soc/high-scale/:id/telemetry` | `soc:high_scale` | — | Tenant-scoped telemetry items for the request (newest `observed_at` first). |
 | POST | `/internal/soc/kill-switch` | `soc:kill_switch` | `{ active, reason? }` | Tenant-scoped kill switch for the SOC caller’s tenant. On `active: true`, auto-stops running high-scale requests, auto-cancels in-flight safe test runs (`test_run.kill_switch_auto_cancel` per run), and in Postgres mode cancels open signed-worker probe jobs tied to those runs (`probe_job.kill_switch_auto_cancel` per job, metadata-only). Response and `soc.kill_switch.activated` audit metadata include `tenant_id`, `stopped_request_ids`, `cancelled_run_ids`, and `cancelled_probe_job_ids`. Legacy dev-json shape without `tenant_id` while active blocks all tenants. Clearing does not cancel runs or probe jobs. **Release blocker:** staging/live signed-worker fleet stop-path evidence — control-plane cancellation does not by itself prove external workers halt in flight. |
 

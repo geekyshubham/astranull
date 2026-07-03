@@ -237,7 +237,8 @@ describe('notifications', () => {
 
     const listed = listNotifications(demoCtx);
     assert.equal(listed.rules.length, 1);
-    assert.equal(listed.rules[0].destination, '#demo-alerts');
+    assert.equal(listed.rules[0].destination, undefined);
+    assert.equal(listed.rules[0].destination_preview, 'slack:#demo-alerts');
     assert.ok(listed.events.every((e) => e.tenant_id === 'ten_demo'));
     assert.equal(listed.events.length, 1);
   });
@@ -268,5 +269,123 @@ describe('POST /v1/notifications', () => {
     });
     assert.equal(res.status, 400);
     assert.equal(res.json.error, 'invalid_channel');
+  });
+
+  it('returns destination previews, not raw destinations, after creating rules over HTTP', async () => {
+    freshStore();
+    const res = await request(baseUrl, 'POST', '/v1/notifications', {
+      headers: demoHeaders('admin'),
+      body: {
+        channel: 'webhook',
+        destination: 'https://hooks.example.invalid/secret-path',
+        triggers: ['report.ready'],
+      },
+    });
+    assert.equal(res.status, 201);
+    assert.equal(res.json.destination, undefined);
+    assert.equal(res.json.destination_preview, 'webhook://hooks.example.invalid…');
+    assert.equal(JSON.stringify(res.json).includes('secret-path'), false);
+  });
+
+  it('processes due retries through HTTP as metadata-only and omits delivery records', async () => {
+    freshStore();
+    const denied = await request(baseUrl, 'POST', '/v1/notifications/retries/process', {
+      headers: demoHeaders('viewer'),
+      body: { dry_run: true },
+    });
+    assert.equal(denied.status, 403);
+    assert.equal(denied.json.permission, 'notification:write');
+
+    createNotificationRule(demoCtx, {
+      channel: 'webhook',
+      destination: 'https://hooks.example.invalid/ast_v1.secret',
+      triggers: ['report.ready'],
+    });
+    const event = await emitNotification(demoCtx, {
+      trigger: 'report.ready',
+      subject: 'Report ready',
+      metadata: { report_id: 'rpt_1' },
+    });
+    event.delivery_attempts[0] = {
+      ...event.delivery_attempts[0],
+      status: 'provider_retry_scheduled',
+      reason: 'webhook_http_error',
+      provider_error: 'webhook_http_error',
+      attempt_number: 1,
+      max_attempts: 2,
+      next_retry_at: '2026-07-03T00:00:00.000Z',
+    };
+
+    const processed = await request(baseUrl, 'POST', '/v1/notifications/retries/process', {
+      headers: demoHeaders('admin'),
+      body: { as_of: '2026-07-03T00:01:00.000Z' },
+    });
+    assert.equal(processed.status, 200);
+    assert.equal(processed.json.due_count, 1);
+    assert.equal(processed.json.processed.length, 1);
+    assert.equal(processed.json.processed[0].status, 'provider_failed_dlq');
+    assert.equal(JSON.stringify(processed.json).includes('delivery_record'), false);
+    assert.equal(JSON.stringify(processed.json).includes('ast_v1.secret'), false);
+
+    const listed = await request(baseUrl, 'GET', '/v1/notifications', {
+      headers: demoHeaders('admin'),
+    });
+    const attempts = listed.json.events[0].delivery_attempts;
+    assert.equal(attempts.at(-1).status, 'provider_failed_dlq');
+    assert.equal(attempts.at(-1).exhausted, true);
+  });
+
+  it('redrives DLQ attempts through HTTP as metadata-only and omits delivery records', async () => {
+    freshStore();
+    const denied = await request(baseUrl, 'POST', '/v1/notifications/dlq/redrive', {
+      headers: demoHeaders('viewer'),
+      body: { attempt_ids: ['natt_dlq'] },
+    });
+    assert.equal(denied.status, 403);
+    assert.equal(denied.json.permission, 'notification:write');
+
+    createNotificationRule(demoCtx, {
+      channel: 'webhook',
+      destination: 'https://hooks.example.invalid/ast_v1.secret',
+      triggers: ['report.ready'],
+    });
+    const event = await emitNotification(demoCtx, {
+      trigger: 'report.ready',
+      subject: 'Report ready',
+      metadata: { report_id: 'rpt_1' },
+    });
+    event.delivery_attempts[0] = {
+      ...event.delivery_attempts[0],
+      id: 'natt_dlq',
+      status: 'provider_failed_dlq',
+      reason: 'webhook_http_error',
+      provider_error: 'webhook_http_error',
+      attempt_number: 3,
+      max_attempts: 3,
+      exhausted: true,
+    };
+
+    const redriven = await request(baseUrl, 'POST', '/v1/notifications/dlq/redrive', {
+      headers: demoHeaders('admin'),
+      body: { attempt_ids: ['natt_dlq'] },
+    });
+    assert.equal(redriven.status, 200);
+    assert.equal(redriven.json.requeued_count, 1);
+    assert.equal(redriven.json.skipped_count, 0);
+    assert.equal(redriven.json.still_dlq_count, 0);
+    assert.equal(redriven.json.processed[0].status, 'provider_retry_scheduled');
+    assert.equal(JSON.stringify(redriven.json).includes('delivery_record'), false);
+    assert.equal(JSON.stringify(redriven.json).includes('ast_v1.secret'), false);
+
+    const listed = await request(baseUrl, 'GET', '/v1/notifications', {
+      headers: demoHeaders('admin'),
+    });
+    const attempts = listed.json.events[0].delivery_attempts;
+    assert.equal(attempts.at(-1).status, 'provider_retry_scheduled');
+    assert.equal(attempts.at(-1).attempt_number, 1);
+
+    const audits = getStore().auditLog.filter((a) => a.action === 'notification.dlq_redrive');
+    assert.equal(audits.length, 1);
+    assert.equal(audits[0].metadata.requeued_count, 1);
   });
 });

@@ -129,29 +129,15 @@ export async function resolveHumanApiAuth(headers, pathname, method, runtimeConf
     if (!auth.ok) {
       return { ok: false, status: auth.status, body: auth.body };
     }
-    if (runtimeConfig.persistenceMode === 'postgres') {
-      const probeTenantId = headers['x-probe-tenant-id'];
-      if (!probeTenantId || String(probeTenantId).trim() === '') {
-        return {
-          ok: false,
-          status: 401,
-          body: {
-            error: 'unauthorized',
-            message: 'Missing x-probe-tenant-id for Postgres probe worker requests.',
-          },
-        };
-      }
-      return {
-        ok: true,
-        ctx: {
-          ...auth.workerCtx,
-          tenantId: String(probeTenantId),
-          role: 'probe_worker',
-        },
-        probeWorker: true,
-      };
-    }
-    return { ok: true, ctx: auth.workerCtx, probeWorker: true };
+    return {
+      ok: true,
+      ctx: {
+        ...auth.workerCtx,
+        tenantId: auth.workerCtx.tenantId,
+        role: 'probe_worker',
+      },
+      probeWorker: true,
+    };
   }
 
   const token = bearerSessionToken(headers);

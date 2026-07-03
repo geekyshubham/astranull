@@ -108,6 +108,26 @@ Every discovered asset must carry:
 | `first_seen_at` / `last_seen_at` | Discovery timestamps. |
 | `evidence_summary` | Metadata only, no raw page bodies. |
 
+## Passive source ingestion (metadata-only)
+
+Passive DNS and certificate transparency feeds may be ingested as **metadata-only** candidate records. Ingestion never creates targets, never performs IP inventory discovery, and never stores raw CT log entries or certificate bodies.
+
+| API | Permission | Request | Response |
+|---|---|---|---|
+| `POST /v1/discovery/sources/ingest` | `discovery:write` | `{ source, records[] }` | `{ source, ingested, created, updated, candidates }` |
+
+| `source` value | Candidate `source_type` | Required record fields |
+|---|---|---|
+| `passive_dns` | `passive_dns` | `hostname`, `source_type`, `confidence` (optional default), `observed_at` |
+| `certificate_transparency` | `ct_log` | `hostname`, `source_type`, `confidence` (optional default), `observed_at` |
+
+Ingestion behavior:
+
+- Parsed records become inbox candidates in `candidate` state with `approval_status: pending`.
+- Duplicate hostnames update `last_seen_at`, confidence, and metadata evidence only.
+- Audit event: `discovery.source_ingested` with source name and created/updated counts.
+- Rejected payloads include raw CT logs, certificate bodies, DNS zone files, and IP-address hostnames.
+
 ## Done criteria
 
 - Customer can stay in D0 declared-only mode with no regression.
@@ -115,3 +135,4 @@ Every discovered asset must carry:
 - Discovery inbox separates candidate assets from approved test targets.
 - Candidate approval writes an audit event with actor, scope hash, and source summary.
 - Safe checks cannot run against unapproved assets.
+- Passive DNS and CT metadata can be ingested via `POST /v1/discovery/sources/ingest` without automatic target creation.

@@ -3,6 +3,7 @@ import path from 'node:path';
 import { CHECK_CATALOG } from './contracts/checks.mjs';
 import { normalizePrivacySettings } from './lib/privacySettings.mjs';
 
+
 function resolveDataDir() {
   const override = process.env.ASTRANULL_DEV_DATA_DIR?.trim();
   if (override) {
@@ -35,6 +36,7 @@ function emptyStore() {
     findings: [],
     reports: [],
     highScaleRequests: [],
+    highScaleAuthorizationArtifacts: [],
     socReports: [],
     socKillSwitch: { active: false, reason: null, updated_at: null },
     socNotes: [],
@@ -54,23 +56,35 @@ function emptyStore() {
     agentUpdateTrustKeys: [],
     wafAssets: [],
     wafProducts: [],
+    wafScenarioIntakes: [],
     wafFingerprints: [],
     wafValidationRuns: [],
     wafScenarioResults: [],
     wafPostureSnapshots: [],
     wafBaselines: [],
+    wafExceptions: [],
     wafDriftEvents: [],
+    wafDriftScanResults: [],
+    wafCoverageDailyRollups: [],
     externalAssetCandidates: [],
     wafConnectors: [],
     wafConnectorSnapshots: [],
     cvePipelineItems: [],
     cveAssetMatches: [],
+    cveMitigationPlaybooks: [],
     wafRuleRecommendations: [],
     discoveryEntities: [],
     discoveryCandidates: [],
     supplyChainRisks: [],
     wafActionItems: [],
     supplyChainTickets: [],
+    signupRequests: [],
+    staffUsers: [],
+    tenantAccounts: [],
+    tenantSubscriptions: [],
+    entitlementGrants: [],
+    internalApprovalRequests: [],
+    internalAuditLog: [],
   };
 }
 

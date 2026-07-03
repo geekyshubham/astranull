@@ -129,6 +129,8 @@ High-scale state machine:
 
 | Page | Primary user | Must show | Primary action |
 |---|---|---|---|
+| Public Landing | Visitors | AstraNull promise, no-access-first framing, sign-up/login actions | Sign up / log in |
+| Sign-Up Intake | Prospects/customers | Organization, contact, requested plan, intended use, region, high-scale interest | Submit account request |
 | Dashboard | All | Readiness score, risk trend, critical findings, agent health, last run | Run safe validation / open finding |
 | Onboarding Wizard | New users | Stepper, explanation, install commands, first run | Finish setup |
 | Environments | Owner/Admin | Env cards, health, data region, target groups, agents | Create environment |
@@ -142,7 +144,8 @@ High-scale state machine:
 | Test Runs | Engineers/SOC | Timeline, probe, agent, correlation, evidence | Download evidence |
 | Findings | Security/app owners | Severity, owner, SLA, remediation, retest | Assign/close/retest |
 | Evidence Vault | Auditors | Immutable event chain, reports, authorization docs | Export evidence |
-| High-Scale Requests | Customers/SOC | Request form, docs, status, schedule, live state | Submit/review |
+| High-Scale Requests | Customers | Request form, docs, status, schedule, SOC decision state | Submit/request changes |
+| Internal Management | AstraNull staff | Sign-up queue, tenant lifecycle, subscription, entitlements, support, approvals, audit | Approve/reject/manage |
 | SOC Console | SOC | Queue, preflight, live run, kill switch, post-test | Approve/stop/close |
 | Reports | Executives/Auditors | Executive, technical, SOC, compliance reports | Generate/export |
 | Integrations | Admins | Slack/Teams/webhook/SIEM/ticketing | Connect integration |

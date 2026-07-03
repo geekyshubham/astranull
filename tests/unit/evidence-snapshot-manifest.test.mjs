@@ -3,6 +3,9 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, it } from 'node:test';
+import { generateKeyPairSync } from 'node:crypto';
+import { buildCustodyManifest } from '../../src/lib/custody.mjs';
+import { signCustodyManifestMetadata } from '../../src/lib/evidenceSigning.mjs';
 import {
   computeSnapshotHash,
   createEvidenceSnapshotManifest,
@@ -15,6 +18,7 @@ const DIGEST_A = 'a'.repeat(64);
 const DIGEST_B = 'b'.repeat(64);
 
 const tempDirs = [];
+const envSnapshot = { ...process.env };
 
 function tempDir() {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'astranull-snapshot-manifest-'));
@@ -30,6 +34,10 @@ afterEach(() => {
   while (tempDirs.length > 0) {
     rmSync(tempDirs.pop(), { recursive: true, force: true });
   }
+  for (const key of Object.keys(process.env)) {
+    if (!(key in envSnapshot)) delete process.env[key];
+  }
+  Object.assign(process.env, envSnapshot);
 });
 
 function snapshotBody(overrides = {}) {
@@ -148,6 +156,39 @@ describe('evidence snapshot manifest utility', () => {
     assert.equal(blob.includes('ast_v1.fake.fake.fake'), false);
     assert.match(blob, /\[REDACTED\]/);
     assert.equal(manifest.summary.snapshots.length, 1);
+  });
+
+  it('verifies signer.signature when signing keys are configured', () => {
+    const tenantId = 'ten_a';
+    const keyReference = 'key://vault/astranull/evidence-signing/staging';
+    const { privateKey } = generateKeyPairSync('ed25519');
+    process.env.ASTRANULL_EVIDENCE_SIGNING_KEYS_JSON = JSON.stringify({
+      [tenantId]: {
+        [keyReference]: {
+          algorithm: 'ed25519',
+          private_key_pkcs8_der_base64: privateKey.export({ type: 'pkcs8', format: 'der' }).toString('base64'),
+        },
+      },
+    });
+    const custody = buildCustodyManifest({
+      tenant_id: tenantId,
+      artifact_type: 'report_export',
+      artifact_id: 'rpt_chain_1',
+      content: { report_id: 'rpt_chain_1' },
+    });
+    const signed = signCustodyManifestMetadata({
+      tenantId,
+      custody,
+      keyReference,
+      algorithm: 'ed25519',
+      env: process.env,
+    });
+    const batch = buildValidBatch();
+    batch.snapshots[0].custody_manifest_digest = signed.signed.custody_manifest_digest;
+    batch.snapshots[0].signer.signature = signed.signed.signature;
+    batch.snapshots[0].snapshot_hash = computeSnapshotHash(batch.snapshots[0]);
+    const result = validateEvidenceSnapshotBatch(batch);
+    assert.equal(result.ok, true, result.gaps.join(', '));
   });
 
   it('writes manifest via CLI main', async () => {

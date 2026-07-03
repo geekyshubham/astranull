@@ -14,6 +14,14 @@ export const RISK_PHASES = Object.freeze([
   'AP3_governed_active',
 ]);
 
+export const TICKET_WORKFLOW_PHASE = RISK_PHASES[1];
+
+export function shouldAdvanceToTicketWorkflowPhase(phase) {
+  const currentIndex = RISK_PHASES.indexOf(String(phase ?? '').trim());
+  const ticketIndex = RISK_PHASES.indexOf(TICKET_WORKFLOW_PHASE);
+  return currentIndex >= 0 && currentIndex < ticketIndex;
+}
+
 export const RISK_STATES = Object.freeze([
   'suspected',
   'confirmed',

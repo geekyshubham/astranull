@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { sha256Hex } from '../../src/lib/authorizationArtifactLedger.mjs';
 import { REQUIRED_ARTIFACT_TYPES } from '../../src/services/highScale.mjs';
 import { getStore } from '../../src/store.mjs';
 import { demoHeaders, request } from './http.mjs';
@@ -22,6 +23,7 @@ function defaultProofWindow() {
 export function artifactProofBody(type, overrides = {}) {
   const base = {
     type,
+    content_sha256: sha256Hex(`artifact-proof:${type}`),
     reference_uri: 'metadata://pack/demo',
     approval_reference: 'REF-DEMO-001',
     approver: 'Customer Approver',
@@ -102,6 +104,7 @@ export async function acceptHighScaleAuthorizationPack(baseUrl, hsId, socHeaders
     const up = await request(baseUrl, 'POST', `/v1/high-scale-requests/${hsId}/artifacts`, {
       headers: demoHeaders('engineer'),
       body: {
+        ...artifactProofBody('provider_approval'),
         type: 'provider_approval',
         provider_name: item.provider_name,
         reference_uri: 'metadata://pack/provider',

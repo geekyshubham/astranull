@@ -2,6 +2,18 @@
 
 Phases describe **production capability targets**. Developer validation mode may implement slices early; a phase is not complete until [`docs/release-checklist.md`](../release-checklist.md) evidence exists for that phase.
 
+## Phase 0: Public entry and internal management foundation
+
+Goal: separate public acquisition, customer product use, and AstraNull staff operations before broad rollout.
+
+| Feature | Outcome | Production gate |
+|---|---|---|
+| Public landing | Visitors can understand AstraNull and choose sign up or login. | Privacy-safe public analytics, no internal links |
+| Sign-up intake | Prospects submit account requests for review/provisioning. | Abuse controls, audit, notification path |
+| Internal management | AstraNull staff manage sign-up requests, tenants, subscriptions, entitlements, and support actions. | Staff IdP, MFA, staff RBAC, internal audit |
+| Subscription enforcement | Plans and entitlements gate features and limits in services. | Backend enforcement tests |
+| Staff/customer separation | Customer portal cannot expose or authorize internal management actions. | Direct-route denial tests |
+
 ## Phase 1: Core validation loop (production)
 
 Goal: prove the outside-to-inside validation loop in a hardened deployment.

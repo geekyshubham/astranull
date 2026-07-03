@@ -1,8 +1,9 @@
-import { withTenantContext } from './tenantContext.mjs';
+import { runWithTenantClient, withTenantContext } from './tenantContext.mjs';
 
 const WAF_ASSET_COLUMNS = `id, tenant_id, target_group_id, target_id, environment_id, canonical_url,
   asset_kind, expected_waf_required, expected_vendor_hint, business_criticality, traffic_tier,
-  compliance_tags, owner_hint, created_at, updated_at`;
+  compliance_tags, owner_hint, region_code, geography_label, entity_id, owasp_exposure_tags,
+  created_at, updated_at`;
 
 const WAF_VALIDATION_RUN_COLUMNS = `id, tenant_id, test_run_id, waf_asset_id, mode, status,
   started_at, finalized_at, safety_profile_json, summary_json, created_at`;
@@ -12,8 +13,12 @@ const WAF_SCENARIO_RESULT_COLUMNS = `id, tenant_id, waf_validation_run_id, scena
   evidence_summary_json, created_at`;
 
 const WAF_POSTURE_SNAPSHOT_COLUMNS = `id, tenant_id, waf_asset_id, status, reason_codes,
-  detected_vendor, detected_product, coverage_required, risk_score, confidence,
+  detected_vendor, detected_product, coverage_required, risk_score, risk_factors_json,
+  priority_band, recommended_action, scenario_pass_rate, control_bypass_status, confidence,
   source_mix_json, created_at, is_current`;
+
+const WAF_COVERAGE_DAILY_ROLLUP_COLUMNS = `id, tenant_id, rollup_date, total_assets, protected,
+  underprotected, unprotected, unknown, excluded, coverage_ratio, created_at`;
 
 const FINDING_COLUMNS = `id, tenant_id, target_group_id, target_id, test_run_id, check_id, title, severity,
   status, evidence_ids, notes, remediation_template, verdict_id, last_verdict_id, assignee,
@@ -21,6 +26,9 @@ const FINDING_COLUMNS = `id, tenant_id, target_group_id, target_id, test_run_id,
 
 const WAF_DRIFT_EVENT_COLUMNS = `id, tenant_id, waf_asset_id, baseline_id, drift_type, severity,
   before_summary_json, after_summary_json, status, finding_id, created_at, resolved_at`;
+
+const WAF_DRIFT_SCAN_RESULT_COLUMNS = `id, tenant_id, scan_type, assets_scanned, drifts_detected,
+  scan_duration_ms, completed_at, state, assets_with_connector_snapshots, drift_check_types, created_at`;
 
 const WAF_CONNECTOR_COLUMNS = `id, tenant_id, provider, name, secret_id, config_json, status,
   last_success_at, last_error_at, created_at, updated_at`;
@@ -54,6 +62,10 @@ export function mapWafAssetRow(row) {
     traffic_tier: row.traffic_tier ?? 'unknown',
     compliance_tags: row.compliance_tags ?? [],
     owner_hint: row.owner_hint ?? null,
+    region_code: row.region_code ?? null,
+    geography_label: row.geography_label ?? null,
+    entity_id: row.entity_id ?? null,
+    owasp_exposure_tags: row.owasp_exposure_tags ?? [],
     created_at: toIso(row.created_at),
     updated_at: toIso(row.updated_at),
   };
@@ -105,6 +117,11 @@ export function mapWafPostureSnapshotRow(row) {
     detected_product: row.detected_product ?? null,
     coverage_required: row.coverage_required !== false,
     risk_score: Number(row.risk_score ?? 0),
+    risk_factors_json: Array.isArray(row.risk_factors_json) ? row.risk_factors_json : [],
+    priority_band: row.priority_band ?? null,
+    recommended_action: row.recommended_action ?? null,
+    scenario_pass_rate: row.scenario_pass_rate == null ? null : Number(row.scenario_pass_rate),
+    control_bypass_status: row.control_bypass_status ?? null,
     confidence: Number(row.confidence ?? 0),
     source_mix_json: row.source_mix_json ?? {},
     created_at: toIso(row.created_at),
@@ -150,6 +167,45 @@ export function mapWafDriftEventRow(row) {
     finding_id: row.finding_id ?? null,
     created_at: toIso(row.created_at),
     resolved_at: row.resolved_at == null ? null : toIso(row.resolved_at),
+  };
+}
+
+export function mapWafCoverageDailyRollupRow(row) {
+  if (!row) return null;
+  const rollupDate = row.rollup_date instanceof Date
+    ? row.rollup_date.toISOString().slice(0, 10)
+    : String(row.rollup_date ?? '').slice(0, 10);
+  return {
+    id: row.id,
+    tenant_id: row.tenant_id,
+    rollup_date: rollupDate,
+    total_assets: Number(row.total_assets ?? 0),
+    protected: Number(row.protected ?? 0),
+    underprotected: Number(row.underprotected ?? 0),
+    unprotected: Number(row.unprotected ?? 0),
+    unknown: Number(row.unknown ?? 0),
+    excluded: Number(row.excluded ?? 0),
+    coverage_ratio: Number(row.coverage_ratio ?? 0),
+    created_at: toIso(row.created_at),
+  };
+}
+
+export function mapWafDriftScanResultRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    tenant_id: row.tenant_id,
+    scan_type: row.scan_type,
+    assets_scanned: Number(row.assets_scanned ?? 0),
+    drifts_detected: Number(row.drifts_detected ?? 0),
+    scan_duration_ms: Number(row.scan_duration_ms ?? 0),
+    completed_at: toIso(row.completed_at),
+    state: row.state ?? 'completed',
+    ...(row.assets_with_connector_snapshots == null
+      ? {}
+      : { assets_with_connector_snapshots: Number(row.assets_with_connector_snapshots) }),
+    drift_check_types: row.drift_check_types ?? [],
+    created_at: toIso(row.created_at),
   };
 }
 
@@ -247,6 +303,9 @@ export function formatPostureSnapshotForApi(snapshot) {
     detected_product: snapshot.detected_product ?? null,
     coverage_required: snapshot.coverage_required,
     risk_score: snapshot.risk_score,
+    ...(Array.isArray(snapshot.risk_factors_json) ? { risk_factors: snapshot.risk_factors_json } : {}),
+    ...(snapshot.priority_band ? { priority_band: snapshot.priority_band } : {}),
+    ...(snapshot.recommended_action ? { recommended_action: snapshot.recommended_action } : {}),
     confidence: snapshot.confidence,
     source_mix: snapshot.source_mix_json ?? {},
     created_at: snapshot.created_at,
@@ -277,9 +336,11 @@ export function createWafPostureRepository(pool) {
           `INSERT INTO waf_assets (
              id, tenant_id, target_group_id, target_id, environment_id, canonical_url,
              asset_kind, expected_waf_required, expected_vendor_hint, business_criticality,
-             traffic_tier, compliance_tags, owner_hint, created_at, updated_at
+             traffic_tier, compliance_tags, owner_hint, region_code, geography_label, entity_id,
+             owasp_exposure_tags, created_at, updated_at
            )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::timestamptz, $15::timestamptz)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
+             $18::timestamptz, $19::timestamptz)
            RETURNING ${WAF_ASSET_COLUMNS}`,
           [
             record.id,
@@ -295,6 +356,10 @@ export function createWafPostureRepository(pool) {
             record.traffic_tier ?? 'unknown',
             record.compliance_tags ?? [],
             record.owner_hint ?? null,
+            record.region_code ?? null,
+            record.geography_label ?? null,
+            record.entity_id ?? null,
+            record.owasp_exposure_tags ?? [],
             record.created_at,
             record.updated_at,
           ],
@@ -303,9 +368,9 @@ export function createWafPostureRepository(pool) {
       });
     },
 
-    async getWafAsset(ctx, id) {
+    async getWafAsset(ctx, id, options = {}) {
       const tenantId = ctx.tenantId;
-      return withTenantContext(pool, tenantId, async (client) => {
+      return runWithTenantClient(pool, tenantId, options.client, async (client) => {
         const { rows } = await client.query(
           `SELECT ${WAF_ASSET_COLUMNS}
            FROM waf_assets
@@ -330,7 +395,11 @@ export function createWafPostureRepository(pool) {
                traffic_tier = COALESCE($9, traffic_tier),
                compliance_tags = COALESCE($10, compliance_tags),
                owner_hint = COALESCE($11, owner_hint),
-               updated_at = $12::timestamptz
+               region_code = COALESCE($12, region_code),
+               geography_label = COALESCE($13, geography_label),
+               entity_id = COALESCE($14, entity_id),
+               owasp_exposure_tags = COALESCE($15, owasp_exposure_tags),
+               updated_at = $16::timestamptz
            WHERE tenant_id = $1 AND id = $2
            RETURNING ${WAF_ASSET_COLUMNS}`,
           [
@@ -345,6 +414,10 @@ export function createWafPostureRepository(pool) {
             updates.traffic_tier,
             updates.compliance_tags,
             updates.owner_hint,
+            updates.region_code,
+            updates.geography_label,
+            updates.entity_id,
+            updates.owasp_exposure_tags,
             updates.updated_at,
           ],
         );
@@ -380,6 +453,108 @@ export function createWafPostureRepository(pool) {
       });
     },
 
+    async listPostureSnapshotsSince(ctx, sinceIso) {
+      const tenantId = ctx.tenantId;
+      return withTenantContext(pool, tenantId, async (client) => {
+        const { rows } = await client.query(
+          `SELECT ${WAF_POSTURE_SNAPSHOT_COLUMNS}
+           FROM waf_posture_snapshots
+           WHERE tenant_id = $1 AND created_at >= $2::timestamptz
+           ORDER BY created_at ASC`,
+          [tenantId, sinceIso],
+        );
+        return rows.map(mapWafPostureSnapshotRow);
+      });
+    },
+
+    async listLatestValidationSummariesByAsset(ctx) {
+      const tenantId = ctx.tenantId;
+      return withTenantContext(pool, tenantId, async (client) => {
+        const { rows } = await client.query(
+          `SELECT DISTINCT ON (waf_asset_id)
+              waf_asset_id, summary_json
+           FROM waf_validation_runs
+           WHERE tenant_id = $1 AND status = 'finalized'
+           ORDER BY waf_asset_id, finalized_at DESC NULLS LAST, created_at DESC`,
+          [tenantId],
+        );
+        const map = new Map();
+        for (const row of rows) {
+          map.set(row.waf_asset_id, row.summary_json ?? {});
+        }
+        return map;
+      });
+    },
+
+    async listTenantCveAssetMatches(ctx) {
+      const tenantId = ctx.tenantId;
+      return withTenantContext(pool, tenantId, async (client) => {
+        const { rows } = await client.query(
+          `SELECT m.id, m.waf_asset_id, m.validation_status, m.risk_score,
+                  i.known_exploited, i.state AS pipeline_state
+           FROM cve_asset_matches m
+           LEFT JOIN cve_pipeline_items i
+             ON i.tenant_id = m.tenant_id AND i.id = m.cve_pipeline_item_id
+           WHERE m.tenant_id = $1 AND m.waf_asset_id IS NOT NULL`,
+          [tenantId],
+        );
+        const map = new Map();
+        for (const row of rows) {
+          const assetId = row.waf_asset_id;
+          const bucket = map.get(assetId) ?? [];
+          bucket.push({
+            id: row.id,
+            waf_asset_id: assetId,
+            validation_status: row.validation_status,
+            status: row.pipeline_state,
+            risk_score: Number(row.risk_score ?? 0),
+            known_exploited: row.known_exploited === true,
+          });
+          map.set(assetId, bucket);
+        }
+        return map;
+      });
+    },
+
+    async listWafFindingIdsByAsset(ctx) {
+      const tenantId = ctx.tenantId;
+      return withTenantContext(pool, tenantId, async (client) => {
+        const { rows } = await client.query(
+          `SELECT id, check_id
+           FROM findings
+           WHERE tenant_id = $1 AND check_id LIKE 'waf.posture.%'`,
+          [tenantId],
+        );
+        const map = new Map();
+        for (const row of rows) {
+          const assetId = String(row.check_id).replace(/^waf\.posture\./, '');
+          const bucket = map.get(assetId) ?? [];
+          bucket.push(row.id);
+          map.set(assetId, bucket);
+        }
+        return map;
+      });
+    },
+
+    async listWafActionItemIdsByAsset(ctx) {
+      const tenantId = ctx.tenantId;
+      return withTenantContext(pool, tenantId, async (client) => {
+        const { rows } = await client.query(
+          `SELECT id, waf_asset_id
+           FROM waf_action_items
+           WHERE tenant_id = $1 AND waf_asset_id IS NOT NULL`,
+          [tenantId],
+        );
+        const map = new Map();
+        for (const row of rows) {
+          const bucket = map.get(row.waf_asset_id) ?? [];
+          bucket.push(row.id);
+          map.set(row.waf_asset_id, bucket);
+        }
+        return map;
+      });
+    },
+
     async listWafValidationRuns(ctx) {
       const tenantId = ctx.tenantId;
       return withTenantContext(pool, tenantId, async (client) => {
@@ -394,9 +569,9 @@ export function createWafPostureRepository(pool) {
       });
     },
 
-    async createWafValidationRun(ctx, record) {
+    async createWafValidationRun(ctx, record, options = {}) {
       const tenantId = ctx.tenantId;
-      return withTenantContext(pool, tenantId, async (client) => {
+      return runWithTenantClient(pool, tenantId, options.client, async (client) => {
         const { rows } = await client.query(
           `INSERT INTO waf_validation_runs (
              id, tenant_id, test_run_id, waf_asset_id, mode, status,
@@ -420,9 +595,9 @@ export function createWafPostureRepository(pool) {
       });
     },
 
-    async getWafValidationRun(ctx, id) {
+    async getWafValidationRun(ctx, id, options = {}) {
       const tenantId = ctx.tenantId;
-      return withTenantContext(pool, tenantId, async (client) => {
+      return runWithTenantClient(pool, tenantId, options.client, async (client) => {
         const { rows } = await client.query(
           `SELECT ${WAF_VALIDATION_RUN_COLUMNS}
            FROM waf_validation_runs
@@ -461,9 +636,12 @@ export function createWafPostureRepository(pool) {
         await client.query(
           `INSERT INTO waf_posture_snapshots (
              id, tenant_id, waf_asset_id, status, reason_codes, detected_vendor, detected_product,
-             coverage_required, risk_score, confidence, source_mix_json, created_at, is_current
+             coverage_required, risk_score, risk_factors_json, priority_band, recommended_action,
+             scenario_pass_rate, control_bypass_status, confidence, source_mix_json, created_at,
+             is_current
            )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12::timestamptz, TRUE)`,
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14, $15, $16::jsonb,
+             $17::timestamptz, TRUE)`,
           [
             snapshot.id,
             tenantId,
@@ -474,6 +652,11 @@ export function createWafPostureRepository(pool) {
             snapshot.detected_product ?? null,
             snapshot.coverage_required !== false,
             snapshot.risk_score ?? 0,
+            JSON.stringify(snapshot.risk_factors_json ?? []),
+            snapshot.priority_band ?? null,
+            snapshot.recommended_action ?? null,
+            snapshot.scenario_pass_rate ?? null,
+            snapshot.control_bypass_status ?? null,
             snapshot.confidence ?? 0,
             JSON.stringify(snapshot.source_mix_json ?? {}),
             snapshot.created_at,
@@ -625,15 +808,24 @@ export function createWafPostureRepository(pool) {
       });
     },
 
-    async listWafDriftEvents(ctx) {
+    async listWafDriftEvents(ctx, options = {}) {
       const tenantId = ctx.tenantId;
+      const limit = Number.isFinite(Number(options.limit)) && Number(options.limit) > 0
+        ? Math.floor(Number(options.limit))
+        : null;
       return withTenantContext(pool, tenantId, async (client) => {
         const { rows } = await client.query(
-          `SELECT ${WAF_DRIFT_EVENT_COLUMNS}
-           FROM waf_drift_events
-           WHERE tenant_id = $1
-           ORDER BY created_at DESC`,
-          [tenantId],
+          limit
+            ? `SELECT ${WAF_DRIFT_EVENT_COLUMNS}
+               FROM waf_drift_events
+               WHERE tenant_id = $1
+               ORDER BY created_at DESC
+               LIMIT $2`
+            : `SELECT ${WAF_DRIFT_EVENT_COLUMNS}
+               FROM waf_drift_events
+               WHERE tenant_id = $1
+               ORDER BY created_at DESC`,
+          limit ? [tenantId, limit] : [tenantId],
         );
         return rows.map(mapWafDriftEventRow);
       });
@@ -856,6 +1048,201 @@ export function createWafPostureRepository(pool) {
           [tenantId, connectorId],
         );
         return rows.map(mapWafConnectorSnapshotRow);
+      });
+    },
+
+    async listWafConnectorSnapshotsForTenant(ctx) {
+      const tenantId = ctx.tenantId;
+      return withTenantContext(pool, tenantId, async (client) => {
+        const { rows } = await client.query(
+          `SELECT ${WAF_CONNECTOR_SNAPSHOT_COLUMNS}
+           FROM waf_connector_snapshots
+           WHERE tenant_id = $1
+           ORDER BY observed_at DESC, created_at DESC`,
+          [tenantId],
+        );
+        return rows.map(mapWafConnectorSnapshotRow);
+      });
+    },
+
+    async listWafPostureSnapshotsForTenant(ctx) {
+      const tenantId = ctx.tenantId;
+      return withTenantContext(pool, tenantId, async (client) => {
+        const { rows } = await client.query(
+          `SELECT ${WAF_POSTURE_SNAPSHOT_COLUMNS}
+           FROM waf_posture_snapshots
+           WHERE tenant_id = $1
+           ORDER BY created_at DESC`,
+          [tenantId],
+        );
+        return rows.map(mapWafPostureSnapshotRow);
+      });
+    },
+
+    async createWafDriftScanResult(ctx, record) {
+      const tenantId = ctx.tenantId;
+      return withTenantContext(pool, tenantId, async (client) => {
+        const { rows } = await client.query(
+          `INSERT INTO waf_drift_scan_results (
+             id, tenant_id, scan_type, assets_scanned, drifts_detected, scan_duration_ms,
+             completed_at, state, assets_with_connector_snapshots, drift_check_types, created_at
+           )
+           VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz, $8, $9, $10, $11::timestamptz)
+           RETURNING ${WAF_DRIFT_SCAN_RESULT_COLUMNS}`,
+          [
+            record.id,
+            tenantId,
+            record.scan_type,
+            record.assets_scanned ?? 0,
+            record.drifts_detected ?? 0,
+            record.scan_duration_ms ?? 0,
+            record.completed_at,
+            record.state ?? 'completed',
+            record.assets_with_connector_snapshots ?? null,
+            record.drift_check_types ?? [],
+            record.created_at ?? record.completed_at,
+          ],
+        );
+        return mapWafDriftScanResultRow(rows[0]);
+      });
+    },
+
+    async getLatestWafDriftScanResult(ctx) {
+      const tenantId = ctx.tenantId;
+      return withTenantContext(pool, tenantId, async (client) => {
+        const { rows } = await client.query(
+          `SELECT ${WAF_DRIFT_SCAN_RESULT_COLUMNS}
+           FROM waf_drift_scan_results
+           WHERE tenant_id = $1
+           ORDER BY completed_at DESC, created_at DESC
+           LIMIT 1`,
+          [tenantId],
+        );
+        return mapWafDriftScanResultRow(rows[0] ?? null);
+      });
+    },
+
+    async listWafScenarioIntakes(ctx) {
+      const tenantId = ctx.tenantId;
+      return withTenantContext(pool, tenantId, async (client) => {
+        const { rows } = await client.query(
+          `SELECT id, tenant_id, pattern_title, advisory_refs, proposed_scenario_family,
+                  risk_class, intake_stage, notes, threat_summary, created_at, updated_at
+           FROM waf_scenario_intakes
+           WHERE tenant_id = $1
+           ORDER BY created_at DESC`,
+          [tenantId],
+        );
+        return rows.map((row) => ({
+          id: row.id,
+          tenant_id: row.tenant_id,
+          pattern_title: row.pattern_title,
+          advisory_refs: row.advisory_refs ?? [],
+          proposed_scenario_family: row.proposed_scenario_family ?? null,
+          risk_class: row.risk_class,
+          intake_stage: row.intake_stage,
+          notes: row.notes ?? null,
+          threat_summary: row.threat_summary ?? null,
+          created_at: toIso(row.created_at),
+          updated_at: toIso(row.updated_at),
+        }));
+      });
+    },
+
+    async insertWafScenarioIntake(ctx, record) {
+      const tenantId = ctx.tenantId;
+      return withTenantContext(pool, tenantId, async (client) => {
+        const { rows } = await client.query(
+          `INSERT INTO waf_scenario_intakes (
+             id, tenant_id, pattern_title, advisory_refs, proposed_scenario_family,
+             risk_class, intake_stage, notes, threat_summary, created_at, updated_at
+           )
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::timestamptz, $11::timestamptz)
+           RETURNING id, tenant_id, pattern_title, advisory_refs, proposed_scenario_family,
+                     risk_class, intake_stage, notes, threat_summary, created_at, updated_at`,
+          [
+            record.id,
+            tenantId,
+            record.pattern_title,
+            record.advisory_refs ?? [],
+            record.proposed_scenario_family ?? null,
+            record.risk_class,
+            record.intake_stage,
+            record.notes ?? null,
+            record.threat_summary ?? null,
+            record.created_at,
+            record.updated_at,
+          ],
+        );
+        const row = rows[0];
+        return {
+          id: row.id,
+          tenant_id: row.tenant_id,
+          pattern_title: row.pattern_title,
+          advisory_refs: row.advisory_refs ?? [],
+          proposed_scenario_family: row.proposed_scenario_family ?? null,
+          risk_class: row.risk_class,
+          intake_stage: row.intake_stage,
+          notes: row.notes ?? null,
+          threat_summary: row.threat_summary ?? null,
+          created_at: toIso(row.created_at),
+          updated_at: toIso(row.updated_at),
+        };
+      });
+    },
+
+    async upsertWafCoverageDailyRollup(ctx, record) {
+      const tenantId = ctx.tenantId;
+      const createdAt = record.created_at ?? new Date().toISOString();
+      return withTenantContext(pool, tenantId, async (client) => {
+        const { rows } = await client.query(
+          `INSERT INTO waf_coverage_daily_rollups (
+             id, tenant_id, rollup_date, total_assets, protected, underprotected, unprotected,
+             unknown, excluded, coverage_ratio, created_at
+           )
+           VALUES ($1, $2, $3::date, $4, $5, $6, $7, $8, $9, $10, $11::timestamptz)
+           ON CONFLICT (tenant_id, rollup_date)
+           DO UPDATE SET
+             total_assets = EXCLUDED.total_assets,
+             protected = EXCLUDED.protected,
+             underprotected = EXCLUDED.underprotected,
+             unprotected = EXCLUDED.unprotected,
+             unknown = EXCLUDED.unknown,
+             excluded = EXCLUDED.excluded,
+             coverage_ratio = EXCLUDED.coverage_ratio,
+             created_at = EXCLUDED.created_at
+           RETURNING ${WAF_COVERAGE_DAILY_ROLLUP_COLUMNS}`,
+          [
+            record.id,
+            tenantId,
+            record.rollup_date,
+            record.total_assets ?? 0,
+            record.protected ?? 0,
+            record.underprotected ?? 0,
+            record.unprotected ?? 0,
+            record.unknown ?? 0,
+            record.excluded ?? 0,
+            record.coverage_ratio ?? 0,
+            createdAt,
+          ],
+        );
+        return mapWafCoverageDailyRollupRow(rows[0]);
+      });
+    },
+
+    async listWafCoverageDailyRollups(ctx, options = {}) {
+      const tenantId = ctx.tenantId;
+      const windowDays = Number(options.windowDays ?? options.window_days ?? 90);
+      return withTenantContext(pool, tenantId, async (client) => {
+        const { rows } = await client.query(
+          `SELECT ${WAF_COVERAGE_DAILY_ROLLUP_COLUMNS}
+           FROM waf_coverage_daily_rollups
+           WHERE tenant_id = $1
+             AND rollup_date >= (CURRENT_DATE - ($2::int - 1))
+           ORDER BY rollup_date ASC`,
+          [tenantId, windowDays],
+        );
+        return rows.map(mapWafCoverageDailyRollupRow);
       });
     },
   };

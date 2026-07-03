@@ -87,6 +87,34 @@ describe('postgres notification repository', () => {
     });
     assert.equal(mapped.attempted_at, null);
     assert.equal(mapped.created_at, FIXED_NOW);
+    assert.equal(mapped.attempt_number, null);
+    assert.equal(mapped.next_retry_at, null);
+  });
+
+  it('maps delivery attempt retry and DLQ fields', () => {
+    const nextRetry = '2026-06-01T13:00:00.000Z';
+    const mapped = mapDeliveryAttemptRow({
+      id: 'natt_retry',
+      rule_id: 'nrule_1',
+      channel: 'webhook',
+      destination_preview: 'webhook:hooks.example.invalid',
+      status: 'provider_retry_scheduled',
+      reason: 'webhook_send_failed',
+      attempt_number: 1,
+      max_attempts: 3,
+      next_retry_at: new Date(nextRetry),
+      provider_error: 'webhook_send_failed',
+      exhausted: false,
+      provider_status: 503,
+      created_at: FIXED_NOW,
+      attempted_at: FIXED_NOW,
+    });
+    assert.equal(mapped.attempt_number, 1);
+    assert.equal(mapped.max_attempts, 3);
+    assert.equal(mapped.next_retry_at, nextRetry);
+    assert.equal(mapped.provider_error, 'webhook_send_failed');
+    assert.equal(mapped.exhausted, false);
+    assert.equal(mapped.provider_status, 503);
   });
 
   it('createNotificationRule uses parameterized SQL and triggers_json', async () => {
@@ -218,5 +246,73 @@ describe('postgres notification repository', () => {
 
     assertTenantWrapped(pool.client, CTX.tenantId);
     assert.deepEqual(event.metadata, { token: '[REDACTED]' });
+  });
+
+  it('appendDeliveryAttempts persists retry metadata and round-trips via mapper', async () => {
+    const nextRetry = '2026-06-01T13:00:00.000Z';
+    const pool = createRecordingPool((sql, params) => {
+      if (/INSERT INTO notification_delivery_attempts/i.test(sql)) {
+        assert.match(sql, /attempt_number/i);
+        assert.match(sql, /next_retry_at/i);
+        assert.match(sql, /provider_error/i);
+        assert.match(sql, /exhausted/i);
+        assert.match(sql, /provider_status/i);
+        assert.ok(params.includes(2));
+        assert.ok(params.includes(3));
+        assert.ok(params.includes(nextRetry));
+        assert.ok(params.includes('timeout'));
+        assert.equal(params.includes(false), true);
+        assert.equal(params.includes(502), true);
+        return {
+          rows: [
+            {
+              id: 'natt_retry',
+              tenant_id: CTX.tenantId,
+              notification_event_id: 'nevt_retry',
+              rule_id: 'nrule_1',
+              channel: 'webhook',
+              destination_preview: 'webhook:hooks.example.invalid',
+              status: 'provider_retry_scheduled',
+              reason: 'timeout',
+              attempt_number: 2,
+              max_attempts: 3,
+              next_retry_at: new Date(nextRetry),
+              provider_error: 'timeout',
+              exhausted: false,
+              provider_status: 502,
+              created_at: FIXED_NOW,
+              attempted_at: FIXED_NOW,
+            },
+          ],
+        };
+      }
+      return { rows: [] };
+    });
+
+    const repo = createNotificationRepository(pool);
+    const inserted = await repo.appendDeliveryAttempts(CTX, 'nevt_retry', [
+      {
+        id: 'natt_retry',
+        rule_id: 'nrule_1',
+        channel: 'webhook',
+        destination_preview: 'webhook:hooks.example.invalid',
+        status: 'provider_retry_scheduled',
+        reason: 'timeout',
+        attempt_number: 2,
+        max_attempts: 3,
+        next_retry_at: nextRetry,
+        provider_error: 'timeout',
+        exhausted: false,
+        provider_status: 502,
+        created_at: FIXED_NOW,
+        attempted_at: FIXED_NOW,
+      },
+    ]);
+
+    assertTenantWrapped(pool.client, CTX.tenantId);
+    assert.equal(inserted.length, 1);
+    assert.equal(inserted[0].next_retry_at, nextRetry);
+    assert.equal(inserted[0].attempt_number, 2);
+    assert.equal(inserted[0].provider_status, 502);
   });
 });

@@ -20,6 +20,9 @@ function ensure() {
  *   now?: string,
  *   webhookSender?: (destination: string, body: Record<string, unknown>) => unknown,
  *   fetchFn?: typeof fetch,
+ *   emailDeliverer?: (envelope: { from: string, to: string, subject: string, html_body: string }) => unknown,
+ *   slackDeliverer?: (payload: Record<string, unknown>, destination: string) => unknown,
+ *   teamsDeliverer?: (payload: Record<string, unknown>, destination: string) => unknown,
  *   newId?: typeof newId,
  * }} [options]
  */
@@ -42,6 +45,9 @@ export async function processDueNotificationRetries(ctx, options = {}) {
     newAttemptId: (_eventId, _ruleId, _attemptNumber) => newIdFn('id'),
     webhookSender: options.webhookSender,
     fetchFn: options.fetchFn,
+    emailDeliverer: options.emailDeliverer,
+    slackDeliverer: options.slackDeliverer,
+    teamsDeliverer: options.teamsDeliverer,
   });
 
   if (!batch.dry_run) {

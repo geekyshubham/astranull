@@ -1,3 +1,5 @@
+import { applyBundledStagingOidcEnvDefaults } from './lib/bundledStagingOidc.mjs';
+import { isHostedStagingDeployment, resolveDeploymentProfile } from './lib/deploymentProfile.mjs';
 import { loadSecretEncryptionKey } from './lib/secrets.mjs';
 
 export const AUTH_MODES = ['dev-headers', 'signed-session', 'oidc-jwt'];
@@ -74,6 +76,79 @@ function parseCommaSeparatedList(raw, fallback, name) {
     throw new Error(`${name} must include at least one non-empty value.`);
   }
   return [...new Set(values)];
+}
+
+function parseTenantBooleanMap(raw, name) {
+  if (raw === undefined || raw === null || String(raw).trim() === '') {
+    return {};
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(String(raw));
+  } catch {
+    throw new Error(`${name} must be valid JSON object mapping tenant_id to 0/1 or boolean.`);
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`${name} must be a JSON object mapping tenant_id to 0/1 or boolean.`);
+  }
+  /** @type {Record<string, boolean>} */
+  const out = {};
+  for (const [tenantId, value] of Object.entries(parsed)) {
+    const key = String(tenantId ?? '').trim();
+    if (!key) {
+      throw new Error(`${name} keys must be non-empty tenant ids.`);
+    }
+    if (value === true || value === 1 || value === '1') {
+      out[key] = true;
+      continue;
+    }
+    if (value === false || value === 0 || value === '0') {
+      out[key] = false;
+      continue;
+    }
+    throw new Error(`${name} value for tenant "${key}" must be boolean or 0/1.`);
+  }
+  return out;
+}
+
+export function isConnectorsEnabledForTenant(runtimeConfig, tenantId) {
+  const tenantKey = String(tenantId ?? '').trim();
+  const tenantOverrides = runtimeConfig.featureFlags?.connectorsEnabledTenants ?? {};
+  if (tenantKey && Object.prototype.hasOwnProperty.call(tenantOverrides, tenantKey)) {
+    return tenantOverrides[tenantKey] === true;
+  }
+  return runtimeConfig.featureFlags?.connectorsEnabledDefault === true;
+}
+
+function parseOidcRoleMap(raw, name) {
+  if (raw === undefined || raw === null || String(raw).trim() === '') {
+    return {};
+  }
+  const entries = String(raw).split(',');
+  /** @type {Record<string, string>} */
+  const roleMap = {};
+  for (const entry of entries) {
+    const trimmed = entry.trim();
+    if (!trimmed) continue;
+    const separator = trimmed.indexOf(':');
+    if (separator <= 0 || separator === trimmed.length - 1) {
+      throw new Error(
+        `${name} entries must use idp_role:platform_role format (got "${entry}").`,
+      );
+    }
+    const idpRole = trimmed.slice(0, separator).trim().toLowerCase();
+    const platformRole = trimmed.slice(separator + 1).trim().toLowerCase();
+    if (!idpRole || !platformRole) {
+      throw new Error(
+        `${name} entries must use idp_role:platform_role format (got "${entry}").`,
+      );
+    }
+    roleMap[idpRole] = platformRole;
+  }
+  if (Object.keys(roleMap).length === 0) {
+    throw new Error(`${name} must include at least one idp_role:platform_role entry.`);
+  }
+  return roleMap;
 }
 
 function assertOidcJwksUrl(jwksUrl, nodeEnv) {
@@ -160,7 +235,7 @@ export function resolveAgentIdentityMode(env = process.env) {
       `Invalid ASTRANULL_AGENT_IDENTITY_MODE "${mode}". Allowed: ${AGENT_IDENTITY_MODES.join(', ')}.`,
     );
   }
-  if (nodeEnv === 'production' && mode === 'bearer') {
+  if (nodeEnv === 'production' && mode === 'bearer' && !isHostedStagingDeployment(env)) {
     throw new Error(
       'Refusing to start: ASTRANULL_AGENT_IDENTITY_MODE=bearer is not permitted when NODE_ENV=production. Use gateway-mtls.',
     );
@@ -203,7 +278,9 @@ function assertProductionPersistence(env, persistenceMode) {
 }
 
 export function loadRuntimeConfig(env = process.env) {
+  applyBundledStagingOidcEnvDefaults(env);
   const nodeEnv = env.NODE_ENV ?? 'development';
+  const deploymentProfile = resolveDeploymentProfile(env);
   const authMode = resolveAuthMode(env);
 
   if (
@@ -283,6 +360,8 @@ export function loadRuntimeConfig(env = process.env) {
         fallback: DEFAULT_OIDC_JWKS_FETCH_TIMEOUT_MS,
       },
     );
+    const rolePrefix = (env.ASTRANULL_OIDC_ROLE_PREFIX ?? '').trim();
+    const roleMap = parseOidcRoleMap(env.ASTRANULL_OIDC_ROLE_MAP, 'ASTRANULL_OIDC_ROLE_MAP');
     oidc = {
       issuer,
       audience,
@@ -295,6 +374,9 @@ export function loadRuntimeConfig(env = process.env) {
       mfaValues,
       jwksCacheTtlMs,
       jwksFetchTimeoutMs,
+      rolePrefix: rolePrefix || null,
+      roleMap,
+      requireExplicitRoleMap: nodeEnv === 'production' && !isHostedStagingDeployment(env),
     };
   }
 
@@ -366,11 +448,29 @@ export function loadRuntimeConfig(env = process.env) {
     'ASTRANULL_EXTERNAL_DISCOVERY_ENABLED',
     false,
   );
+  const connectorsEnabledDefault = parseOptionalBoolean(
+    env.ASTRANULL_CONNECTORS_ENABLED,
+    'ASTRANULL_CONNECTORS_ENABLED',
+    false,
+  );
+  const connectorsEnabledTenants = parseTenantBooleanMap(
+    env.ASTRANULL_CONNECTORS_ENABLED_TENANTS,
+    'ASTRANULL_CONNECTORS_ENABLED_TENANTS',
+  );
+
+  const publicLoginUrl = (env.ASTRANULL_PUBLIC_LOGIN_URL ?? '/app').trim() || '/app';
+  const publicSignupEnabled = env.ASTRANULL_PUBLIC_SIGNUP_ENABLED !== '0';
 
   return {
     authMode,
     sessionSecret,
     oidc,
+    deploymentProfile,
+    bundledStagingOidc: env.ASTRANULL_BUNDLED_STAGING_OIDC === '1',
+    publicSite: {
+      loginUrl: publicLoginUrl,
+      signupEnabled: publicSignupEnabled,
+    },
     nodeEnv,
     maxJsonBodyBytes,
     shutdownGraceMs,
@@ -392,6 +492,8 @@ export function loadRuntimeConfig(env = process.env) {
     featureFlags: {
       wafPostureEnabled,
       externalDiscoveryEnabled,
+      connectorsEnabledDefault,
+      connectorsEnabledTenants,
     },
   };
 }

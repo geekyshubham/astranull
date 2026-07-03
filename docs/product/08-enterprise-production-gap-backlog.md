@@ -12,9 +12,10 @@ AstraNull has a strong core platform and developer-validation implementation, bu
 | Agent/probe | Strong MVP | Signed installers, distro/container release pipeline, upgrade daemon enforcement, hardening, and fleet-scale probe operations. |
 | Detection | Good foundation | Broader vector families, per-vector safety policy, live staging evidence; Test Runs and Findings **verdict explanation** panels share `verdict-explanation.mjs` — report/export parity and deeper placement-confidence backend fields still open. |
 | SOC high-scale | Good governance design | Real provider/partner integrations, provider-specific approval paths, live telemetry, and authorization evidence custody. |
-| UX | Started | Full guided journeys, onboarding wizards, status pages; Test Runs and Findings **verdict explanation** panels (`verdict-explanation.mjs`) landed — browser/accessibility matrix, report/export parity, and staging signoff remain. |
+| UX | Developer-validation shell complete | Guided journeys, onboarding wizard, core pages, public landing, internal admin UX, status pages, and Test Runs/Findings **verdict explanation** panels (`verdict-explanation.mjs`) landed — browser/accessibility matrix, report/export parity, and staging signoff remain. |
 | Enterprise readiness | Partial | SSO/MFA signoff, audit exports, monitoring, DR drills, legal approval packs, compliance mappings. |
-| Notifications | Developer ledger only | Slack, Teams, email, PagerDuty, ServiceNow, SIEM, retries, DLQ, and encrypted provider credentials. |
+| Notifications | Channel adapters, developer ledger, and Postgres retry/DLQ metadata persistence exist in developer validation | DLQ visibility, metadata-only retry processing, and metadata-only-by-default DLQ redrive UI/API exist in developer validation; production always-on scheduling, encrypted provider credential custody, staging delivery/redrive evidence, and extended providers such as PagerDuty, ServiceNow, and SIEM remain. |
+| WAF posture add-on | Developer-validation Postgres parity for core WAF tables, action items, CVE, discovery, and supply chain; orchestrator persistence/runtime first slice (`0011_waf_orchestrator`, `runtime.services.wafOrchestrator`); plan and retest execute each delegate one signed-worker safe job via `startTestRun` (delegation-only; retest `status: delegated`, `waf.retest.delegated` audit); R7/R8 analytics WAF-013–WAF-022 are developer-validation complete (risk scoring, coverage rollups, roadmap, schema extensions, catalog seed, compliance/board exports, OpenAPI parity). | Always-on/scheduled worker staging evidence, retest closure proof, connector config drift workers, live/staging DB acceptance, provider/customer evidence, immutable report custody, WAF security/observability/release signoff — not production-ready. |
 | Production ops | Partial | SLOs, dashboards, backups, staging evidence, incident playbooks, support SLAs. |
 
 ## P0 Product Gaps
@@ -24,7 +25,7 @@ AstraNull has a strong core platform and developer-validation implementation, bu
 | P0 | Authorization proof workflow | High-scale requests require customer ownership/control proof, business/legal approval, provider approval evidence, scoped dates/vectors/rates, and retained artifacts before SOC approval. |
 | P0 | Agent placement validation | Every target group must show observation mode, placement confidence, and whether the agent can actually prove that traffic path. |
 | P0 | Runtime Postgres adapter | `ASTRANULL_PERSISTENCE_MODE=postgres` must start only with the real adapter, migrations applied, RLS enforced, and tenant isolation proven under concurrent load. |
-| P0 | Real notification providers | Findings, high-scale status, agent health, and readiness regressions must deliver to configured SOC/engineering channels with retry/DLQ evidence. |
+| P0 | Notification delivery operations | Findings, high-scale status, agent health, and readiness regressions must deliver through configured channels with persistent retries. Developer validation persists retry/DLQ metadata and exposes metadata-only UI/API retry processing plus metadata-only-by-default DLQ redrive; production always-on scheduling, encrypted provider credentials, and staging delivery/redrive evidence. |
 | P0 | Safe vector execution policy | Every vector must define allowed payload type, max rate, max duration, approval level, stop condition, evidence requirements, and failure handling. |
 | P1 | Installer/release pipeline | Signed `.deb`, `.rpm`, container image, Helm chart, checksums, SBOM, upgrade/rollback docs, and staging install matrix. |
 | P1 | Probe fleet productionization | Multi-region signed probes, source identity, health, quotas, egress controls, rate budgets, and anti-abuse checks. |
@@ -148,6 +149,7 @@ Provider-specific approval paths are modeled explicitly instead of one generic a
 | Area | Required production work |
 |---|---|
 | Postgres adapter | Runtime implementation is in place; remaining production work is staging migration evidence, DB-backed integration lane, RLS/concurrent tenant-isolation proof, and operator rollback/forward-fix signoff. |
+| WAF orchestrator (Postgres) | First slice persists validation plans, baseline approvals, and retest requests with tenant RLS; list/create/cancel and approval/retest-request paths wired via `runtime.services.wafOrchestrator`. Plan and retest execute each delegate one safe job through `startTestRun` when `probeMode === 'signed-worker'` (delegation-only; retest sets `status: delegated`, `delegated_jobs`, audits `waf.retest.delegated`; errors include `waf_orchestrator_execution_not_ready`, `waf_orchestrator_signed_worker_required`, `waf_orchestration_batch_not_supported`, `validation_plan_execution_failed`, `waf_retest_already_delegated`, `waf_retest_already_completed`). **Remaining:** always-on/scheduled worker, multi-job batching, retest closure proof, live/staging DB acceptance. |
 | Job scheduler | Priority queue, retries, backoff, cancellation, per-tenant quotas. |
 | Probe orchestration | Region selection, source identity, health checks, rate budgets. |
 | Correlation engine | Time-window tuning, clock-skew handling, duplicate event handling. |
@@ -231,15 +233,15 @@ Do not add:
 |---|---|---|
 | `npm run kms:vault:evidence` | `kms_vault_posture` | Deployed KMS/HSM, rotation drill, security signoff |
 | `npm run container:evidence` | `control_plane_container_release` | CI build, scan, registry digest, signing/provenance |
-| `npm run release:staging-e2e:evidence` | `staging_e2e_matrix` | Staging SSO/agent/probe/report execution |
+| `npm run staging:local:e2e-matrix` / `npm run release:staging-e2e:evidence` | `staging_e2e_matrix` | Local-staging: seven scenarios `overall_status=passed` (internal SOC evidence). **Deferred (operational config):** hosted staging SSO/agent/probe/report on customer domain |
 | `npm run release:compliance-legal:evidence` | `compliance_legal_signoff` | Auditor/legal review of exports |
 | `npm run soc:authorization-custody:evidence` | `authorization_custody` | Durable authorization pack custody |
 | `npm run placement:staging:evidence` | `placement_confidence_staging` | Live placement mode matrix |
 | `npm run gateway:load-abuse:evidence` | `gateway_load_abuse` | Gateway/WAF load and abuse drill |
 | `npm run rollback:evidence` | `rollback_fixforward` | Staging rollback/fix-forward drill execution and DB signoff |
 | `npm run release:evidence:bundle` | (multi-kind) | Bundle validation only; each kind still needs external evidence |
-| `npm run release:staging-attestation` | (profile inventory) | `production_ready: true` = inventory complete, not promotion |
-| `npm run release:gap-audit` | (inventory + checklist) | `production_ready` true only when inventory complete and checklist gates closed |
+| `npm run release:staging-attestation:local` / `npm run release:staging-attestation` | (profile inventory) | Local-staging: `production_ready: true` with 31/31 kinds (not customer-facing promotion) |
+| `npm run release:gap-audit:local` / `npm run release:gap-audit` | (inventory + checklist) | Local-staging: `production_ready=true` when inventory complete and checklist gates closed |
 | `npm run release:sample-evidence` | (rehearsal fixtures) | Replace every sample before any production claim |
 | `npm run oidc:prod:preflight` | `oidc_prod_auth_preflight` | Real IdP login, MFA, staging auth signoff |
 | `npm run edge:protection:evidence` | `edge_protection` | Deployed WAF/gateway config and staging abuse drill |

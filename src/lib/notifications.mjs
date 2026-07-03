@@ -113,6 +113,20 @@ export function destinationPreview(channel, destination) {
   return `${channel}:${redacted.slice(0, 32)}`;
 }
 
+export function formatNotificationRuleForRead(rule) {
+  return {
+    id: rule.id,
+    tenant_id: rule.tenant_id,
+    channel: rule.channel,
+    destination_preview: destinationPreview(rule.channel, rule.destination),
+    triggers: Array.isArray(rule.triggers) ? [...rule.triggers] : [],
+    enabled: rule.enabled !== false,
+    created_at: rule.created_at,
+    ...(rule.created_by ? { created_by: rule.created_by } : {}),
+    ...(rule.delivery_note ? { delivery_note: rule.delivery_note } : {}),
+  };
+}
+
 function deliveryStatusForChannel(channel) {
   if (channel === 'in_app') {
     return {

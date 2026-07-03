@@ -3,6 +3,10 @@ import { describe, it } from 'node:test';
 import {
   assertNoRawWafEvidence,
   classifyWafPosture,
+  CONTROL_BYPASS_CLASSES,
+  deriveControlBypassStatus,
+  mapReasonCodesToControlBypassClasses,
+  normalizeScenarioIntakeInput,
   normalizeWafAssetInput,
   normalizeWafEvidenceSummary,
   normalizeWafValidationRequest,
@@ -147,12 +151,44 @@ describe('WAF posture contract', () => {
     assert.ok(failed.reason_codes.includes('marker_rule_not_blocking'));
   });
 
+  it('maps reason codes to control-bypass taxonomy classes', () => {
+    assert.equal(CONTROL_BYPASS_CLASSES.length, 6);
+    const classes = mapReasonCodesToControlBypassClasses(['origin_bypass_confirmed']);
+    assert.equal(classes.length, 2);
+    assert.ok(classes.some((entry) => entry.id === 'direct_origin_reachability'));
+    assert.equal(deriveControlBypassStatus({ reason_codes: ['origin_bypass_confirmed'] }), 'confirmed');
+    assert.equal(deriveControlBypassStatus({ reason_codes: ['marker_rule_not_blocking'] }), 'suspected');
+    assert.equal(deriveControlBypassStatus({ reason_codes: [] }), 'none');
+  });
+
+  it('normalizes metadata-only scenario intake without exploit fields', () => {
+    const intake = normalizeScenarioIntakeInput({
+      pattern_title: 'HTTP/2 parser normalization edge',
+      advisory_refs: ['CVE-2026-12345', 'advisory:cloudflare-2026-01'],
+      proposed_scenario_family: 'http2_parser_marker',
+      risk_class: 'metadata_only',
+      threat_summary: 'Metadata-only parser class reference.',
+    });
+    assert.equal(intake.pattern_title, 'HTTP/2 parser normalization edge');
+    assert.equal(intake.proposed_scenario_family, 'http2_parser_marker');
+    assert.throws(
+      () => normalizeScenarioIntakeInput({
+        pattern_title: 'bad',
+        advisory_refs: ['CVE-2026-12345'],
+        exploit_payload: 'no',
+      }),
+      /Forbidden (scenario intake field|raw WAF evidence)/,
+    );
+  });
+
   it('migrateDevStore adds WAF collections idempotently', () => {
     process.env.ASTRANULL_NO_PERSIST = '1';
     const legacy = { tenants: [] };
     resetStoreForTests(legacy);
     assert.equal(migrateDevStore(legacy), true);
     assert.deepEqual(legacy.wafAssets, []);
+    assert.deepEqual(legacy.wafScenarioIntakes, []);
+    assert.deepEqual(legacy.wafProducts, []);
     assert.deepEqual(legacy.externalAssetCandidates, []);
     assert.deepEqual(legacy.wafRuleRecommendations, []);
     assert.equal(migrateDevStore(legacy), false);

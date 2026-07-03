@@ -16,7 +16,9 @@ The product validates customer-declared target groups through:
 
 | Module | What it does |
 |---|---|
+| Public Landing | Unauthenticated entry point with product positioning, sign-up, and login redirects. |
 | Customer Portal | UI for onboarding, target groups, agents, checks, findings, reports, and settings. |
+| Internal Management Console | AstraNull staff-only UI for tenant lifecycle, sign-up review, subscriptions, entitlements, support operations, and internal approvals. |
 | SOC Console | Internal operator UI for high-scale requests, approval, scheduling, execution, monitoring, and closure. |
 | Agent Service | Registers agents, issues identities, receives heartbeats and observations. |
 | Probe Network | Sends safe external validation traffic and collects external observations. |
@@ -26,6 +28,8 @@ The product validates customer-declared target groups through:
 | Readiness Score Engine | Converts checks and findings into target-group and enterprise-level scores. |
 | Reporting Engine | Produces executive, technical, SOC, audit, and customer-facing reports. |
 | API & Integrations | Supports automation, webhooks, ticketing, SIEM/SOAR, and optional future cloud connectors. |
+
+The customer portal and internal management console are separate trust surfaces. Customers can request sign-up, safe validation, and high-scale assessments, but AstraNull staff-only management handles tenant provisioning, subscription controls, internal approvals, and SOC-governed high-scale decisions. See [Public Landing and Internal Management](13-public-landing-and-internal-management.md).
 
 ## What AstraNull validates
 

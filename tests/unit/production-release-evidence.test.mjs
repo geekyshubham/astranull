@@ -160,6 +160,35 @@ describe('production release evidence contracts', () => {
     );
   });
 
+  it('rejects incomplete staging E2E matrix status', () => {
+    const evidence = {
+      ...COMPLETE.staging_e2e_matrix,
+      overall_status: 'incomplete',
+    };
+    const result = validateProductionReleaseEvidence('staging_e2e_matrix', evidence);
+    assert.equal(result.ok, false);
+    assert.ok(
+      result.invalid_fields.some(
+        (entry) => entry.field === 'overall_status' && entry.reason === 'matrix_not_passed',
+      ),
+    );
+  });
+
+  it('rejects staging E2E matrix scenarios that did not pass', () => {
+    const evidence = structuredClone(COMPLETE.staging_e2e_matrix);
+    evidence.scenarios[0] = {
+      ...evidence.scenarios[0],
+      status: 'not_run',
+    };
+    const result = validateProductionReleaseEvidence('staging_e2e_matrix', evidence);
+    assert.equal(result.ok, false);
+    assert.ok(
+      result.invalid_fields.some(
+        (entry) => entry.field === 'scenarios[0].status' && entry.reason === 'scenario_not_passed',
+      ),
+    );
+  });
+
   it('rejects raw or secret-bearing evidence fields', () => {
     const evidence = {
       ...COMPLETE.operator_runbook_exercise,

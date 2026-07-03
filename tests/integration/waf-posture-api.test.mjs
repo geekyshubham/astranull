@@ -8,6 +8,7 @@ import {
   REMEDIATION_CONNECTOR_TYPES,
   validateActionItem,
 } from '../../src/contracts/wafPosture.mjs';
+import { verifyCustodyManifest } from '../../src/lib/custody.mjs';
 import { createServer } from '../../src/server.mjs';
 import * as wafPosture from '../../src/services/wafPosture.mjs';
 import { getStore } from '../../src/store.mjs';
@@ -28,6 +29,15 @@ function wafEnabledEnv() {
     ...process.env,
     ASTRANULL_NO_PERSIST: '1',
     ASTRANULL_WAF_POSTURE_ENABLED: '1',
+    ASTRANULL_CONNECTORS_ENABLED: '1',
+  };
+}
+
+function wafOrchestratorEnv() {
+  return {
+    ...wafEnabledEnv(),
+    ASTRANULL_PROBE_MODE: 'signed-worker',
+    ASTRANULL_PROBE_WORKER_SECRET: 'probe-worker-secret-at-least-32-chars!!',
   };
 }
 
@@ -39,13 +49,15 @@ function startServer(env = wafEnabledEnv()) {
   return { server, baseUrl: `http://127.0.0.1:${port}` };
 }
 
-async function createDemoAsset(baseUrl, headers) {
+async function createDemoAsset(baseUrl, headers, extra = {}) {
   const created = await request(baseUrl, 'POST', '/v1/waf/assets', {
     headers,
     body: {
       target_group_id: 'tg_1',
+      target_id: 'tgt_1',
       canonical_url: 'https://waf-app.example.com',
       owner_hint: 'edge-team',
+      ...extra,
     },
   });
   assert.equal(created.status, 201);
@@ -135,9 +147,22 @@ function openWafDriftEventsForAsset(assetId, driftType = null) {
 }
 
 async function finalizeProtectedPosture(baseUrl, headers, asset) {
+  const safeRun = await createBoundSafeTestRun(baseUrl, headers);
+  clearProbeEventsForRun(safeRun.id);
+  const nonceHash = safeRun.correlation?.nonce_hash ?? 'nonce_helper_protected';
+  injectMetadataProbeEvent({
+    testRunId: safeRun.id,
+    nonceHash,
+    externalResult: 'blocked',
+    metadata: {
+      waf_fingerprint_detected: true,
+      waf_product_hint: 'cloudflare',
+    },
+  });
+
   const validation = await request(baseUrl, 'POST', '/v1/waf/validations', {
     headers,
-    body: { waf_asset_id: asset.id, modes: ['marker'] },
+    body: { waf_asset_id: asset.id, modes: ['marker'], test_run_id: safeRun.id },
   });
   assert.equal(validation.status, 201);
   const runId = validation.json.validation_run.id;
@@ -146,19 +171,11 @@ async function finalizeProtectedPosture(baseUrl, headers, asset) {
     body: {
       waf_detected: true,
       validation_passed: true,
-      scenario_results: [
-        {
-          scenario_family: 'marker',
-          passed: true,
-          observed_action: 'block',
-          evidence_summary: { request_id: 'req_protected', blocked: true },
-        },
-      ],
     },
   });
   assert.equal(finalize.status, 200);
   assert.equal(finalize.json.posture.status, 'protected');
-  return { validationRunId: runId, posture: finalize.json.posture };
+  return { validationRunId: runId, posture: finalize.json.posture, safeRun };
 }
 
 async function finalizeUnderprotectedMarkerLeak(baseUrl, headers, asset, { safeRun: existingSafeRun } = {}) {
@@ -344,6 +361,34 @@ describe('WAF posture API', () => {
     assert.equal(getStore().wafScenarioResults?.length ?? 0, beforeScenarios);
   });
 
+  it('rejects synthetic protected finalize with request_id and blocked only', async () => {
+    const engineer = demoHeaders('engineer');
+    const asset = await createDemoAsset(baseUrl, engineer);
+    const validation = await request(baseUrl, 'POST', '/v1/waf/validations', {
+      headers: engineer,
+      body: { waf_asset_id: asset.id, modes: ['marker'] },
+    });
+    const runId = validation.json.validation_run.id;
+
+    const beforeSnaps = getStore().wafPostureSnapshots?.length ?? 0;
+    const finalize = await request(baseUrl, 'POST', `/v1/waf/validations/${runId}/finalize`, {
+      headers: engineer,
+      body: {
+        waf_detected: true,
+        validation_passed: true,
+        scenario_results: [{
+          scenario_family: 'marker',
+          passed: true,
+          observed_action: 'block',
+          evidence_summary: { request_id: 'ui_synthetic', blocked: true },
+        }],
+      },
+    });
+    assert.equal(finalize.status, 400);
+    assert.equal(finalize.json.error, 'waf_validation_evidence_required');
+    assert.equal(getStore().wafPostureSnapshots?.length ?? 0, beforeSnaps);
+  });
+
   it('rejects naked protected finalize without corroborating scenario evidence', async () => {
     const engineer = demoHeaders('engineer');
     const asset = await createDemoAsset(baseUrl, engineer);
@@ -369,7 +414,7 @@ describe('WAF posture API', () => {
     assert.equal(getStore().wafScenarioResults?.length ?? 0, beforeScenarios);
   });
 
-  it('finalizes protected posture when WAF is detected and validation passes', async () => {
+  it('rejects protected finalize when client asserts observed_at_agent without corroborating events', async () => {
     const engineer = demoHeaders('engineer');
     const asset = await createDemoAsset(baseUrl, engineer);
     const validation = await request(baseUrl, 'POST', '/v1/waf/validations', {
@@ -388,9 +433,46 @@ describe('WAF posture API', () => {
             scenario_family: 'marker',
             passed: true,
             observed_action: 'block',
-            evidence_summary: { request_id: 'req_ok', blocked: true },
+            evidence_summary: {
+              nonce_hash: 'a'.repeat(64),
+              observed_at_agent: true,
+              blocked: true,
+            },
           },
         ],
+      },
+    });
+    assert.equal(finalize.status, 400);
+    assert.equal(finalize.json.error, 'waf_validation_evidence_required');
+  });
+
+  it('finalizes protected posture when bound probe evidence corroborates validation pass', async () => {
+    const engineer = demoHeaders('engineer');
+    const asset = await createDemoAsset(baseUrl, engineer);
+    const safeRun = await createBoundSafeTestRun(baseUrl, engineer);
+    clearProbeEventsForRun(safeRun.id);
+    const nonceHash = safeRun.correlation?.nonce_hash ?? 'nonce_protected_finalize';
+    injectMetadataProbeEvent({
+      testRunId: safeRun.id,
+      nonceHash,
+      externalResult: 'blocked',
+      metadata: {
+        waf_fingerprint_detected: true,
+        waf_product_hint: 'cloudflare',
+      },
+    });
+
+    const validation = await request(baseUrl, 'POST', '/v1/waf/validations', {
+      headers: engineer,
+      body: { waf_asset_id: asset.id, modes: ['marker'], test_run_id: safeRun.id },
+    });
+    const runId = validation.json.validation_run.id;
+
+    const finalize = await request(baseUrl, 'POST', `/v1/waf/validations/${runId}/finalize`, {
+      headers: engineer,
+      body: {
+        waf_detected: true,
+        validation_passed: true,
       },
     });
     assert.equal(finalize.status, 200);
@@ -406,8 +488,103 @@ describe('WAF posture API', () => {
     const coverage = await request(baseUrl, 'GET', '/v1/waf/coverage', { headers: engineer });
     assert.equal(coverage.status, 200);
     assert.equal(coverage.json.total_assets, 1);
+    assert.equal(coverage.json.total, 1);
     assert.equal(coverage.json.protected, 1);
+    assert.equal(coverage.json.coverage_ratio, 1);
     assert.equal(coverage.json.percentages.protected, 100);
+    assert.ok(Array.isArray(coverage.json.trend));
+    assert.ok(coverage.json.trend.length >= 1);
+    assert.equal(coverage.json.trend.at(-1).protected, 1);
+
+    const posture = fetched.json.current_posture;
+    assert.ok(posture.risk_score >= 0);
+    assert.ok(['tier_1', 'tier_2', 'tier_3', 'tier_4'].includes(posture.priority_band));
+    assert.ok(Array.isArray(posture.risk_factors));
+  });
+
+  it('serves coverage analytics and roadmap APIs with metadata-only payloads', async () => {
+    const engineer = demoHeaders('engineer');
+    const asset = await createDemoAsset(baseUrl, engineer, {
+      business_criticality: 'payment',
+      traffic_tier: 'high',
+      asset_kind: 'checkout',
+      compliance_tags: ['pci'],
+      expected_vendor_hint: 'cloudflare',
+    });
+    const validation = await request(baseUrl, 'POST', '/v1/waf/validations', {
+      headers: engineer,
+      body: { waf_asset_id: asset.id, modes: ['marker'] },
+    });
+    const runId = validation.json.validation_run.id;
+    const finalize = await request(baseUrl, 'POST', `/v1/waf/validations/${runId}/finalize`, {
+      headers: engineer,
+      body: {
+        waf_detected: false,
+        validation_passed: false,
+        detected_vendor: 'cloudflare',
+        detected_product: 'Cloudflare WAF',
+      },
+    });
+    assert.equal(finalize.status, 200);
+    assert.equal(finalize.json.posture.status, 'unprotected');
+    assert.ok(finalize.json.posture.risk_score >= 50);
+    assert.equal(finalize.json.posture.priority_band, 'tier_1');
+
+    const vendors = await request(baseUrl, 'GET', '/v1/waf/coverage/vendors', { headers: engineer });
+    assert.equal(vendors.status, 200);
+    assert.ok(vendors.json.items.some((item) => item.vendor === 'cloudflare'));
+
+    const entities = await request(baseUrl, 'GET', '/v1/waf/coverage/entities', { headers: engineer });
+    assert.equal(entities.status, 200);
+    assert.ok(entities.json.items.some((item) => item.name === 'edge-team'));
+
+    getStore().targetGroups = getStore().targetGroups.map((group) =>
+      group.id === 'tg_1'
+        ? {
+            ...group,
+            settings_json: {
+              ...(group.settings_json ?? {}),
+              region_code: 'us-east',
+              region_label: 'US East',
+            },
+          }
+        : group,
+    );
+    const geography = await request(baseUrl, 'GET', '/v1/waf/coverage/geography', {
+      headers: engineer,
+    });
+    assert.equal(geography.status, 200);
+    assert.ok(geography.json.items.some((item) => item.region_code === 'us-east'));
+
+    const criticality = await request(baseUrl, 'GET', '/v1/waf/coverage/criticality', {
+      headers: engineer,
+    });
+    assert.equal(criticality.status, 200);
+    const paymentBucket = criticality.json.items.find((item) => item.business_criticality === 'payment');
+    assert.ok(paymentBucket);
+    assert.equal(paymentBucket.unprotected, 1);
+    assert.ok(paymentBucket.critical_gap_count >= 1);
+    assertSerializedSafe(criticality.json, 'coverage-criticality');
+
+    const roadmap = await request(baseUrl, 'GET', '/v1/waf/coverage/risk-roadmap', {
+      headers: engineer,
+    });
+    assert.equal(roadmap.status, 200);
+    assert.equal(roadmap.json.method, 'waf_risk_v1');
+    assert.ok(roadmap.json.tiers.tier_1.length >= 1);
+    assert.equal(roadmap.json.tiers.tier_1[0].waf_asset_id, asset.id);
+    assert.ok(roadmap.json.tiers.tier_1[0].recommended_action);
+
+    const consolidation = await request(
+      baseUrl,
+      'GET',
+      '/v1/waf/coverage/vendor-consolidation',
+      { headers: engineer },
+    );
+    assert.equal(consolidation.status, 200);
+    assert.ok(Array.isArray(consolidation.json.vendor_footprint));
+    assert.ok(Array.isArray(consolidation.json.consolidation_opportunities));
+    assertSerializedSafe(consolidation.json, 'vendor-consolidation');
   });
 
   it('classifies detected-but-unvalidated assets as unknown', async () => {
@@ -490,7 +667,7 @@ describe('WAF posture API', () => {
     assert.equal(bound.json.validation_run.test_run_id, safeRun.id);
   });
 
-  it('derives protected posture from blocked probe without matching agent observation', async () => {
+  it('derives protected posture from blocked probe with WAF fingerprint and nonce binding', async () => {
     const engineer = demoHeaders('engineer');
     const asset = await createDemoAsset(baseUrl, engineer);
     const safeRun = await createBoundSafeTestRun(baseUrl, engineer);
@@ -500,6 +677,10 @@ describe('WAF posture API', () => {
       testRunId: safeRun.id,
       nonceHash,
       externalResult: 'blocked',
+      metadata: {
+        waf_fingerprint_detected: true,
+        waf_product_hint: 'cloudflare',
+      },
     });
 
     const validation = await request(baseUrl, 'POST', '/v1/waf/validations', {
@@ -594,36 +775,10 @@ describe('WAF posture API', () => {
     const engineer = demoHeaders('engineer');
     const asset = await createDemoAsset(baseUrl, engineer);
 
-    const protectedValidation = await request(baseUrl, 'POST', '/v1/waf/validations', {
-      headers: engineer,
-      body: { waf_asset_id: asset.id, modes: ['marker'] },
-    });
-    const protectedRunId = protectedValidation.json.validation_run.id;
-    const protectedFinalize = await request(
-      baseUrl,
-      'POST',
-      `/v1/waf/validations/${protectedRunId}/finalize`,
-      {
-        headers: engineer,
-        body: {
-          waf_detected: true,
-          validation_passed: true,
-          scenario_results: [
-            {
-              scenario_family: 'marker',
-              passed: true,
-              observed_action: 'block',
-              evidence_summary: { request_id: 'req_ok', blocked: true },
-            },
-          ],
-        },
-      },
-    );
-    assert.equal(protectedFinalize.status, 200);
-    assert.equal(protectedFinalize.json.posture.status, 'protected');
+    const protectedOutcome = await finalizeProtectedPosture(baseUrl, engineer, asset);
     assert.equal(openWafPostureFindingsForAsset(asset.id).length, 0);
 
-    const safeRun = await createBoundSafeTestRun(baseUrl, engineer);
+    const safeRun = protectedOutcome.safeRun;
     clearProbeEventsForRun(safeRun.id);
     const nonceHash = safeRun.correlation?.nonce_hash ?? 'nonce_fingerprint_only_findings';
     injectMetadataProbeEvent({
@@ -728,9 +883,11 @@ describe('WAF drift events API', () => {
   it('creates one open marker_failed drift after protected then underprotected marker leak', async () => {
     const engineer = demoHeaders('engineer');
     const asset = await createDemoAsset(baseUrl, engineer);
-    await finalizeProtectedPosture(baseUrl, engineer, asset);
+    const protectedOutcome = await finalizeProtectedPosture(baseUrl, engineer, asset);
 
-    const leak = await finalizeUnderprotectedMarkerLeak(baseUrl, engineer, asset);
+    const leak = await finalizeUnderprotectedMarkerLeak(baseUrl, engineer, asset, {
+      safeRun: protectedOutcome.safeRun,
+    });
     const finding = openWafPostureFindingsForAsset(asset.id)[0];
     const drifts = openWafDriftEventsForAsset(asset.id, 'marker_failed');
     assert.equal(drifts.length, 1);
@@ -759,8 +916,10 @@ describe('WAF drift events API', () => {
   it('updates the same open drift event on repeat failed finalize', async () => {
     const engineer = demoHeaders('engineer');
     const asset = await createDemoAsset(baseUrl, engineer);
-    await finalizeProtectedPosture(baseUrl, engineer, asset);
-    const first = await finalizeUnderprotectedMarkerLeak(baseUrl, engineer, asset);
+    const protectedOutcome = await finalizeProtectedPosture(baseUrl, engineer, asset);
+    const first = await finalizeUnderprotectedMarkerLeak(baseUrl, engineer, asset, {
+      safeRun: protectedOutcome.safeRun,
+    });
     const drift = openWafDriftEventsForAsset(asset.id, 'marker_failed')[0];
     const detectedBefore = getStore().auditLog.filter(
       (e) => e.action === 'waf.drift.detected' && e.resource_id === drift.id,
@@ -785,8 +944,10 @@ describe('WAF drift events API', () => {
   it('PATCH drift status is tenant and RBAC protected', async () => {
     const engineer = demoHeaders('engineer');
     const asset = await createDemoAsset(baseUrl, engineer);
-    await finalizeProtectedPosture(baseUrl, engineer, asset);
-    await finalizeUnderprotectedMarkerLeak(baseUrl, engineer, asset);
+    const protectedOutcome = await finalizeProtectedPosture(baseUrl, engineer, asset);
+    await finalizeUnderprotectedMarkerLeak(baseUrl, engineer, asset, {
+      safeRun: protectedOutcome.safeRun,
+    });
     const drift = openWafDriftEventsForAsset(asset.id, 'marker_failed')[0];
 
     const viewer = demoHeaders('viewer');
@@ -928,7 +1089,7 @@ describe('WAF connector API', () => {
     });
     assert.equal(validate.status, 200);
     assert.equal(validate.json.status, 'active');
-    assert.equal(validate.json.capabilities.outbound_polling, false);
+    assert.equal(validate.json.capabilities.outbound_polling, true);
 
     const poll = await request(baseUrl, 'POST', `/v1/connectors/${connector.id}/poll`, {
       headers: admin,
@@ -1040,6 +1201,37 @@ describe('WAF connector API', () => {
 
     const stored = getStore().wafConnectors.find((c) => c.id === connectorId);
     assert.equal(stored.status, 'error');
+  });
+
+  it('fails closed on outbound poll without encryption key but keeps manual ingest', async () => {
+    const admin = demoHeaders('admin');
+    const connector = await createReadOnlyConnector(admin);
+
+    const outbound = await request(baseUrl, 'POST', `/v1/connectors/${connector.id}/poll`, {
+      headers: admin,
+      body: {},
+    });
+    assert.equal(outbound.status, 503);
+    assert.equal(outbound.json.error, 'connector_poll_failed');
+    assert.equal(outbound.json.health.health_code, 'encryption_not_configured');
+
+    const manual = await request(baseUrl, 'POST', `/v1/connectors/${connector.id}/poll`, {
+      headers: admin,
+      body: {
+        snapshots: [
+          {
+            snapshot_kind: 'waf_policy',
+            resource_ref_hash: 'res_manual_api_1',
+            display_ref: 'manual-zone',
+            config_hash: 'cfg_manual_api_1',
+            summary: { hostnames: ['manual.example.com'], policy_mode: 'block', rule_count: 2 },
+          },
+        ],
+      },
+    });
+    assert.equal(manual.status, 202);
+    assert.equal(manual.json.snapshots.length, 1);
+    assert.equal(manual.json.snapshots[0].summary.rule_count, 2);
   });
 
   it('poll rejects raw snapshot fields and stores metadata-only summaries', async () => {
@@ -1343,5 +1535,621 @@ describe('WAF remediation action items and connector payloads', () => {
       );
       assertSerializedSafe(payload, `remediation payload (${connectorType})`);
     }
+  });
+});
+
+describe('WAF orchestrator API (dev-json)', () => {
+  let server;
+  let baseUrl;
+
+  before(() => {
+    freshStore();
+    Object.assign(process.env, wafOrchestratorEnv());
+    ({ server, baseUrl } = startServer(wafOrchestratorEnv()));
+  });
+
+  after(() => {
+    server?.close();
+    restoreEnv();
+  });
+
+  afterEach(() => {
+    freshStore();
+  });
+
+  it('creates and lists validation plans via /v1/waf/validation-plans', async () => {
+    const headers = demoHeaders('engineer');
+
+    const created = await request(baseUrl, 'POST', '/v1/waf/validation-plans', {
+      headers,
+      body: {
+        target_group_id: 'tg_1',
+        mode: 'manual',
+        scenarios: ['marker', 'fingerprint'],
+        max_concurrent: 2,
+        timeout_ms: 60_000,
+      },
+    });
+    assert.equal(created.status, 201);
+    assert.ok(created.json.validation_plan?.id);
+    assert.deepEqual(created.json.validation_plan.scenarios, ['marker', 'fingerprint']);
+
+    const listed = await request(baseUrl, 'GET', '/v1/waf/validation-plans', { headers });
+    assert.equal(listed.status, 200);
+    assert.equal(listed.json.items.length, 1);
+    assert.equal(listed.json.items[0].id, created.json.validation_plan.id);
+  });
+
+  it('rejects unsafe orchestrator scenarios at the API boundary', async () => {
+    const headers = demoHeaders('engineer');
+
+    const rejected = await request(baseUrl, 'POST', '/v1/waf/validation-plans', {
+      headers,
+      body: {
+        target_group_id: 'tg_1',
+        scenarios: ['amplification_attack'],
+        max_concurrent: 1,
+      },
+    });
+    assert.equal(rejected.status, 400);
+    assert.equal(rejected.json.error, 'unsafe_orchestrator_plan');
+  });
+
+  it('lists retests and filters by drift_event_id with tenant isolation', async () => {
+    const engineer = demoHeaders('engineer');
+    const asset = await createDemoAsset(baseUrl, engineer);
+    const protectedOutcome = await finalizeProtectedPosture(baseUrl, engineer, asset);
+    await finalizeUnderprotectedMarkerLeak(baseUrl, engineer, asset, {
+      safeRun: protectedOutcome.safeRun,
+    });
+    const drift = openWafDriftEventsForAsset(asset.id, 'marker_failed')[0];
+
+    const created = await request(baseUrl, 'POST', `/v1/waf/drift-events/${drift.id}/retest`, {
+      headers: engineer,
+      body: {
+        retest_plan: ['marker'],
+        requested_by: 'integration-test',
+        priority: 'normal',
+      },
+    });
+    assert.equal(created.status, 201);
+    assert.ok(created.json.retest_request?.id);
+
+    const listed = await request(baseUrl, 'GET', '/v1/waf/retests', { headers: engineer });
+    assert.equal(listed.status, 200);
+    assert.equal(listed.json.items.length, 1);
+    assert.equal(listed.json.items[0].id, created.json.retest_request.id);
+    assert.equal(listed.json.items[0].drift_event_id, drift.id);
+    assertSerializedSafe(listed.json.items[0], 'retest list item');
+
+    const filtered = await request(
+      baseUrl,
+      'GET',
+      `/v1/waf/retests?drift_event_id=${encodeURIComponent(drift.id)}`,
+      { headers: engineer },
+    );
+    assert.equal(filtered.status, 200);
+    assert.equal(filtered.json.items.length, 1);
+
+    getStore().tenants.push({ id: 'ten_other', name: 'Other' });
+    const other = demoHeaders('engineer', 'ten_other', 'usr_other');
+    const cross = await request(baseUrl, 'GET', '/v1/waf/retests', { headers: other });
+    assert.equal(cross.status, 200);
+    assert.equal(cross.json.items.length, 0);
+
+    const viewerAllowed = await request(baseUrl, 'GET', '/v1/waf/retests', {
+      headers: demoHeaders('viewer'),
+    });
+    assert.equal(viewerAllowed.status, 200);
+
+    const byAsset = await request(
+      baseUrl,
+      'GET',
+      `/v1/waf/retests?waf_asset_id=${encodeURIComponent(asset.id)}&status=requested`,
+      { headers: engineer },
+    );
+    assert.equal(byAsset.status, 200);
+    assert.equal(byAsset.json.items.length, 1);
+    assert.equal(byAsset.json.items[0].waf_asset_id, asset.id);
+  });
+
+  it('executes retest delegation-only and completes from verdict evidence', async () => {
+    const engineer = demoHeaders('engineer');
+    const asset = await createDemoAsset(baseUrl, engineer);
+    const protectedOutcome = await finalizeProtectedPosture(baseUrl, engineer, asset);
+    await finalizeUnderprotectedMarkerLeak(baseUrl, engineer, asset, {
+      safeRun: protectedOutcome.safeRun,
+    });
+    const drift = openWafDriftEventsForAsset(asset.id, 'marker_failed')[0];
+
+    const created = await request(baseUrl, 'POST', `/v1/waf/drift-events/${drift.id}/retest`, {
+      headers: engineer,
+      body: {
+        retest_plan: ['marker'],
+        requested_by: 'integration-test',
+        priority: 'normal',
+      },
+    });
+    const retestId = created.json.retest_request.id;
+
+    for (const run of getStore().testRuns) {
+      if (['running', 'collecting', 'planned'].includes(run.status)) {
+        run.status = 'verdicted';
+        run.completed_at = new Date().toISOString();
+      }
+    }
+
+    const executed = await request(baseUrl, 'POST', `/v1/waf/retests/${retestId}/execute`, {
+      headers: engineer,
+      body: {
+        validation_passed: true,
+        posture_status: 'protected',
+        results: [{ scenario_family: 'marker', passed: true, observed_action: 'block' }],
+      },
+    });
+    assert.equal(executed.status, 200);
+    assert.equal(executed.json.retest_request.status, 'delegated');
+    assert.equal(executed.json.verdict, undefined);
+    assert.equal(executed.json.delegated_jobs.length, 1);
+    assertSerializedSafe(executed.json, 'retest execute response');
+
+    const delegatedRunId = executed.json.delegated_jobs[0].test_run_id;
+
+    const notReady = await request(baseUrl, 'POST', `/v1/waf/retests/${retestId}/complete`, {
+      headers: engineer,
+    });
+    assert.equal(notReady.status, 422);
+    assert.equal(notReady.json.error, 'waf_retest_closure_not_ready');
+
+    const run = getStore().testRuns.find((r) => r.id === delegatedRunId);
+    run.status = 'verdicted';
+    run.check_id = 'waf.marker_rule.safe';
+    run.probe_job_id = executed.json.delegated_jobs[0].probe_job_id;
+    getStore().verdicts.push({
+      id: 'ver_integration_retest',
+      tenant_id: 'ten_demo',
+      test_run_id: delegatedRunId,
+      check_id: 'waf.marker_rule.safe',
+      verdict: 'protected',
+      confidence: 'medium',
+      created_at: new Date().toISOString(),
+    });
+
+    const completed = await request(baseUrl, 'POST', `/v1/waf/retests/${retestId}/complete`, {
+      headers: engineer,
+    });
+    assert.equal(completed.status, 200);
+    assert.equal(completed.json.verdict.verdict, 'resolved');
+    assert.equal(completed.json.retest_request.status, 'completed');
+    assert.equal(
+      getStore().wafDriftEvents.find((e) => e.id === drift.id).status,
+      'resolved',
+    );
+    assert.equal(
+      getStore().auditLog.some((e) => e.action === 'waf.retest.completed'),
+      true,
+    );
+    assertSerializedSafe(completed.json, 'retest complete response');
+  });
+});
+
+describe('WAF report export API', () => {
+  let server;
+  let baseUrl;
+
+  before(() => {
+    freshStore();
+    ({ server, baseUrl } = startServer());
+  });
+
+  after(() => {
+    server?.close();
+    restoreEnv();
+  });
+
+  afterEach(() => {
+    freshStore();
+  });
+
+  it('exports metadata-only executive_coverage JSON with valid custody manifest', async () => {
+    const engineer = demoHeaders('engineer');
+    const asset = await createDemoAsset(baseUrl, engineer);
+    await finalizeProtectedPosture(baseUrl, engineer, asset);
+
+    const exported = await request(
+      baseUrl,
+      'GET',
+      '/v1/waf/reports/executive_coverage/export?format=json',
+      { headers: engineer },
+    );
+    assert.equal(exported.status, 200);
+    assert.ok(exported.json.payload);
+    assert.ok(exported.json.custody);
+    assert.equal(exported.json.payload.report_kind, 'executive_coverage');
+    assert.equal(exported.json.payload.tenant_id, 'ten_demo');
+    assert.ok(exported.json.payload.coverage.total_assets >= 1);
+    assert.ok(Array.isArray(exported.json.payload.criticality_rollup));
+    assertSerializedSafe(exported.json, 'waf report export');
+    assert.equal(
+      verifyCustodyManifest({
+        payload: exported.json.payload,
+        custody: exported.json.custody,
+      }).ok,
+      true,
+    );
+
+    const audits = getStore().auditLog.filter((e) => e.action === 'waf.report.exported');
+    assert.equal(audits.length, 1);
+    assert.equal(audits[0].resource_id, 'executive_coverage');
+  });
+
+  it('exports drift_audit markdown without forbidden terms', async () => {
+    const engineer = demoHeaders('engineer');
+    const asset = await createDemoAsset(baseUrl, engineer);
+    const protectedOutcome = await finalizeProtectedPosture(baseUrl, engineer, asset);
+    await finalizeUnderprotectedMarkerLeak(baseUrl, engineer, asset, {
+      safeRun: protectedOutcome.safeRun,
+    });
+
+    const exported = await request(
+      baseUrl,
+      'GET',
+      '/v1/waf/reports/drift_audit/export?format=markdown',
+      { headers: engineer },
+    );
+    assert.equal(exported.status, 200);
+    assert.match(exported.text, /WAF drift_audit report/);
+    assert.match(exported.text, /## Custody/);
+    const lower = exported.text.toLowerCase();
+    for (const term of FORBIDDEN_FINDING_TERMS) {
+      assert.ok(!lower.includes(term), `markdown must not include forbidden term: ${term}`);
+    }
+  });
+
+  it('rejects invalid report kind and lets viewers export with waf:read', async () => {
+    const engineer = demoHeaders('engineer');
+    const invalid = await request(
+      baseUrl,
+      'GET',
+      '/v1/waf/reports/not_a_real_kind/export?format=json',
+      { headers: engineer },
+    );
+    assert.equal(invalid.status, 400);
+    assert.equal(invalid.json.error, 'waf_report_kind_invalid');
+
+    const viewerAllowed = await request(
+      baseUrl,
+      'GET',
+      '/v1/waf/reports/executive_coverage/export?format=json',
+      { headers: demoHeaders('viewer') },
+    );
+    assert.equal(viewerAllowed.status, 200);
+    assert.ok(viewerAllowed.json.custody?.content_sha256);
+  });
+
+  it('exports metadata-only compliance_audit JSON with control mapping, exceptions, and custody', async () => {
+    const engineer = demoHeaders('engineer');
+    const asset = await createDemoAsset(baseUrl, engineer);
+    await finalizeProtectedPosture(baseUrl, engineer, asset);
+
+    getStore().wafExceptions.push({
+      id: 'waf_exc_1',
+      tenant_id: 'ten_demo',
+      waf_asset_id: asset.id,
+      owner: 'edge-team',
+      reason: 'Legacy app sunset Q4',
+      expires_at: '2027-12-31T00:00:00.000Z',
+      scope_hash: 'scope_abc123',
+      approved_at: new Date().toISOString(),
+    });
+
+    const exported = await request(
+      baseUrl,
+      'GET',
+      '/v1/waf/reports/compliance_audit/export?format=json',
+      { headers: engineer },
+    );
+    assert.equal(exported.status, 200);
+    assert.ok(exported.json.payload);
+    assert.ok(exported.json.custody);
+    assert.equal(exported.json.payload.report_kind, 'compliance_audit');
+    assert.equal(exported.json.payload.tenant_id, 'ten_demo');
+    assert.ok(exported.json.payload.executive_coverage_summary?.coverage);
+    assert.ok(
+      Object.prototype.hasOwnProperty.call(
+        exported.json.payload.executive_coverage_summary.coverage,
+        'coverage_ratio',
+      ),
+    );
+    assert.ok(Array.isArray(exported.json.payload.exception_register));
+    assert.equal(exported.json.payload.exception_register.length, 1);
+    assert.equal(exported.json.payload.exception_register[0].waf_asset_id, asset.id);
+    assert.equal(exported.json.payload.exception_register[0].owner, 'edge-team');
+    assert.equal(exported.json.payload.exception_register[0].scope_hash, 'scope_abc123');
+    assert.ok(exported.json.payload.control_mapping_appendix?.entries?.length >= 6);
+    assert.match(
+      exported.json.payload.control_mapping_appendix.disclaimer,
+      /does not certify compliance/i,
+    );
+    const pciEntry = exported.json.payload.control_mapping_appendix.entries.find(
+      (entry) => entry.framework === 'PCI DSS',
+    );
+    assert.ok(pciEntry);
+    assert.ok(Array.isArray(pciEntry.artifact_ids.validation_run_ids));
+    assert.ok(pciEntry.live_metrics.coverage_ratio >= 0);
+    assert.ok(exported.json.payload.validation_pass_rates);
+    assert.ok(exported.json.payload.scope_declaration?.target_group_ids?.includes('tg_1'));
+    assert.ok(Array.isArray(exported.json.payload.criticality_rollup));
+    assertSerializedSafe(exported.json, 'compliance audit export');
+    assert.equal(
+      verifyCustodyManifest({
+        payload: exported.json.payload,
+        custody: exported.json.custody,
+      }).ok,
+      true,
+    );
+
+    const audits = getStore().auditLog.filter((e) => e.action === 'waf.report.exported');
+    assert.equal(audits.length, 1);
+    assert.equal(audits[0].resource_id, 'compliance_audit');
+    assert.equal(exported.json.custody.artifact_id, 'compliance_audit');
+  });
+
+  it('exports compliance_audit markdown with control mapping and custody sections', async () => {
+    const engineer = demoHeaders('engineer');
+    const asset = await createDemoAsset(baseUrl, engineer);
+    await finalizeProtectedPosture(baseUrl, engineer, asset);
+
+    const exported = await request(
+      baseUrl,
+      'GET',
+      '/v1/waf/reports/compliance_audit/export?format=markdown',
+      { headers: engineer },
+    );
+    assert.equal(exported.status, 200);
+    assert.match(exported.text, /WAF compliance_audit report/);
+    assert.match(exported.text, /## Control mapping appendix/);
+    assert.match(exported.text, /## Exception register/);
+    assert.match(exported.text, /## Custody/);
+    const lower = exported.text.toLowerCase();
+    for (const term of FORBIDDEN_FINDING_TERMS) {
+      assert.ok(!lower.includes(term), `markdown must not include forbidden term: ${term}`);
+    }
+  });
+
+  it('exports metadata-only board_roadmap_brief JSON with tier summary and procurement narrative', async () => {
+    const engineer = demoHeaders('engineer');
+    const asset = await createDemoAsset(baseUrl, engineer, {
+      business_criticality: 'payment',
+      traffic_tier: 'high',
+      asset_kind: 'checkout',
+      compliance_tags: ['pci'],
+      expected_vendor_hint: 'cloudflare',
+    });
+    const validation = await request(baseUrl, 'POST', '/v1/waf/validations', {
+      headers: engineer,
+      body: { waf_asset_id: asset.id, modes: ['marker'] },
+    });
+    const runId = validation.json.validation_run.id;
+    const finalize = await request(baseUrl, 'POST', `/v1/waf/validations/${runId}/finalize`, {
+      headers: engineer,
+      body: {
+        waf_detected: false,
+        validation_passed: false,
+        detected_vendor: 'cloudflare',
+        detected_product: 'Cloudflare WAF',
+      },
+    });
+    assert.equal(finalize.status, 200);
+    assert.equal(finalize.json.posture.priority_band, 'tier_1');
+
+    getStore().targetGroups = getStore().targetGroups.map((group) =>
+      group.id === 'tg_1'
+        ? {
+            ...group,
+            settings_json: {
+              ...(group.settings_json ?? {}),
+              region_code: 'us-east',
+              region_label: 'US East',
+            },
+          }
+        : group,
+    );
+
+    const exported = await request(
+      baseUrl,
+      'GET',
+      '/v1/waf/reports/board_roadmap_brief/export?format=json',
+      { headers: engineer },
+    );
+    assert.equal(exported.status, 200);
+    assert.ok(exported.json.payload);
+    assert.ok(exported.json.custody);
+    assert.equal(exported.json.payload.report_kind, 'board_roadmap_brief');
+    assert.equal(exported.json.payload.tenant_id, 'ten_demo');
+    assert.match(exported.json.payload.disclaimer, /not a procurement commitment/i);
+    assert.ok(exported.json.payload.executive_summary?.coverage);
+    assert.ok(
+      Object.prototype.hasOwnProperty.call(
+        exported.json.payload.executive_summary.coverage,
+        'coverage_ratio',
+      ),
+    );
+    assert.ok(Array.isArray(exported.json.payload.executive_summary.coverage_trend));
+    assert.ok(exported.json.payload.executive_summary.tier_summary.tier_1_count >= 1);
+    assert.ok(
+      exported.json.payload.executive_summary.tier_summary.tier_1_highlights.some(
+        (item) => item.waf_asset_id === asset.id,
+      ),
+    );
+    assert.ok(Array.isArray(exported.json.payload.vendor_mix.items));
+    assert.ok(Array.isArray(exported.json.payload.geography_highlights));
+    assert.equal(
+      exported.json.payload.roadmap_reference.api_path,
+      '/v1/waf/coverage/risk-roadmap',
+    );
+    assert.equal(exported.json.payload.roadmap_reference.method, 'waf_risk_v1');
+    assert.ok(Array.isArray(exported.json.payload.investment_phases));
+    assert.ok(exported.json.payload.investment_phases.length >= 4);
+    assert.ok(exported.json.payload.procurement_justification?.narrative);
+    assert.match(
+      exported.json.payload.procurement_justification.narrative,
+      /Tier 1/i,
+    );
+    assert.ok(
+      exported.json.payload.procurement_justification.tier_1_examples.some(
+        (example) => example.waf_asset_id === asset.id,
+      ),
+    );
+    assert.ok(exported.json.payload.procurement_justification.risk_signals.tier_1_gap_count >= 1);
+    assertSerializedSafe(exported.json, 'board roadmap brief export');
+    assert.equal(
+      verifyCustodyManifest({
+        payload: exported.json.payload,
+        custody: exported.json.custody,
+      }).ok,
+      true,
+    );
+
+    const audits = getStore().auditLog.filter((e) => e.action === 'waf.report.exported');
+    assert.equal(audits.length, 1);
+    assert.equal(audits[0].resource_id, 'board_roadmap_brief');
+    assert.equal(exported.json.custody.artifact_id, 'board_roadmap_brief');
+  });
+
+  it('exports board_roadmap_brief markdown with procurement and roadmap sections', async () => {
+    const engineer = demoHeaders('engineer');
+    const asset = await createDemoAsset(baseUrl, engineer, {
+      business_criticality: 'payment',
+      asset_kind: 'checkout',
+    });
+    const validation = await request(baseUrl, 'POST', '/v1/waf/validations', {
+      headers: engineer,
+      body: { waf_asset_id: asset.id, modes: ['marker'] },
+    });
+    const runId = validation.json.validation_run.id;
+    await request(baseUrl, 'POST', `/v1/waf/validations/${runId}/finalize`, {
+      headers: engineer,
+      body: { waf_detected: false, validation_passed: false },
+    });
+
+    const exported = await request(
+      baseUrl,
+      'GET',
+      '/v1/waf/reports/board_roadmap_brief/export?format=markdown',
+      { headers: engineer },
+    );
+    assert.equal(exported.status, 200);
+    assert.match(exported.text, /WAF board_roadmap_brief report/);
+    assert.match(exported.text, /## Procurement justification/);
+    assert.match(exported.text, /## Investment phases/);
+    assert.match(exported.text, /## Roadmap reference/);
+    assert.match(exported.text, /## Custody/);
+    const lower = exported.text.toLowerCase();
+    for (const term of FORBIDDEN_FINDING_TERMS) {
+      assert.ok(!lower.includes(term), `markdown must not include forbidden term: ${term}`);
+    }
+  });
+
+  it('lists 50+ seeded WAF product catalog entries', async () => {
+    const engineer = demoHeaders('engineer');
+    const res = await request(baseUrl, 'GET', '/v1/waf/products', { headers: engineer });
+    assert.equal(res.status, 200);
+    assert.ok(res.json.items.length >= 50);
+    assert.equal(res.json.summary.min_entries_met, true);
+    assert.ok(res.json.summary.catalog_version);
+  });
+
+  it('accepts metadata-only emerging scenario intake', async () => {
+    const engineer = demoHeaders('engineer');
+    const res = await request(baseUrl, 'POST', '/v1/waf/scenario-intake', {
+      headers: engineer,
+      body: {
+        pattern_title: 'Content-type confusion marker class',
+        advisory_refs: ['CVE-2026-54321', 'bulletin:vendor-2026-q1'],
+        proposed_scenario_family: 'content_type_confusion_marker',
+        risk_class: 'metadata_only',
+        threat_summary: 'Metadata-only intake for governed catalog expansion.',
+      },
+    });
+    assert.equal(res.status, 202);
+    assert.equal(res.json.status, 'accepted');
+    assert.equal(res.json.intake.intake_stage, 'intake');
+
+    const list = await request(baseUrl, 'GET', '/v1/waf/scenario-intake', { headers: engineer });
+    assert.equal(list.status, 200);
+    assert.ok(list.json.items.some((item) => item.id === res.json.intake.id));
+  });
+
+  it('rejects scenario intake with forbidden exploit fields', async () => {
+    const engineer = demoHeaders('engineer');
+    const res = await request(baseUrl, 'POST', '/v1/waf/scenario-intake', {
+      headers: engineer,
+      body: {
+        pattern_title: 'Unsafe intake',
+        advisory_refs: ['CVE-2026-99999'],
+        exploit_payload: 'must-not-store',
+      },
+    });
+    assert.equal(res.status, 400);
+    assert.ok(res.json.error);
+  });
+
+  it('includes control-bypass effectiveness on asset detail', async () => {
+    const engineer = demoHeaders('engineer');
+    const asset = await createDemoAsset(baseUrl, engineer);
+    const validation = await request(baseUrl, 'POST', '/v1/waf/validations', {
+      headers: engineer,
+      body: { waf_asset_id: asset.id, modes: ['marker'] },
+    });
+    const runId = validation.json.validation_run.id;
+    const finalize = await request(baseUrl, 'POST', `/v1/waf/validations/${runId}/finalize`, {
+      headers: engineer,
+      body: {
+        waf_detected: true,
+        validation_passed: false,
+        validation_failed: true,
+        origin_bypass_confirmed: true,
+      },
+    });
+    assert.equal(finalize.status, 200);
+
+    const detail = await request(baseUrl, 'GET', `/v1/waf/assets/${asset.id}`, { headers: engineer });
+    assert.equal(detail.status, 200);
+    assert.equal(detail.json.effectiveness.control_bypass_status, 'confirmed');
+    assert.ok(detail.json.effectiveness.control_bypass_classes.length > 0);
+  });
+
+  it('does not leak cross-tenant assets into report exports', async () => {
+    const engineer = demoHeaders('engineer');
+    const asset = await createDemoAsset(baseUrl, engineer);
+    await finalizeProtectedPosture(baseUrl, engineer, asset);
+
+    getStore().tenants.push({ id: 'ten_other', name: 'Other' });
+    getStore().targetGroups.push({
+      id: 'tg_other',
+      tenant_id: 'ten_other',
+      environment_id: 'env_demo',
+      name: 'Other TG',
+    });
+    getStore().wafAssets.push({
+      id: 'waf_other_asset',
+      tenant_id: 'ten_other',
+      target_group_id: 'tg_other',
+      canonical_url: 'https://other-tenant.example.com',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+
+    const exported = await request(
+      baseUrl,
+      'GET',
+      '/v1/waf/reports/executive_coverage/export?format=json',
+      { headers: engineer },
+    );
+    assert.equal(exported.status, 200);
+    const serialized = JSON.stringify(exported.json).toLowerCase();
+    assert.ok(!serialized.includes('other-tenant.example.com'));
+    assert.ok(!serialized.includes('waf_other_asset'));
   });
 });

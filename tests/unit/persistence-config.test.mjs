@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, describe, it } from 'node:test';
 import {
+  isConnectorsEnabledForTenant,
   loadRuntimeConfig,
   resolveAgentIdentityMode,
   resolveHighScaleAdapterMode,
@@ -162,6 +163,28 @@ describe('production persistence fail-closed', () => {
     process.env.NODE_ENV = 'production';
     process.env.ASTRANULL_HIGH_SCALE_ADAPTER_MODE = 'dry-run';
     assert.throws(() => resolveHighScaleAdapterMode(), /dry-run is not permitted/);
+  });
+
+  it('parses per-tenant connector feature flags from runtime config', () => {
+    process.env.NODE_ENV = 'test';
+    process.env.ASTRANULL_NO_PERSIST = '1';
+    process.env.ASTRANULL_CONNECTORS_ENABLED = '0';
+    process.env.ASTRANULL_CONNECTORS_ENABLED_TENANTS = JSON.stringify({
+      ten_demo: true,
+      ten_other: false,
+    });
+    const cfg = loadRuntimeConfig();
+    assert.equal(cfg.featureFlags.connectorsEnabledDefault, false);
+    assert.deepEqual(cfg.featureFlags.connectorsEnabledTenants, {
+      ten_demo: true,
+      ten_other: false,
+    });
+    assert.equal(isConnectorsEnabledForTenant(cfg, 'ten_demo'), true);
+    assert.equal(isConnectorsEnabledForTenant(cfg, 'ten_other'), false);
+    assert.equal(isConnectorsEnabledForTenant(cfg, 'ten_missing'), false);
+
+    process.env.ASTRANULL_CONNECTORS_ENABLED_TENANTS = '{bad json';
+    assert.throws(() => loadRuntimeConfig(), /ASTRANULL_CONNECTORS_ENABLED_TENANTS/);
   });
 
   it('rejects bearer-only agent identity in production', () => {

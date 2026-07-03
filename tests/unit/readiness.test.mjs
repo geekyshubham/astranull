@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
   computePlacementDiagnostics,
+  publicPlacementDiagnosticsPayload,
   summarizePlacementDiagnostics,
 } from '../../src/services/placement.mjs';
 import {
@@ -400,6 +401,24 @@ describe('readiness scoring', () => {
     assert.equal(d.groups[0].recent_observation_count, 1);
   });
 
+  it('publicPlacementDiagnosticsPayload includes per-group metadata for UI', () => {
+    freshStore();
+    getStore().agents.push({
+      id: 'agent_bound',
+      tenant_id: 'ten_demo',
+      name: 'bound',
+      status: 'online',
+      target_group_id: 'tg_1',
+      created_at: new Date().toISOString(),
+    });
+    const diagnostics = computePlacementDiagnostics('ten_demo');
+    const payload = publicPlacementDiagnosticsPayload(diagnostics);
+    assert.equal(payload.groups.length, 1);
+    assert.equal(payload.groups[0].target_group_id, 'tg_1');
+    assert.equal(payload.groups[0].status, 'needs_baseline');
+    assert.ok(Array.isArray(payload.groups[0].warnings));
+  });
+
   it('readiness agent_placement factor includes placement diagnostics summary', () => {
     freshStore();
     getStore().agents.push({
@@ -417,6 +436,8 @@ describe('readiness scoring', () => {
     assert.match(placement.detail, /need baseline/);
     const summary = summarizePlacementDiagnostics(computePlacementDiagnostics('ten_demo'));
     assert.equal(placement.placement_diagnostics.needs_baseline, summary.needs_baseline);
+    assert.ok(Array.isArray(placement.placement_diagnostics.groups));
+    assert.equal(placement.placement_diagnostics.groups[0].status, 'needs_baseline');
   });
 
   it('readiness does not over-award placement for unbound online agents only', () => {

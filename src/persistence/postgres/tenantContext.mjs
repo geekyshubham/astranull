@@ -5,6 +5,19 @@
  * @param {string} tenantId
  * @param {(client: import('pg').PoolClient) => Promise<unknown>} callback
  */
+/**
+ * Run callback with an existing tenant-scoped client or open a new transaction.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {string} tenantId
+ * @param {import('pg').PoolClient | undefined} client
+ * @param {(client: import('pg').PoolClient) => Promise<unknown>} callback
+ */
+export async function runWithTenantClient(pool, tenantId, client, callback) {
+  if (client) return callback(client);
+  return withTenantContext(pool, tenantId, callback);
+}
+
 export async function withTenantContext(pool, tenantId, callback) {
   const normalized = String(tenantId ?? '').trim();
   if (!normalized) {

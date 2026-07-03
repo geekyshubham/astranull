@@ -4,6 +4,10 @@ const PROBE_JOB_COLUMNS = `id, tenant_id, test_run_id, target_id, check_id, vect
   nonce_hash, nonce_for_worker, probe_profile, constraints_json, target_descriptor_json,
   worker_metadata_json, job_signature, leased_at, leased_by, completed_at, created_at`;
 
+const PROBE_JOB_COLUMNS_QUALIFIED = PROBE_JOB_COLUMNS.split(',')
+  .map((column) => `j.${column.trim()}`)
+  .join(', ');
+
 const DEFAULT_LEASE_LIMIT = 50;
 const MAX_LEASE_LIMIT = 100;
 
@@ -87,7 +91,7 @@ export function createProbeJobRepository(pool) {
                leased_by = $4
            FROM picked
            WHERE j.id = picked.id AND j.tenant_id = $1
-           RETURNING ${PROBE_JOB_COLUMNS}`,
+           RETURNING ${PROBE_JOB_COLUMNS_QUALIFIED}`,
           [tenantId, limit, leasedAt, workerId],
         );
         return rows.map(mapProbeJobRow).map(jobForWorkerResponse);

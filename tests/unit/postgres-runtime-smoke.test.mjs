@@ -12,7 +12,18 @@ function buildFakeRuntime({ healthResult, healthError } = {}) {
   const services = {};
   for (const { keys } of POSTGRES_RUNTIME_SMOKE_SERVICE_FAMILIES) {
     for (const key of keys) {
-      services[key] = key === 'audit' ? { appendAuditEvent: () => {}, listAuditEntries: () => {} } : {};
+      services[key] =
+        key === 'audit'
+          ? { appendAuditEvent: () => {}, listAuditEntries: () => {} }
+          : key === 'wafOrchestrator'
+            ? { executeValidationPlan: () => {} }
+            : key === 'wafDrift'
+              ? { runDriftScan: () => {} }
+              : key === 'agentUpdates'
+                ? { listAgentUpdateReleases: () => {} }
+                : key === 'supplyChainRisk'
+                  ? { getPhaseAuthorizations: () => {} }
+                  : {};
     }
   }
 
@@ -135,6 +146,34 @@ describe('postgres runtime smoke execution', () => {
     assert.throws(
       () => verifyRuntimeSmokeServiceFamilies(services),
       /runtime\.services\.wafPosture/,
+    );
+  });
+
+  it('rejects missing wafOrchestrator service wiring', () => {
+    const services = {};
+    for (const { keys } of POSTGRES_RUNTIME_SMOKE_SERVICE_FAMILIES) {
+      for (const key of keys) {
+        services[key] = {};
+      }
+    }
+    delete services.wafOrchestrator;
+    assert.throws(
+      () => verifyRuntimeSmokeServiceFamilies(services),
+      /runtime\.services\.wafOrchestrator/,
+    );
+  });
+
+  it('rejects missing supplyChainRisk service wiring', () => {
+    const services = {};
+    for (const { keys } of POSTGRES_RUNTIME_SMOKE_SERVICE_FAMILIES) {
+      for (const key of keys) {
+        services[key] = {};
+      }
+    }
+    delete services.supplyChainRisk;
+    assert.throws(
+      () => verifyRuntimeSmokeServiceFamilies(services),
+      /runtime\.services\.supplyChainRisk/,
     );
   });
 });

@@ -33,7 +33,7 @@ function signRs256Jwt(payload, headerExtra = {}) {
   return `${signingInput}.${sig.toString('base64url')}`;
 }
 
-function defaultOidcConfig(jwksUrl) {
+function defaultOidcConfig(jwksUrl, overrides = {}) {
   return {
     issuer: ISSUER,
     audience: AUDIENCE,
@@ -45,6 +45,9 @@ function defaultOidcConfig(jwksUrl) {
     mfaClaim: 'amr',
     mfaValues: ['mfa', 'otp', 'webauthn', 'fido', 'fido2', 'phishing_resistant'],
     jwksCacheTtlMs: 300_000,
+    rolePrefix: null,
+    roleMap: {},
+    ...overrides,
   };
 }
 
@@ -121,6 +124,54 @@ describe('OIDC bearer JWT verification', () => {
     }
   });
 
+  it('reads nested dot-path tenant and role claims', async () => {
+    const { server, jwksUrl } = await startJwksServer([publicJwk]);
+    try {
+      const cfg = defaultOidcConfig(jwksUrl, {
+        tenantClaim: 'https://astranull.io/tenant_id',
+        roleClaim: 'realm_access.roles',
+        userClaim: 'preferred_username',
+        rolePrefix: 'astranull-',
+      });
+      const token = signRs256Jwt({
+        iss: ISSUER,
+        aud: AUDIENCE,
+        preferred_username: 'usr_nested',
+        'https://astranull.io/tenant_id': 'ten_nested',
+        realm_access: { roles: ['astranull-admin', 'other'] },
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      });
+      const ctx = await verifyOidcBearerToken(token, cfg);
+      assert.equal(ctx.tenantId, 'ten_nested');
+      assert.equal(ctx.userId, 'usr_nested');
+      assert.equal(ctx.role, 'admin');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('maps IdP group aliases through roleMap', async () => {
+    const { server, jwksUrl } = await startJwksServer([publicJwk]);
+    try {
+      const cfg = defaultOidcConfig(jwksUrl, {
+        roleClaim: 'groups',
+        roleMap: { 'corp-engineer': 'engineer' },
+      });
+      const token = signRs256Jwt({
+        iss: ISSUER,
+        aud: AUDIENCE,
+        sub: 'usr_map',
+        tenant_id: 'ten_map',
+        groups: ['corp-engineer', 'unrelated'],
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      });
+      const ctx = await verifyOidcBearerToken(token, cfg);
+      assert.equal(ctx.role, 'engineer');
+    } finally {
+      server.close();
+    }
+  });
+
   it('picks the first valid role from an array claim', async () => {
     const { server, jwksUrl } = await startJwksServer([publicJwk]);
     try {
@@ -133,6 +184,37 @@ describe('OIDC bearer JWT verification', () => {
         exp: Math.floor(Date.now() / 1000) + 3600,
       });
       const ctx = await verifyOidcBearerToken(token, defaultOidcConfig(jwksUrl));
+      assert.equal(ctx.role, 'admin');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('rejects unmapped platform roles when requireExplicitRoleMap is enabled', async () => {
+    const { server, jwksUrl } = await startJwksServer([publicJwk]);
+    try {
+      const cfg = defaultOidcConfig(jwksUrl, {
+        requireExplicitRoleMap: true,
+        roleMap: { 'corp-admin': 'admin' },
+      });
+      const unmapped = signRs256Jwt({
+        iss: ISSUER,
+        aud: AUDIENCE,
+        sub: 'usr_strict',
+        tenant_id: 'ten_strict',
+        role: 'admin',
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      });
+      const mapped = signRs256Jwt({
+        iss: ISSUER,
+        aud: AUDIENCE,
+        sub: 'usr_strict',
+        tenant_id: 'ten_strict',
+        role: 'corp-admin',
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      });
+      assert.deepEqual(await verifyOidcBearerToken(unmapped, cfg), { error: 'invalid_role' });
+      const ctx = await verifyOidcBearerToken(mapped, cfg);
       assert.equal(ctx.role, 'admin');
     } finally {
       server.close();

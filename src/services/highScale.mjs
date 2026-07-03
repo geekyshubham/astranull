@@ -1,4 +1,10 @@
 import { audit } from '../audit.mjs';
+import {
+  buildAuthorizationArtifactLedgerEntry,
+  ensureAuthorizationArtifactLedger,
+  validateArtifactUploadBody,
+} from '../lib/authorizationArtifactLedger.mjs';
+import { normalizeGovernedAdapterTelemetryIngest } from '../lib/governedAdapterTelemetry.mjs';
 import { computeTargetGroupScopeHash } from '../lib/scopeHash.mjs';
 import { newId } from '../lib/ids.mjs';
 import { redactObject, redactString } from '../lib/redact.mjs';
@@ -244,12 +250,17 @@ export function getHighScaleRequest(tenantId, id) {
   return getStore().highScaleRequests.find((h) => h.id === id && h.tenant_id === tenantId) ?? null;
 }
 
-export function addArtifact(ctx, requestId, body) {
+export function addArtifact(ctx, requestId, body, options = {}) {
   const req = getHighScaleRequest(ctx.tenantId, requestId);
   if (!req) return null;
-  const artifact = buildArtifactFromUpload(ctx, body);
+  const validation = validateArtifactUploadBody(body);
+  if (validation.error) return validation;
+  const artifact = buildArtifactFromUpload(ctx, body, { uploadEnvelope: options.uploadEnvelope });
   if (!req.artifacts) req.artifacts = [];
   req.artifacts.push(artifact);
+  const store = getStore();
+  const ledgerEntry = buildAuthorizationArtifactLedgerEntry(ctx, requestId, artifact, body);
+  ensureAuthorizationArtifactLedger(store).push(ledgerEntry);
   if (artifact.type === 'provider_approval') {
     syncChecklistFromProviderArtifact(req, artifact, body);
   }
@@ -261,7 +272,13 @@ export function addArtifact(ctx, requestId, body) {
     action: 'high_scale.artifact_uploaded',
     resource_type: 'high_scale_artifact',
     resource_id: artifact.id,
-    metadata: { request_id: requestId, type: artifact.type },
+    metadata: {
+      request_id: requestId,
+      type: artifact.type,
+      custody_id: artifact.custody_id,
+      content_sha256: artifact.content_sha256,
+      upload_envelope: artifact.upload_envelope,
+    },
   });
   persistStore();
   return artifact;
@@ -352,7 +369,7 @@ export function recordHighScaleTelemetry(ctx, requestId, body) {
   const observed = parseObservedAt(body?.observed_at);
   if (!observed.ok) return observed;
 
-  if (body?.metrics != null && telemetryObjectContainsForbiddenKeys(body.metrics)) {
+  if (telemetryObjectContainsForbiddenKeys(body)) {
     return { error: 'forbidden_telemetry_fields', status: 400 };
   }
 
@@ -400,6 +417,66 @@ export function listHighScaleTelemetry(ctx, requestId) {
   return ensureHighScaleTelemetry()
     .filter((t) => t.tenant_id === ctx.tenantId && t.high_scale_request_id === requestId)
     .sort((a, b) => String(b.observed_at).localeCompare(String(a.observed_at)));
+}
+
+function persistHighScaleTelemetryRecord(ctx, requestId, fields) {
+  const record = {
+    id: newId('hstel'),
+    tenant_id: ctx.tenantId,
+    high_scale_request_id: requestId,
+    category: fields.category,
+    live_status: fields.live_status,
+    observed_at: fields.observed_at,
+    source: fields.source,
+    metrics: fields.metrics,
+    created_at: new Date().toISOString(),
+    recorded_by: ctx.userId,
+  };
+  ensureHighScaleTelemetry().push(record);
+  return record;
+}
+
+export function ingestGovernedAdapterTelemetry(ctx, requestId, body) {
+  const req = getHighScaleRequest(ctx.tenantId, requestId);
+  if (!req) return null;
+  if (!TELEMETRY_ACTIVE_STATES.has(req.state)) {
+    return { error: 'telemetry_not_active', status: 409, state: req.state };
+  }
+
+  const ingestion_id = newId('hsteling');
+  const normalized = normalizeGovernedAdapterTelemetryIngest(body, { ingestion_id });
+  if (!normalized.ok) return normalized;
+
+  const records = normalized.records.map((fields) =>
+    persistHighScaleTelemetryRecord(ctx, requestId, fields),
+  );
+
+  audit({
+    tenant_id: ctx.tenantId,
+    actor_user_id: ctx.userId,
+    actor_role: ctx.role,
+    action: 'high_scale.adapter_telemetry_ingested',
+    resource_type: 'high_scale_telemetry_ingest',
+    resource_id: ingestion_id,
+    metadata: {
+      high_scale_request_id: requestId,
+      adapter_id: normalized.adapter_id,
+      provider_key: normalized.provider_key,
+      snapshot_count: records.length,
+      ingestion_id,
+    },
+  });
+  persistStore();
+
+  return {
+    ingestion_id,
+    adapter_id: normalized.adapter_id,
+    adapter_type: normalized.adapter_type,
+    provider_key: normalized.provider_key,
+    provider_run_id: normalized.provider_run_id,
+    snapshot_count: records.length,
+    records,
+  };
 }
 
 export function transitionHighScale(ctx, id, action, metadata = {}) {

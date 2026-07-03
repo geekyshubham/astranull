@@ -34,8 +34,8 @@ Posture Snapshots -> Findings -> Action Items/Tickets -> Reports
 | `wafBaselineService` | Creates and stores expected posture baseline per asset. |
 | `wafDriftService` | Compares latest posture to baseline and emits drift events. |
 | `wafConnectorService` | Manages read-only connector configs, polling, snapshots, and normalization. |
-| `wafCoverageService` | Aggregates protected/underprotected/unprotected percentages. |
-| `wafRiskService` | Scores assets and findings using posture, business, compliance, vulnerability, and confidence factors. |
+| `wafCoverageService` | Aggregates protected/underprotected/unprotected percentages; vendor, entity, and geography rollups; coverage trend series; optional vendor-consolidation advisory. See [WAF Risk and Coverage Analytics](14-waf-risk-coverage-analytics.md). |
+| `wafRiskService` | Scores assets 0–100 with factor-level evidence; assigns deployment tiers; feeds roadmap and prioritization. See [WAF Risk and Coverage Analytics](14-waf-risk-coverage-analytics.md). |
 | `cvePipelineService` | Ingests CVEs, matches affected assets, tracks mitigation status. |
 | `wafRuleRecommendationService` | Creates vendor-specific rule guidance templates. |
 | `wafRemediationService` | Groups findings into action items and sends tickets/events. |

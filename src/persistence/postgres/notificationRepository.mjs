@@ -2,6 +2,10 @@ import { withTenantContext } from './tenantContext.mjs';
 
 const RULE_COLUMNS = `id, tenant_id, channel, destination, trigger, triggers_json, enabled, created_at`;
 
+const DELIVERY_ATTEMPT_COLUMNS = `id, tenant_id, notification_event_id, rule_id, channel, destination_preview,
+                  status, reason, attempt_number, max_attempts, next_retry_at, provider_error, exhausted,
+                  provider_status, created_at, attempted_at`;
+
 function toIso(value) {
   if (value == null) return value;
   if (value instanceof Date) return value.toISOString();
@@ -57,6 +61,12 @@ export function mapDeliveryAttemptRow(row) {
     destination_preview: row.destination_preview ?? '',
     status: row.status,
     reason: row.reason ?? null,
+    attempt_number: row.attempt_number == null ? null : Number(row.attempt_number),
+    max_attempts: row.max_attempts == null ? null : Number(row.max_attempts),
+    next_retry_at: row.next_retry_at ? toIso(row.next_retry_at) : null,
+    provider_error: row.provider_error ?? null,
+    exhausted: row.exhausted == null ? null : row.exhausted === true,
+    provider_status: row.provider_status == null ? null : Number(row.provider_status),
     created_at: toIso(row.created_at),
     attempted_at: row.attempted_at ? toIso(row.attempted_at) : null,
   };
@@ -121,8 +131,7 @@ export function createNotificationRepository(pool) {
 
         const eventIds = eventRows.map((r) => r.id);
         const { rows: attemptRows } = await client.query(
-          `SELECT id, tenant_id, notification_event_id, rule_id, channel, destination_preview,
-                  status, reason, created_at, attempted_at
+          `SELECT ${DELIVERY_ATTEMPT_COLUMNS}
            FROM notification_delivery_attempts
            WHERE tenant_id = $1 AND notification_event_id = ANY($2::text[])
            ORDER BY created_at ASC`,
@@ -217,11 +226,11 @@ export function createNotificationRepository(pool) {
           const { rows } = await client.query(
             `INSERT INTO notification_delivery_attempts (
                id, tenant_id, notification_event_id, rule_id, channel, destination_preview,
-               status, reason, created_at, attempted_at
+               status, reason, attempt_number, max_attempts, next_retry_at, provider_error, exhausted,
+               provider_status, created_at, attempted_at
              )
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::timestamptz, $10::timestamptz)
-             RETURNING id, tenant_id, notification_event_id, rule_id, channel, destination_preview,
-                       status, reason, created_at, attempted_at`,
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::timestamptz, $12, $13, $14, $15::timestamptz, $16::timestamptz)
+             RETURNING ${DELIVERY_ATTEMPT_COLUMNS}`,
             [
               attempt.id,
               tenantId,
@@ -231,6 +240,12 @@ export function createNotificationRepository(pool) {
               attempt.destination_preview,
               attempt.status,
               attempt.reason ?? null,
+              attempt.attempt_number ?? null,
+              attempt.max_attempts ?? null,
+              attempt.next_retry_at ?? null,
+              attempt.provider_error ?? null,
+              attempt.exhausted ?? null,
+              attempt.provider_status ?? null,
               attempt.created_at,
               attempt.attempted_at ?? null,
             ],

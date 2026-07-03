@@ -553,19 +553,24 @@ export async function main(argv = process.argv.slice(2)) {
     records: normalizeEvidenceRecords(parsed),
     createdAt: parsed.created_at ?? null,
     notes: parsed.notes ?? null,
+    rehearsalOnly: parsed.rehearsal_only === true,
   }, { profile: opts.profile });
 
   if (opts.validateOnly) {
     if (!attestation.production_ready) {
-      console.error(`staging-readiness-attestation: not production ready (${attestation.blocker_summary.length} blocker(s))`);
+      console.error(
+        `staging-readiness-attestation: evidence inventory incomplete `
+        + `(${attestation.blocker_summary.length} blocker(s)); production promotion gates remain external`,
+      );
       for (const blocker of attestation.blocker_summary) {
         console.error(`  - ${blocker}`);
       }
       return 1;
     }
     console.log(
-      `staging-readiness-attestation: ok (production_ready=true, profile=${attestation.profile}, `
-      + `${attestation.required_evidence_kinds.present.length} required kind(s))`,
+      `staging-readiness-attestation: ok (inventory_complete=true, production_ready=true, `
+      + `profile=${attestation.profile}, ${attestation.required_evidence_kinds.present.length} `
+      + `required kind(s); not promotion approval)`,
     );
     return 0;
   }
@@ -574,7 +579,8 @@ export async function main(argv = process.argv.slice(2)) {
   writeFileSync(opts.out, `${JSON.stringify(attestation, null, 2)}\n`);
   console.log(
     `staging-readiness-attestation: wrote ${opts.out} `
-    + `(production_ready=${attestation.production_ready}, profile=${attestation.profile})`,
+    + `(inventory_complete=${attestation.production_ready}, production_ready=${attestation.production_ready}, `
+    + `profile=${attestation.profile}; not promotion approval)`,
   );
   return attestation.production_ready ? 0 : 1;
 }

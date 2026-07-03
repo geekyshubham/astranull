@@ -191,6 +191,41 @@ describe('WAF action items API', () => {
     assert.equal(audits.at(-1).metadata.status, 'ticketed');
   });
 
+  it('delivers action items via dry_run by default without outbound I/O', async () => {
+    const engineer = demoHeaders('engineer');
+    const asset = await createWafAsset(baseUrl, engineer);
+    const findingId = seedWafFinding(asset.id);
+
+    const created = await request(baseUrl, 'POST', '/v1/waf/action-items', {
+      headers: engineer,
+      body: { finding_id: findingId },
+    });
+    const actionItemId = created.json.action_item.action_item_id;
+
+    const delivered = await request(
+      baseUrl,
+      'POST',
+      `/v1/waf/action-items/${actionItemId}/deliver`,
+      {
+        headers: engineer,
+        body: { channel: 'webhook' },
+      },
+    );
+    assert.equal(delivered.status, 200);
+    assert.equal(delivered.json.delivery.action_item_id, actionItemId);
+    assert.equal(delivered.json.delivery.channel, 'webhook');
+    assert.equal(delivered.json.delivery.status, 'metadata_only');
+    assert.equal(delivered.json.delivery.dry_run, true);
+    assert.ok(delivered.json.delivery.payload);
+
+    const audits = getStore().auditLog.filter(
+      (e) => e.action === 'waf.action_item.delivered' && e.resource_id === actionItemId,
+    );
+    assert.equal(audits.length, 1);
+    assert.equal(audits[0].metadata.dry_run, true);
+    assert.equal(JSON.stringify(delivered.json).includes('ASTRANULL_'), false);
+  });
+
   it('enforces RBAC on write operations', async () => {
     const engineer = demoHeaders('engineer');
     const asset = await createWafAsset(baseUrl, engineer);

@@ -16,6 +16,7 @@ import {
   wouldExceedEventCap,
 } from '../../lib/safeTestGuards.mjs';
 import { computePlacementConfidence } from '../../lib/placementConfidence.mjs';
+import { enrichProbeMetadataWithWafCatalog } from '../../lib/wafProductCatalog.mjs';
 import { correlateVerdict, withinCorrelationWindow } from '../../services/correlation.mjs';
 import { simulateProbeResult } from '../../services/probeStub.mjs';
 
@@ -72,14 +73,31 @@ const OBSERVATION_RAW_FIELD_DENYLIST = new Set([
   'raw_packet',
   'raw_packets',
   'packet_data',
+  'raw_payload',
   'payload',
   'body',
   'headers',
+  'request_body',
+  'request_headers',
   'authorization',
   'cookie',
   'raw_log',
   'log_line',
 ]);
+const OBSERVATION_RAW_FIELD_COMPACT_DENYLIST = new Set(
+  [...OBSERVATION_RAW_FIELD_DENYLIST].map((key) => key.replace(/_/g, '')),
+);
+
+function normalizeObservationRawFieldKey(key) {
+  return String(key)
+    .trim()
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2')
+    .replace(/([a-z])([A-Z])/g, '$1_$2')
+    .replace(/[^a-zA-Z0-9]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .toLowerCase();
+}
 
 function observationBodyContainsRawFields(body) {
   if (!body || typeof body !== 'object') return false;
@@ -93,12 +111,71 @@ function observationBodyContainsRawFields(body) {
     }
     if (typeof value !== 'object') return false;
     for (const key of Object.keys(value)) {
-      if (OBSERVATION_RAW_FIELD_DENYLIST.has(key.toLowerCase())) return true;
+      const normalized = normalizeObservationRawFieldKey(key);
+      const compact = normalized.replace(/_/g, '');
+      if (
+        OBSERVATION_RAW_FIELD_DENYLIST.has(normalized)
+        || OBSERVATION_RAW_FIELD_COMPACT_DENYLIST.has(compact)
+        || normalized.startsWith('raw_')
+        || compact.startsWith('raw')
+      ) {
+        return true;
+      }
       if (scan(value[key])) return true;
     }
     return false;
   };
   return scan(body);
+}
+
+const EVENT_RAW_FIELD_DENYLIST = new Set([
+  'packet_payload',
+  'raw_packet',
+  'raw_packets',
+  'packet_data',
+  'raw_payload',
+  'exploit_payload',
+  'body',
+  'headers',
+  'request_body',
+  'request_headers',
+  'authorization',
+  'cookie',
+  'raw_log',
+  'log_line',
+]);
+const EVENT_RAW_FIELD_COMPACT_DENYLIST = new Set(
+  [...EVENT_RAW_FIELD_DENYLIST].map((key) => key.replace(/_/g, '')),
+);
+
+function normalizeEventRawFieldKey(key) {
+  return String(key)
+    .trim()
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2')
+    .replace(/([a-z])([A-Z])/g, '$1_$2')
+    .replace(/[^a-zA-Z0-9]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .toLowerCase();
+}
+
+function eventIngestContainsRawFields(value) {
+  if (value == null || typeof value !== 'object') return false;
+  if (Array.isArray(value)) return value.some((item) => eventIngestContainsRawFields(item));
+  for (const [key, child] of Object.entries(value)) {
+    const normalized = normalizeEventRawFieldKey(key);
+    const compact = normalized.replace(/_/g, '');
+    if (
+      EVENT_RAW_FIELD_DENYLIST.has(normalized)
+      || EVENT_RAW_FIELD_COMPACT_DENYLIST.has(compact)
+      || normalized.startsWith('raw_')
+      || compact.startsWith('raw')
+    ) {
+      return true;
+    }
+    if (eventIngestContainsRawFields(child)) return true;
+  }
+  return false;
 }
 
 function isCollectionWindowExpired(run, nowMs) {
@@ -675,12 +752,15 @@ export function createPostgresValidationServices(repositories, options = {}) {
           id: newId('evidence'),
           test_run_id: runId,
           label: 'probe_simulation_evidence',
-          metadata: {
-            vector_family: check.vector_family,
-            safety_class: check.safety_class,
-            probe_event_id: probeEvent.id,
-            simulation: 'SAFE_PROBE_SIMULATION',
-          },
+          metadata: enrichProbeMetadataWithWafCatalog(
+            {
+              vector_family: check.vector_family,
+              safety_class: check.safety_class,
+              probe_event_id: probeEvent.id,
+              simulation: 'SAFE_PROBE_SIMULATION',
+            },
+            check.check_id,
+          ),
           related_event_id: probeEvent.id,
           created_at: now.toISOString(),
         });
@@ -1041,7 +1121,7 @@ export function createPostgresValidationServices(repositories, options = {}) {
       const existing = await validationEvidence.findEventByTenantEventId(ctx, eventId);
       if (existing) return { duplicate: true, event: existing };
 
-      if (body.packet_payload || body.raw_packet) {
+      if (eventIngestContainsRawFields(body)) {
         return { error: 'packet_payload_forbidden', status: 400 };
       }
 

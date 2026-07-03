@@ -3,6 +3,7 @@ import { REQUIRED_ARTIFACT_TYPES } from './highScale.mjs';
 import {
   computePlacementDiagnostics,
   placementScoreFromDiagnostics,
+  publicPlacementDiagnosticsPayload,
   summarizePlacementDiagnostics,
 } from './placement.mjs';
 
@@ -338,7 +339,7 @@ export function computeReadiness(tenantId) {
     label: 'Agent placement & health',
     score: placementScore,
     detail: placementDetail,
-    placement_diagnostics: placementSummary,
+    placement_diagnostics: publicPlacementDiagnosticsPayload(placementDiagnostics),
   });
 
   const recentVerdicts = verdicts.filter((v) => isRecentTimestamp(v.created_at, nowMs));

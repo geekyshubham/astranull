@@ -9,14 +9,19 @@ import {
   validateRiskItem,
   scoreRiskSeverity,
   canTransitionRiskState,
+  shouldAdvanceToTicketWorkflowPhase,
+  TICKET_WORKFLOW_PHASE,
 } from '../../src/contracts/supplyChainRisk.mjs';
 import {
   assessDanglingCname,
   assessDanglingDependency,
   createRemediationTicket,
   createSupplyChainRisk as createSupplyChainRiskService,
+  getSupplyChainRisk,
+  ingestSupplyChainSignals,
   listSupplyChainRisks,
   patchRiskState,
+  submitPhaseAuthorization,
 } from '../../src/services/supplyChainRisk.mjs';
 import { getStore } from '../../src/store.mjs';
 import { freshStore } from '../helpers/reset.mjs';
@@ -156,6 +161,14 @@ describe('supply chain risk contract', () => {
     assert.equal(canTransitionRiskState('accepted_risk', 'confirmed'), false);
     assert.equal(canTransitionRiskState('suspected', 'suspected'), true);
   });
+
+  it('advances only from pre-ticket workflow phases', () => {
+    assert.equal(shouldAdvanceToTicketWorkflowPhase('AP0_detect_only'), true);
+    assert.equal(shouldAdvanceToTicketWorkflowPhase('AP1_ticket_workflow'), false);
+    assert.equal(shouldAdvanceToTicketWorkflowPhase('AP2_manual_custody'), false);
+    assert.equal(shouldAdvanceToTicketWorkflowPhase('invalid'), false);
+    assert.equal(TICKET_WORKFLOW_PHASE, 'AP1_ticket_workflow');
+  });
 });
 
 describe('supply chain risk service', () => {
@@ -205,6 +218,44 @@ describe('supply chain risk service', () => {
     assert.equal(lowConfidence.reason, 'below_confidence_threshold');
   });
 
+  it('ingests metadata-only source batches without DNS lookups or scraping', () => {
+    const cnameIngest = ingestSupplyChainSignals(adminCtx, 'dangling_cname', [
+      {
+        hostname: 'orphan.example.com',
+        source_type: 'dangling_cname',
+        cname_chain_hash: 'chain_hash_1',
+        provider_error_signature_id: 'provider_sig_1',
+        connector_confirmation: true,
+        observed_at: '2026-07-03T10:00:00.000Z',
+      },
+    ]);
+    assert.equal(cnameIngest.ingested, 1);
+    assert.equal(cnameIngest.created, 1);
+    assert.equal(cnameIngest.results[0].exposure_type, 'dangling_cname');
+    assert.equal(cnameIngest.results[0].risk.exposure_type, 'dangling_cname');
+
+    const vendorIngest = ingestSupplyChainSignals(adminCtx, 'vendor_dependency', [
+      {
+        hostname: 'checkout.example.com',
+        source_type: 'vendor_dependency',
+        script_host: 'cdn.vendor.example',
+        dependency_url_hash: 'dep_hash_1',
+        status_code: 404,
+        observed_at: '2026-07-03T11:00:00.000Z',
+      },
+    ]);
+    assert.equal(vendorIngest.ingested, 1);
+    assert.equal(vendorIngest.created, 1);
+    assert.equal(vendorIngest.results[0].exposure_type, 'vendor_dependency_risk');
+    assert.equal(getStore().supplyChainRisks.length, 2);
+
+    const vendorAudit = getStore().auditLog.find(
+      (a) => a.action === 'supply_chain.source_ingested' && a.metadata?.source === 'vendor_dependency',
+    );
+    assert.ok(vendorAudit);
+    assert.equal(vendorAudit.metadata.created_count, 1);
+  });
+
   it('assesses dangling dependency from metadata without scraping', () => {
     const result = assessDanglingDependency(adminCtx, {
       hostname: 'checkout.example.com',
@@ -231,14 +282,60 @@ describe('supply chain risk service', () => {
     assert.equal(ticket.hostname, 'stale.app.example.com');
     assert.equal(ticket.severity, created.risk.severity);
     assert.ok(ticket.title.includes('dangling_cname'));
-    assert.ok(ticket.retest_link.includes(created.risk.id));
+    assert.equal(
+      ticket.retest_link,
+      `/v1/waf/supply-chain/risks?risk_id=${encodeURIComponent(created.risk.id)}`,
+    );
     assert.equal(ticket.owner_hint, 'secops@example.com');
+    assert.equal(ticket.phase, TICKET_WORKFLOW_PHASE);
     assert.ok(ticket.evidence_summary.cname_chain_hash);
     assert.equal('secrets' in ticket, false);
     assert.equal('credentials' in ticket, false);
 
+    const storedRisk = getSupplyChainRisk(adminCtx, created.risk.id);
+    assert.equal(storedRisk.risk.phase, TICKET_WORKFLOW_PHASE);
+
     const audit = getStore().auditLog.find((a) => a.action === 'supply_chain.ticket.created');
     assert.ok(audit);
+  });
+
+  it('reads a single tenant-scoped supply chain risk', () => {
+    const created = createSupplyChainRiskService(adminCtx, baseRiskFields());
+    const fetched = getSupplyChainRisk(adminCtx, created.risk.id);
+    assert.equal(fetched.risk.id, created.risk.id);
+    assert.equal(fetched.risk.hostname, 'stale.app.example.com');
+
+    const missing = getSupplyChainRisk(adminCtx, 'risk_missing');
+    assert.equal(missing.error, 'supply_chain_risk_not_found');
+    assert.equal(missing.status, 404);
+  });
+
+  it('completes AP2 and AP3 phase authorization gates', () => {
+    const created = createSupplyChainRiskService(adminCtx, baseRiskFields({ state: 'confirmed' }));
+    createRemediationTicket(adminCtx, created.risk.id, { owner_hint: 'secops' });
+
+    const ap2 = submitPhaseAuthorization(adminCtx, created.risk.id, {
+      target_phase: 'AP2_manual_custody',
+      customer_approval_reference: 'cust-approval-1',
+      customer_signed_at: '2026-07-03T12:00:00.000Z',
+      custody_ids: ['custody://doc-1'],
+      manual_workflow_owner: 'dns-team',
+    });
+    assert.equal(ap2.risk.phase, 'AP2_manual_custody');
+    assert.equal(ap2.risk.state, 'customer_custody');
+
+    const ap3 = submitPhaseAuthorization(adminCtx, created.risk.id, {
+      target_phase: 'AP3_governed_active',
+      customer_approval_reference: 'cust-approval-2',
+      legal_approval_reference: 'legal-approval-1',
+      legal_signed_at: '2026-07-03T13:00:00.000Z',
+      provider_terms_reference: 'provider-terms-v3',
+      custody_ids: ['custody://doc-2'],
+      insurance_review_reference: 'insurance-review-1',
+      release_back_workflow_reference: 'release-back-runbook-1',
+    });
+    assert.equal(ap3.risk.phase, 'AP3_governed_active');
+    assert.equal(ap3.risk.phase_authorizations.length, 2);
   });
 
   it('patches risk state with audited transitions', () => {

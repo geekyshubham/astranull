@@ -25,6 +25,7 @@ export const PERMISSIONS = {
   'report:create': ['owner', 'admin', 'engineer', 'soc', 'auditor'],
   'audit:read': ['owner', 'admin', 'soc', 'auditor'],
   'high_scale:request': ['owner', 'admin', 'engineer'],
+  'high_scale:write': ['owner', 'admin', 'engineer'],
   'high_scale:read': ['owner', 'admin', 'engineer', 'soc', 'auditor', 'viewer'],
   'soc:high_scale': ['soc'],
   'soc:kill_switch': ['soc'],
@@ -33,6 +34,7 @@ export const PERMISSIONS = {
   'environment:read': ['owner', 'admin', 'engineer', 'soc', 'auditor', 'viewer'],
   'environment:write': ['owner', 'admin', 'engineer'],
   'evidence:read': ['owner', 'admin', 'engineer', 'soc', 'auditor', 'viewer'],
+  'evidence:write': ['owner', 'admin', 'soc'],
   'release_evidence:read': ['owner', 'admin', 'soc', 'auditor'],
   'release_evidence:write': ['owner', 'admin', 'soc'],
   'event:ingest': ['owner', 'admin', 'engineer', 'soc'],
@@ -52,6 +54,7 @@ export const PERMISSIONS = {
   'discovery:approve': ['owner', 'admin'],
   'cve_pipeline:read': ['owner', 'admin', 'engineer', 'soc', 'auditor', 'viewer'],
   'cve_pipeline:write': ['owner', 'admin', 'engineer'],
+  'supply_chain:authorize': ['owner', 'admin'],
 };
 
 export function roleHasPermission(role, permission) {

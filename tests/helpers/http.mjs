@@ -45,6 +45,14 @@ export function signedSessionHeaders(
   return { Authorization: `Bearer ${token}` };
 }
 
+export function staffHeaders(role = 'internal_admin', staffId = 'staff_admin') {
+  return {
+    'x-principal-type': 'staff',
+    'x-staff-id': staffId,
+    'x-staff-role': role,
+  };
+}
+
 export function agentHeaders(credential, tenant = 'ten_demo') {
   return {
     'x-tenant-id': tenant,

@@ -8,7 +8,7 @@ Customers can request high-scale tests, but they cannot execute them. SOC owns r
 
 ## Implemented (developer validation UI)
 
-The web app **SOC Console** route (`#soc`, role `soc` or `owner`) provides a work-focused console wired to existing `/internal/soc/*` APIs:
+The web app **SOC Console** route (`#soc`, role `soc` or local developer fallback `owner`) provides a work-focused console wired to existing `/internal/soc/*` APIs:
 
 | Band | Controls | Backend |
 |---|---|---|
@@ -24,6 +24,8 @@ The web app **SOC Console** route (`#soc`, role `soc` or `owner`) provides a wor
 **Action output** panel shows JSON or error text from the latest SOC action without replacing the whole page on failure.
 
 Copy and labels explicitly state: governed **dry-run adapter only**, no customer-triggered traffic, no production completion implied.
+
+Production must remove the customer-owner fallback and treat SOC as a staff-only surface. Customers may submit high-scale requests, but only AstraNull SOC staff can review, approve, reject, schedule, execute, stop, and close them. The broader tenant/subscription/user management plane is documented separately in [Public Landing and Internal Management](../product/13-public-landing-and-internal-management.md).
 
 ## SOC console main tabs (product target)
 

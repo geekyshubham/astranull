@@ -22,6 +22,7 @@ const POSTGRES_ACTION_ITEM_SERVICE_METHODS = [
   'createActionItemFromFinding',
   'patchActionItemStatus',
   'buildRemediationPayload',
+  'deliverActionItem',
 ];
 
 function createRecordingPool(handler) {
@@ -80,6 +81,7 @@ function actionItemRowFixture(overrides = {}) {
     category: 'waf_coverage',
     title: 'WAF remediation: https://app.example.com',
     asset_display: 'https://app.example.com',
+    waf_asset_id: 'waf_1',
     owner: 'security-operations',
     severity: 'high',
     evidence_json: {
@@ -115,7 +117,7 @@ describe('postgres action item repository', () => {
     const calls = [
       () => repo.listActionItems({}),
       () => repo.getActionItem({}, 'act_1'),
-      () => repo.findOpenActionItemByDedupe({}, 'https://app.example.com', 'marker_rule_not_blocking'),
+      () => repo.findOpenActionItemByDedupe({}, 'waf_1', 'marker_rule_not_blocking'),
       () => repo.insertActionItem({}, {}),
       () => repo.updateActionItemStatus({}, 'act_1', 'resolved', {}),
     ];
@@ -127,6 +129,8 @@ describe('postgres action item repository', () => {
   it('maps action item rows with parsed evidence json', () => {
     const mapped = mapActionItemRow(actionItemRowFixture());
     assert.equal(mapped.action_item_id, 'act_1');
+    assert.equal(mapped.waf_asset_id, 'waf_1');
+    assert.equal(mapped.asset.id, 'waf_1');
     assert.equal(mapped.evidence.summary, 'Marker rule not blocking.');
     assert.deepEqual(mapped.finding_ids, ['fnd_1']);
     assert.equal(mapped.created_at, FIXED_NOW);
@@ -148,12 +152,35 @@ describe('postgres action item repository', () => {
     assert.equal(items[0].category, 'waf_coverage');
   });
 
+  it('finds open action items by waf_asset_id and primary_reason', async () => {
+    const pool = createRecordingPool((sql, params) => {
+      if (/FROM waf_action_items/i.test(sql) && /waf_asset_id/i.test(sql)) {
+        assertParameterized(sql);
+        assertTenantScoped(sql, params);
+        assert.match(sql, /waf_asset_id\s*=\s*\$2/i);
+        assert.equal(params[1], 'waf_1');
+        assert.equal(params[2], 'marker_rule_not_blocking');
+        return { rows: [actionItemRowFixture()] };
+      }
+      return { rows: [] };
+    });
+    const repo = createActionItemRepository(pool);
+    const found = await repo.findOpenActionItemByDedupe(CTX, 'waf_1', 'marker_rule_not_blocking');
+    assertTenantWrapped(pool.client);
+    assert.equal(found.waf_asset_id, 'waf_1');
+  });
+
   it('inserts action item with jsonb evidence via JSON.stringify', async () => {
     const pool = createRecordingPool((sql, params) => {
       if (/INSERT INTO waf_action_items/i.test(sql)) {
         assertParameterized(sql);
         assertTenantScoped(sql, params);
-        assertJsonbParam(params, 7, {
+        assert.match(sql, /ON CONFLICT \(tenant_id, waf_asset_id, primary_reason\)/i);
+        assert.match(sql, /evidence_json[\s\S]*\$9::jsonb/i);
+        assert.match(sql, /updated_at[\s\S]*\$16::timestamptz/i);
+        assert.equal(params.length, 16);
+        assert.equal(params[5], 'waf_1');
+        assertJsonbParam(params, 8, {
           summary: 'WAF posture finding.',
           finding_ids: ['fnd_1'],
         });
@@ -167,6 +194,7 @@ describe('postgres action item repository', () => {
       category: 'waf_coverage',
       title: 'WAF remediation: https://app.example.com',
       asset_display: 'https://app.example.com',
+      waf_asset_id: 'waf_1',
       owner: 'security-operations',
       severity: 'high',
       evidence: {
@@ -183,6 +211,7 @@ describe('postgres action item repository', () => {
       updated_at: FIXED_NOW,
     });
     assert.equal(created.action_item_id, 'act_new');
+    assert.equal(created.waf_asset_id, 'waf_1');
     assert.deepEqual(created.finding_ids, ['fnd_1']);
   });
 

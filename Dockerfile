@@ -27,6 +27,6 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-# Production startup fails closed until the Postgres persistence adapter is wired
-# (see src/config.mjs). Set ASTRANULL_DATABASE_URL and ASTRANULL_SESSION_SECRET at runtime.
+# Production startup fails closed unless required runtime configuration passes src/config.mjs.
+# Set database and secret settings at deployment time; never bake them into images.
 CMD ["node", "src/index.mjs"]

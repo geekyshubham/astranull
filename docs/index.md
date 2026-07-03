@@ -12,6 +12,8 @@
 | [Release Plan](product/06-release-plan.md) | Production release milestones and verification. |
 | [Enterprise Production Gap Backlog](product/08-enterprise-production-gap-backlog.md) | Explicit backlog of remaining enterprise production gaps from the latest gap review. |
 | [WAF Posture Management](product/09-waf-posture-management.md) | Optional WAF posture, coverage, effectiveness, drift, CVE mitigation, and remediation scope. |
+| [WAF Compliance Audit Evidence](product/12-waf-compliance-audit-evidence.md) | Audit-ready WAF posture exports and framework mapping appendix. |
+| [Public Landing and Internal Management](product/13-public-landing-and-internal-management.md) | Public landing, sign-up intake, and AstraNull staff-only management plane. |
 | [Enhanced External Discovery](product/10-enhanced-external-discovery.md) | Optional entity mapping and approval-gated candidate discovery. |
 | [Active Protection and Digital Supply Chain](product/11-active-protection-and-digital-supply-chain.md) | Optional dangling asset, DNS hijack, and dependency protection design. |
 
@@ -61,6 +63,11 @@
 | [WAF Backend Architecture](backend/11-waf-posture-architecture.md) | Optional WAF posture services, jobs, queues, state machines. |
 | [WAF Data Model](backend/12-waf-posture-data-model.md) | Optional WAF posture tables, indexes, migrations, retention. |
 | [WAF API Contract](backend/13-waf-posture-api-contract.md) | Optional WAF posture endpoint and RBAC contract. |
+| [WAF Risk and Coverage Analytics](backend/14-waf-risk-coverage-analytics.md) | Risk scoring, coverage rollups, deployment roadmap, vendor advisory. |
+| [WAF Analytics Schema Extensions](backend/16-waf-analytics-schema-extensions.md) | Planned migration for geography, risk factors, coverage trend rollups. |
+| [WAF Product Catalog Pipeline](backend/15-waf-product-catalog-pipeline.md) | Catalog seed, version, and regression fixture pipeline. |
+| [Multi-Vendor CVE Playbook](detection/17-multi-vendor-cve-mitigation-playbook.md) | Grouped CVE mitigation across WAF vendors. |
+| [WAF Posture OpenAPI](api/waf-posture-openapi.json) | Machine-readable OpenAPI 3.1 draft for WAF/orchestrator routes (`npm run api:waf:openapi:check`). |
 
 ## Agent
 
@@ -93,6 +100,7 @@
 | [WAF Fingerprinting and Coverage](detection/13-waf-fingerprinting-coverage.md) | Optional WAF/CDN detection and coverage classification. |
 | [WAF Effectiveness and Drift](detection/14-waf-effectiveness-drift.md) | Optional safe WAF validation, monitor-only inference, and baseline drift. |
 | [Live Exposure Defense CVE Pipeline](detection/15-live-exposure-defense-cve-pipeline.md) | Optional CVE ingestion, asset matching, and WAF mitigation recommendations. |
+| [WAF Scenario Cadence](detection/16-waf-scenario-cadence.md) | Control bypass framing, per-asset effectiveness, emerging scenario cadence, catalog breadth. |
 
 ## SOC and Security
 
@@ -123,7 +131,7 @@
 | [WAF Add-on Feed Order](agent-prompts/00-waf-agent-feed-order.md) | Agent feed order, feature flags, and non-negotiables for WAF posture work. |
 | [WAF Build Backlog](progress-waf-posture-backlog.md) | Agent-ready WAF posture milestones and release blockers. |
 | [WAF Add-on Index Section](index-waf-addon-section.md) | Standalone index snippet from the imported add-on package. |
-| [Exposure Management Research Map](sources/exposure-management-research-map.md) | Public source mapping for capability inspiration. |
+| [Exposure Management Research Map](sources/exposure-management-research-map.md) | Public capability patterns, doc audit status, and re-audit checklist. |
 
 ## Deep implementation specs
 

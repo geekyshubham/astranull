@@ -1,13 +1,30 @@
 import {
-  WEBHOOK_DELIVERY_MODE,
   WEBHOOK_MAX_ATTEMPTS,
+  buildEmailPayload,
+  buildSlackPayload,
+  buildTeamsPayload,
   buildWebhookNotificationBody,
+  deliverEmail,
+  deliverSlack,
+  deliverTeams,
   encodeWebhookPayload,
+  isDeliveryChannelActive,
+  parseNotificationDeliveryModes,
   sendWebhookNotification,
 } from './notificationDelivery.mjs';
 import { destinationPreview } from './notifications.mjs';
 
 export const NOTIFICATION_RETRY_BACKOFF_MS = 60_000;
+
+/** @param {Record<string, unknown>} record */
+function markNetworkSendAttempted(record) {
+  Object.defineProperty(record, 'network_send_attempted', {
+    value: true,
+    enumerable: false,
+    configurable: true,
+  });
+  return record;
+}
 
 function addMs(iso, ms) {
   return new Date(new Date(iso).getTime() + ms).toISOString();
@@ -120,6 +137,99 @@ export function buildMetadataOnlyRetryDeliveryAttempt(input) {
   };
 }
 
+function buildRetryAttemptBase(input, channel) {
+  const attemptNumber = Number(input.attempt.attempt_number ?? 1) + 1;
+  const maxAttempts = Number(input.attempt.max_attempts ?? WEBHOOK_MAX_ATTEMPTS);
+  const rule = input.rule ?? { id: String(input.attempt.rule_id ?? ''), channel, destination: '' };
+
+  return {
+    id: input.newAttemptId,
+    rule_id: input.attempt.rule_id,
+    channel: input.attempt.channel,
+    destination_preview:
+      input.attempt.destination_preview ??
+      destinationPreview(rule.channel, rule.destination),
+    created_at: input.now,
+    attempted_at: input.now,
+    attempt_number: attemptNumber,
+    max_attempts: maxAttempts,
+  };
+}
+
+function retryChannelNotSupported(base) {
+  return {
+    ...base,
+    status: 'provider_failed_dlq',
+    reason: 'retry_channel_not_supported',
+    provider_error: 'retry_channel_not_supported',
+    exhausted: true,
+  };
+}
+
+/**
+ * @param {Record<string, unknown>} base
+ * @param {Record<string, unknown>} result
+ * @param {string} now
+ */
+function mapRetryProviderDeliveryResult(base, result, now) {
+  if (result.status === 'queued_provider_not_configured') {
+    return {
+      ...base,
+      status: 'queued_provider_not_configured',
+      reason: result.reason,
+    };
+  }
+
+  if (result.status === 'delivered_provider') {
+    return markNetworkSendAttempted({
+      ...base,
+      status: 'delivered_provider',
+      reason: result.reason,
+      provider_status: result.provider_status ?? null,
+    });
+  }
+
+  if (result.status === 'provider_retry_scheduled') {
+    return markNetworkSendAttempted({
+      ...base,
+      status: 'provider_retry_scheduled',
+      reason: result.reason,
+      provider_error: result.provider_error ?? result.reason,
+      next_retry_at: addMs(now, NOTIFICATION_RETRY_BACKOFF_MS),
+      exhausted: false,
+    });
+  }
+
+  return markNetworkSendAttempted({
+    ...base,
+    status: 'provider_failed_dlq',
+    reason: result.reason,
+    provider_error: result.provider_error ?? result.reason,
+    exhausted: true,
+  });
+}
+
+/**
+ * @param {{
+ *   attempt: Record<string, unknown>,
+ *   event: { id: string, trigger: string, subject: string, metadata: Record<string, unknown>, created_at: string },
+ *   rule: { id: string, channel: string, destination: string },
+ *   now: string,
+ *   newAttemptId: string,
+ *   expectedChannel: string,
+ *   deliver: () => Promise<Record<string, unknown>> | Record<string, unknown>,
+ * }} input
+ */
+async function buildAdapterRetryDeliveryAttempt(input) {
+  const base = buildRetryAttemptBase(input, input.expectedChannel);
+  if (input.attempt.channel !== input.expectedChannel || !input.rule?.destination) {
+    return retryChannelNotSupported(base);
+  }
+
+  const result = await input.deliver();
+  return mapRetryProviderDeliveryResult(base, result, input.now);
+}
+
 /**
  * @param {{
  *   attempt: Record<string, unknown>,
@@ -132,30 +242,12 @@ export function buildMetadataOnlyRetryDeliveryAttempt(input) {
  * }} input
  */
 export async function buildWebhookRetryDeliveryAttempt(input) {
-  const attemptNumber = Number(input.attempt.attempt_number ?? 1) + 1;
+  const base = buildRetryAttemptBase(input, 'webhook');
   const maxAttempts = Number(input.attempt.max_attempts ?? WEBHOOK_MAX_ATTEMPTS);
-
-  const base = {
-    id: input.newAttemptId,
-    rule_id: input.attempt.rule_id,
-    channel: input.attempt.channel,
-    destination_preview:
-      input.attempt.destination_preview ??
-      destinationPreview(input.rule.channel, input.rule.destination),
-    created_at: input.now,
-    attempted_at: input.now,
-    attempt_number: attemptNumber,
-    max_attempts: maxAttempts,
-  };
+  const attemptNumber = Number(base.attempt_number ?? maxAttempts);
 
   if (input.attempt.channel !== 'webhook' || !input.rule?.destination) {
-    return {
-      ...base,
-      status: 'provider_failed_dlq',
-      reason: 'retry_channel_not_supported',
-      provider_error: 'retry_channel_not_supported',
-      exhausted: true,
-    };
+    return retryChannelNotSupported(base);
   }
 
   const body = buildWebhookNotificationBody({
@@ -187,34 +279,34 @@ export async function buildWebhookRetryDeliveryAttempt(input) {
   }
 
   if (sendResult?.ok) {
-    return {
+    return markNetworkSendAttempted({
       ...base,
       status: 'delivered_provider',
       reason: 'webhook_delivered',
       provider_status: sendResult.status ?? null,
-    };
+    });
   }
 
   const retryable = attemptNumber < maxAttempts;
   const providerError = sendResult?.error ?? 'webhook_send_failed';
   if (retryable) {
-    return {
+    return markNetworkSendAttempted({
       ...base,
       status: 'provider_retry_scheduled',
       reason: providerError,
       provider_error: providerError,
       next_retry_at: addMs(input.now, NOTIFICATION_RETRY_BACKOFF_MS),
       exhausted: false,
-    };
+    });
   }
 
-  return {
+  return markNetworkSendAttempted({
     ...base,
     status: 'provider_failed_dlq',
     reason: providerError,
     provider_error: providerError,
     exhausted: true,
-  };
+  });
 }
 
 /**
@@ -227,6 +319,9 @@ export async function buildWebhookRetryDeliveryAttempt(input) {
  *   newAttemptId: string,
  *   webhookSender?: (destination: string, body: Record<string, unknown>) => unknown,
  *   fetchFn?: typeof fetch,
+ *   emailDeliverer?: (envelope: { from: string, to: string, subject: string, html_body: string }) => unknown,
+ *   slackDeliverer?: (payload: Record<string, unknown>, destination: string) => unknown,
+ *   teamsDeliverer?: (payload: Record<string, unknown>, destination: string) => unknown,
  * }} input
  */
 export async function buildRetryDeliveryAttempt(input) {
@@ -243,22 +338,60 @@ export async function buildRetryDeliveryAttempt(input) {
     created_at: String(input.event.created_at ?? input.now),
   };
 
-  if (input.deliveryMode !== WEBHOOK_DELIVERY_MODE) {
-    return buildMetadataOnlyRetryDeliveryAttempt({
-      attempt: input.attempt,
-      now: input.now,
-      newAttemptId: input.newAttemptId,
+  const modes = parseNotificationDeliveryModes(input.deliveryMode);
+  const channel = String(input.attempt.channel ?? '');
+  const ruleRecord = rule ?? { id: String(input.attempt.rule_id ?? ''), channel, destination: '' };
+  const retryInput = {
+    attempt: input.attempt,
+    event: eventPayload,
+    rule: ruleRecord,
+    now: input.now,
+    newAttemptId: input.newAttemptId,
+  };
+
+  if (channel === 'webhook' && isDeliveryChannelActive(modes, 'webhook')) {
+    return buildWebhookRetryDeliveryAttempt({
+      ...retryInput,
+      webhookSender: input.webhookSender,
+      fetchFn: input.fetchFn,
     });
   }
 
-  return buildWebhookRetryDeliveryAttempt({
+  if (channel === 'email' && isDeliveryChannelActive(modes, 'email')) {
+    const deliverer = input.emailDeliverer ?? deliverEmail;
+    return buildAdapterRetryDeliveryAttempt({
+      ...retryInput,
+      expectedChannel: 'email',
+      deliver: () => deliverer(buildEmailPayload(eventPayload, ruleRecord)),
+    });
+  }
+
+  if (channel === 'slack' && isDeliveryChannelActive(modes, 'slack')) {
+    const deliverer =
+      input.slackDeliverer ??
+      ((payload, destination) => deliverSlack(payload, destination, { fetchFn: input.fetchFn }));
+    return buildAdapterRetryDeliveryAttempt({
+      ...retryInput,
+      expectedChannel: 'slack',
+      deliver: () => deliverer(buildSlackPayload(eventPayload, ruleRecord), ruleRecord.destination),
+    });
+  }
+
+  if (channel === 'teams' && isDeliveryChannelActive(modes, 'teams')) {
+    const deliverer =
+      input.teamsDeliverer ??
+      ((payload, destination) => deliverTeams(payload, destination, { fetchFn: input.fetchFn }));
+    return buildAdapterRetryDeliveryAttempt({
+      ...retryInput,
+      expectedChannel: 'teams',
+      deliver: () => deliverer(buildTeamsPayload(eventPayload, ruleRecord), ruleRecord.destination),
+    });
+  }
+
+  return buildMetadataOnlyRetryDeliveryAttempt({
     attempt: input.attempt,
-    event: eventPayload,
-    rule: rule ?? { id: String(input.attempt.rule_id ?? ''), channel: 'webhook', destination: '' },
     now: input.now,
     newAttemptId: input.newAttemptId,
-    webhookSender: input.webhookSender,
-    fetchFn: input.fetchFn,
   });
 }
 
@@ -273,6 +406,9 @@ export async function buildRetryDeliveryAttempt(input) {
  *   newAttemptId?: (eventId: string, ruleId: string, attemptNumber: number) => string,
  *   webhookSender?: (destination: string, body: Record<string, unknown>) => unknown,
  *   fetchFn?: typeof fetch,
+ *   emailDeliverer?: (envelope: { from: string, to: string, subject: string, html_body: string }) => unknown,
+ *   slackDeliverer?: (payload: Record<string, unknown>, destination: string) => unknown,
+ *   teamsDeliverer?: (payload: Record<string, unknown>, destination: string) => unknown,
  * }} input
  */
 export async function processDueNotificationRetryBatch(input) {
@@ -315,9 +451,12 @@ export async function processDueNotificationRetryBatch(input) {
       newAttemptId: newAttemptId(String(event.id ?? ''), String(attempt.rule_id ?? ''), nextAttemptNumber),
       webhookSender: input.webhookSender,
       fetchFn: input.fetchFn,
+      emailDeliverer: input.emailDeliverer,
+      slackDeliverer: input.slackDeliverer,
+      teamsDeliverer: input.teamsDeliverer,
     });
 
-    if (input.deliveryMode === WEBHOOK_DELIVERY_MODE && attempt.channel === 'webhook') {
+    if (record.network_send_attempted === true) {
       network_sends_performed += 1;
     }
 

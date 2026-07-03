@@ -6,10 +6,12 @@ import { freshStore } from '../helpers/reset.mjs';
 import { getStore } from '../../src/store.mjs';
 import { createBootstrapToken } from '../../src/services/tokens.mjs';
 import { REQUIRED_ARTIFACT_TYPES } from '../../src/services/highScale.mjs';
+import { sha256Hex } from '../../src/lib/authorizationArtifactLedger.mjs';
 import {
   acceptHighScaleAuthorizationPack,
   acceptLegacyAuthorizationArtifactsOnly,
   acceptRequiredAuthorizationArtifactsOnly,
+  artifactProofBody,
   validHighScaleRequestPayload,
 } from '../helpers/highScalePayload.mjs';
 
@@ -529,6 +531,36 @@ describe('hardening acceptance gaps', () => {
       1,
     );
 
+    const directForbidden = await request(baseUrl, 'POST', `/internal/soc/high-scale/${hsId}/telemetry`, {
+      headers: soc,
+      body: {
+        category: 'service_health',
+        requestHeaders: 'Authorization: secret',
+        metrics: { status_code: 200 },
+      },
+    });
+    assert.equal(directForbidden.status, 400);
+    assert.equal(directForbidden.json.error, 'forbidden_telemetry_fields');
+    assert.equal(
+      getStore().highScaleTelemetry.filter((t) => t.high_scale_request_id === hsId).length,
+      1,
+    );
+
+    const directAuthorizationForbidden = await request(baseUrl, 'POST', `/internal/soc/high-scale/${hsId}/telemetry`, {
+      headers: soc,
+      body: {
+        category: 'service_health',
+        authorization: 'Bearer secret',
+        metrics: { status_code: 200 },
+      },
+    });
+    assert.equal(directAuthorizationForbidden.status, 400);
+    assert.equal(directAuthorizationForbidden.json.error, 'forbidden_telemetry_fields');
+    assert.equal(
+      getStore().highScaleTelemetry.filter((t) => t.high_scale_request_id === hsId).length,
+      1,
+    );
+
     const recorded = await request(baseUrl, 'POST', `/internal/soc/high-scale/${hsId}/telemetry`, {
       headers: soc,
       body: {
@@ -567,6 +599,126 @@ describe('hardening acceptance gaps', () => {
     assert.ok(reportRes.json.telemetry_summary.latest_live_status_at);
     const reportJson = JSON.stringify(reportRes.json);
     assert.doesNotMatch(reportJson, /raw_log/);
+  });
+
+  it('ingests governed adapter telemetry snapshots via SOC ingest route', async () => {
+    const soc = socPrimary();
+    const created = await request(baseUrl, 'POST', '/v1/high-scale-requests', {
+      headers: demoHeaders('engineer'),
+      body: validHighScaleRequestPayload({ objective: 'adapter telemetry ingest' }),
+    });
+    const hsId = created.json.id;
+
+    const engineerDenied = await request(
+      baseUrl,
+      'POST',
+      `/internal/soc/high-scale/${hsId}/telemetry/ingest`,
+      {
+        headers: demoHeaders('engineer'),
+        body: {
+          adapter_id: 'adapter_partner_lab_1',
+          snapshots: [{ category: 'adapter_metric' }],
+        },
+      },
+    );
+    assert.equal(engineerDenied.status, 403);
+
+    const tooEarly = await request(baseUrl, 'POST', `/internal/soc/high-scale/${hsId}/telemetry/ingest`, {
+      headers: soc,
+      body: {
+        adapter_id: 'adapter_partner_lab_1',
+        snapshots: [{ category: 'adapter_metric' }],
+      },
+    });
+    assert.equal(tooEarly.status, 409);
+    assert.equal(tooEarly.json.error, 'telemetry_not_active');
+
+    await uploadAndAcceptArtifacts(hsId, soc);
+    await dualSocApprove(hsId);
+    const activeStart = new Date(Date.now() - 60000).toISOString();
+    const activeEnd = new Date(Date.now() + 3600000).toISOString();
+    await request(baseUrl, 'POST', `/internal/soc/high-scale/${hsId}/schedule`, {
+      headers: soc,
+      body: { window_start: activeStart, window_end: activeEnd },
+    });
+
+    const forbidden = await request(baseUrl, 'POST', `/internal/soc/high-scale/${hsId}/telemetry/ingest`, {
+      headers: soc,
+      body: {
+        adapter_id: 'adapter_partner_lab_1',
+        snapshots: [{ category: 'adapter_metric', metrics: { packet_payload: 'unsafe' } }],
+      },
+    });
+    assert.equal(forbidden.status, 400);
+    assert.equal(forbidden.json.error, 'forbidden_telemetry_fields');
+
+    const ingested = await request(baseUrl, 'POST', `/internal/soc/high-scale/${hsId}/telemetry/ingest`, {
+      headers: soc,
+      body: {
+        adapter_id: 'adapter_partner_lab_1',
+        adapter_type: 'partner_adapter',
+        provider_key: 'cloudflare',
+        provider_run_id: 'run_meta_ingest_1',
+        snapshots: [
+          {
+            category: 'adapter_metric',
+            live_status: 'stable',
+            metrics: { scenario_rate_rps: 95 },
+          },
+          {
+            category: 'mitigation',
+            live_status: 'mitigating',
+            metrics: { edge_action: 'rate_limit' },
+          },
+        ],
+      },
+    });
+    assert.equal(ingested.status, 201);
+    assert.equal(ingested.json.snapshot_count, 2);
+    assert.equal(ingested.json.adapter_id, 'adapter_partner_lab_1');
+    assert.ok(ingested.json.ingestion_id);
+
+    const listed = await request(baseUrl, 'GET', `/internal/soc/high-scale/${hsId}/telemetry`, { headers: soc });
+    assert.equal(listed.status, 200);
+    assert.equal(listed.json.items.length, 2);
+    assert.ok(
+      listed.json.items.every((item) => item.source === 'governed-adapter:adapter_partner_lab_1:cloudflare'),
+    );
+    assert.ok(
+      getStore().auditLog.some(
+        (a) =>
+          a.action === 'high_scale.adapter_telemetry_ingested' &&
+          a.metadata?.adapter_id === 'adapter_partner_lab_1' &&
+          a.metadata?.high_scale_request_id === hsId &&
+          a.metadata?.snapshot_count === 2 &&
+          a.metadata?.metrics === undefined,
+      ),
+    );
+  });
+
+  it('returns metadata-only placement reviews per target group', async () => {
+    const admin = demoHeaders('admin');
+    const all = await request(baseUrl, 'GET', '/v1/placement/reviews', { headers: admin });
+    assert.equal(all.status, 200);
+    assert.ok(Array.isArray(all.json.reviews));
+    assert.ok(all.json.summary);
+    assert.match(all.json.summary.summary, /Placement diagnostics:/);
+    assert.equal(all.json.reviews.some((row) => row.target_group_id === 'tg_1'), true);
+
+    const filtered = await request(baseUrl, 'GET', '/v1/placement/reviews?target_group_id=tg_1', {
+      headers: admin,
+    });
+    assert.equal(filtered.status, 200);
+    assert.equal(filtered.json.target_group_id, 'tg_1');
+    assert.equal(filtered.json.reviews.length, 1);
+    assert.equal(filtered.json.reviews[0].target_group_id, 'tg_1');
+    assert.ok(Array.isArray(filtered.json.reviews[0].warnings));
+
+    const missing = await request(baseUrl, 'GET', '/v1/placement/reviews?target_group_id=tg_missing', {
+      headers: admin,
+    });
+    assert.equal(missing.status, 404);
+    assert.equal(missing.json.error, 'not_found');
   });
 
   it('legacy artifact set without SOC-009 proof types blocks SOC approve with structured requirements', async () => {
@@ -626,6 +778,7 @@ describe('hardening acceptance gaps', () => {
         provider_name: 'Cloudflare',
         provider_ref: 'CF-CASE-1001',
         reference_uri: 'metadata://provider/cloudflare',
+        content_sha256: sha256Hex('provider-partial-cloudflare'),
       },
     });
     assert.equal(providerUp.status, 201);
@@ -655,6 +808,7 @@ describe('hardening acceptance gaps', () => {
     const providerComplete = await request(baseUrl, 'POST', `/v1/high-scale-requests/${hsId}/artifacts`, {
       headers: demoHeaders('engineer'),
       body: {
+        ...artifactProofBody('provider_approval'),
         type: 'provider_approval',
         provider_name: 'Cloudflare',
         provider_ref: 'CF-CASE-1002',
@@ -776,6 +930,7 @@ describe('hardening acceptance gaps', () => {
     const providerUp = await request(baseUrl, 'POST', `/v1/high-scale-requests/${hsId}/artifacts`, {
       headers: demoHeaders('engineer'),
       body: {
+        ...artifactProofBody('provider_approval'),
         type: 'provider_approval',
         provider_name: 'Akamai',
         valid_window: { valid_to: pastEnd },
@@ -803,5 +958,180 @@ describe('hardening acceptance gaps', () => {
     });
     assert.equal(blocked.status, 409);
     assert.equal(blocked.json.error, 'authorization_pack_incomplete');
+  });
+
+  describe('authorization artifact durable document store', () => {
+    async function createHsRequest() {
+      const created = await request(baseUrl, 'POST', '/v1/high-scale-requests', {
+        headers: demoHeaders('engineer'),
+        body: validHighScaleRequestPayload({ objective: 'artifact custody ledger' }),
+      });
+      assert.equal(created.status, 201);
+      return created.json.id;
+    }
+
+    it('requires content_sha256 and rejects forbidden raw document fields', async () => {
+      const hsId = await createHsRequest();
+      const missing = await request(baseUrl, 'POST', `/v1/high-scale-requests/${hsId}/artifacts`, {
+        headers: demoHeaders('engineer'),
+        body: { type: 'test_plan', reference_uri: 'metadata://pack/demo' },
+      });
+      assert.equal(missing.status, 400);
+      assert.equal(missing.json.error, 'missing_or_invalid_content_sha256');
+
+      const forbidden = await request(baseUrl, 'POST', `/v1/high-scale-requests/${hsId}/artifacts`, {
+        headers: demoHeaders('engineer'),
+        body: {
+          ...artifactProofBody('test_plan'),
+          attachment: 'base64-pdf-bytes',
+        },
+      });
+      assert.equal(forbidden.status, 400);
+      assert.equal(forbidden.json.error, 'forbidden_artifact_upload_fields');
+
+      const compactForbidden = await request(baseUrl, 'POST', `/v1/high-scale-requests/${hsId}/artifacts`, {
+        headers: demoHeaders('engineer'),
+        body: {
+          ...artifactProofBody('test_plan'),
+          rawdocument: 'contract-body',
+        },
+      });
+      assert.equal(compactForbidden.status, 400);
+      assert.equal(compactForbidden.json.error, 'forbidden_artifact_upload_fields');
+
+      const authForbidden = await request(baseUrl, 'POST', `/v1/high-scale-requests/${hsId}/artifacts`, {
+        headers: demoHeaders('engineer'),
+        body: {
+          ...artifactProofBody('test_plan'),
+          authorization: 'Bearer secret',
+        },
+      });
+      assert.equal(authForbidden.status, 400);
+      assert.equal(authForbidden.json.error, 'forbidden_artifact_upload_fields');
+
+      const requestFieldForbidden = await request(baseUrl, 'POST', `/v1/high-scale-requests/${hsId}/artifacts`, {
+        headers: demoHeaders('engineer'),
+        body: {
+          ...artifactProofBody('test_plan'),
+          requestHeaders: 'Authorization: secret',
+        },
+      });
+      assert.equal(requestFieldForbidden.status, 400);
+      assert.equal(requestFieldForbidden.json.error, 'forbidden_artifact_upload_fields');
+    });
+
+    it('persists metadata-only custody ledger entries with JSON envelope', async () => {
+      const hsId = await createHsRequest();
+      const digest = sha256Hex('customer-auth-letter-v1');
+      const up = await request(baseUrl, 'POST', `/v1/high-scale-requests/${hsId}/artifacts`, {
+        headers: demoHeaders('engineer'),
+        body: {
+          ...artifactProofBody('customer_authorization_letter'),
+          content_sha256: digest,
+          content_type: 'application/pdf',
+          filename: 'Customer-Auth-Letter.pdf',
+        },
+      });
+      assert.equal(up.status, 201);
+      assert.equal(up.json.content_sha256, digest);
+      assert.ok(up.json.custody_id);
+      assert.equal(up.json.upload_envelope, 'json');
+
+      const ledger = getStore().highScaleAuthorizationArtifacts.filter(
+        (e) => e.high_scale_request_id === hsId,
+      );
+      assert.equal(ledger.length, 1);
+      assert.equal(ledger[0].content_sha256, digest);
+      assert.equal(ledger[0].artifact_type, 'customer_authorization_letter');
+      assert.equal(ledger[0].filename_redacted, 'Customer-Auth-Letter.pdf');
+
+      const listed = await request(baseUrl, 'GET', `/v1/high-scale-requests/${hsId}/artifacts`, {
+        headers: demoHeaders('viewer'),
+      });
+      assert.equal(listed.status, 200);
+      assert.equal(listed.json.items.length, 1);
+      assert.equal(listed.json.items[0].custody_id, up.json.custody_id);
+    });
+
+    it('accepts multipart metadata-only upload and rejects file parts', async () => {
+      const hsId = await createHsRequest();
+      const digest = sha256Hex('multipart-metadata-only');
+      const boundary = 'astranull-test-boundary';
+      const metadata = JSON.stringify({
+        approval_reference: 'REF-MULTI-001',
+        valid_window: artifactProofBody('test_plan').valid_window,
+      });
+      const multipartBody = [
+        `--${boundary}`,
+        'Content-Disposition: form-data; name="type"',
+        '',
+        'test_plan',
+        `--${boundary}`,
+        'Content-Disposition: form-data; name="content_sha256"',
+        '',
+        digest,
+        `--${boundary}`,
+        'Content-Disposition: form-data; name="metadata"',
+        '',
+        metadata,
+        `--${boundary}`,
+        'Content-Disposition: form-data; name="reference_uri"',
+        '',
+        'metadata://multipart/test_plan',
+        `--${boundary}--`,
+        '',
+      ].join('\r\n');
+
+      const up = await request(baseUrl, 'POST', `/v1/high-scale-requests/${hsId}/artifacts`, {
+        headers: {
+          ...demoHeaders('engineer'),
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        },
+        rawBody: multipartBody,
+      });
+      assert.equal(up.status, 201);
+      assert.equal(up.json.upload_envelope, 'multipart_metadata');
+      assert.equal(up.json.content_sha256, digest);
+
+      const filePartBody = [
+        `--${boundary}`,
+        'Content-Disposition: form-data; name="file"; filename="letter.pdf"',
+        'Content-Type: application/pdf',
+        '',
+        '%PDF-1.4 forbidden%',
+        `--${boundary}--`,
+        '',
+      ].join('\r\n');
+      const blocked = await request(baseUrl, 'POST', `/v1/high-scale-requests/${hsId}/artifacts`, {
+        headers: {
+          ...demoHeaders('engineer'),
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        },
+        rawBody: filePartBody,
+      });
+      assert.equal(blocked.status, 400);
+      assert.equal(blocked.json.error, 'forbidden_file_upload');
+    });
+
+    it('enforces high_scale:write for upload and high_scale:read for list', async () => {
+      const hsId = await createHsRequest();
+      const viewerWrite = await request(baseUrl, 'POST', `/v1/high-scale-requests/${hsId}/artifacts`, {
+        headers: demoHeaders('viewer'),
+        body: artifactProofBody('test_plan'),
+      });
+      assert.equal(viewerWrite.status, 403);
+
+      const engineerWrite = await request(baseUrl, 'POST', `/v1/high-scale-requests/${hsId}/artifacts`, {
+        headers: demoHeaders('engineer'),
+        body: artifactProofBody('test_plan'),
+      });
+      assert.equal(engineerWrite.status, 201);
+
+      const viewerRead = await request(baseUrl, 'GET', `/v1/high-scale-requests/${hsId}/artifacts`, {
+        headers: demoHeaders('viewer'),
+      });
+      assert.equal(viewerRead.status, 200);
+      assert.equal(viewerRead.json.items.length, 1);
+    });
   });
 });

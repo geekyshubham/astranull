@@ -4,10 +4,13 @@ Read:
 
 1. `docs/detection/13-waf-fingerprinting-coverage.md`
 2. `docs/detection/14-waf-effectiveness-drift.md`
-3. `docs/security/05-waf-safe-validation-policy.md`
-4. `docs/agent/08-waf-agent-probe-updates.md`
-5. Existing `docs/detection/05-origin-bypass.md`
-6. Existing `docs/detection/08-l7-api-vectors.md`
+3. `docs/detection/16-waf-scenario-cadence.md`
+4. `docs/detection/17-multi-vendor-cve-mitigation-playbook.md`
+5. `docs/backend/15-waf-product-catalog-pipeline.md`
+6. `docs/security/05-waf-safe-validation-policy.md`
+7. `docs/agent/08-waf-agent-probe-updates.md`
+8. Existing `docs/detection/05-origin-bypass.md`
+9. Existing `docs/detection/08-l7-api-vectors.md`
 
 Your task:
 

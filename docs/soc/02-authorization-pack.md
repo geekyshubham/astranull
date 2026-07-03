@@ -51,9 +51,11 @@ Customer upload API accepts metadata references — not binary attack tooling. S
 | `max_rate` / `max_duration_minutes` | Declared caps in scope/rate plan artifacts. |
 | `abort_criteria` | Abort text or reference. |
 | `emergency_contacts` | Contact path metadata. |
-| `reference_uri` | e.g. `metadata://ui/<type>/<request_id>` until durable document store lands. |
+| `content_sha256` | Required SHA-256 of the customer-held authorization document bytes; AstraNull stores the digest, not the binary document. |
+| `custody_id` | Server-issued custody ledger id after persistence (`authorization_artifacts` in Postgres mode). |
+| `reference_uri` | Optional external or UI metadata pointer, e.g. `metadata://ui/<type>/<request_id>`; not a substitute for `content_sha256`. |
 
-SOC reviews each artifact via `POST /internal/soc/high-scale/:id/artifacts/:artifactId/review`. **Production blockers:** durable document store/custody, staging/legal signoff, live provider integrations.
+SOC reviews each artifact via `POST /internal/soc/high-scale/:id/artifacts/:artifactId/review`. **Production blockers:** immutable/KMS-backed artifact retention, legal retention/export signoff, staging/legal workflow evidence, and live provider integrations.
 
 ## Authorization pack status
 
@@ -158,7 +160,7 @@ On failure it still writes a **redacted metadata-only manifest** (no secrets, no
 | Intake + pack types | **Developer validation (SOC-009)** — backend enforces required intake (including request-level `abort_criteria`) and expanded artifact types; UI collects fields and exposes per-type metadata upload helpers; integration tests in `hardening.test.mjs`. |
 | `authorization_pack_status` | **Developer validation** — computed server-side on create/artifact review; surfaced in UI when API returns it; gates SOC `approve` (`authorization_pack_incomplete` until pack accepted). |
 | Authorization templates | **Developer validation** — tested catalog plus markdown pack cover every required artifact type and provider approval; not legal advice and not a substitute for customer/legal signoff. |
-| Document custody | **Not production** — metadata `reference_uri` only; durable store and legal retention open. |
+| Document custody | **Developer validation** — metadata-only upload requires `content_sha256`, records `custody_id`, `custody_uri`, and upload envelope, and persists through the dev-json ledger plus Postgres `authorization_artifacts` (`0015_authorization_artifact_custody.sql`). `npm run soc:authorization-custody:evidence` validates metadata-only custody evidence. **Not production** — immutable/KMS-backed retention, legal export/signoff, and staging operator workflow remain open. |
 | Provider integrations | **Not production** — checklist metadata only. |
 
 ## Completion criteria

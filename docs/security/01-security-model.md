@@ -11,6 +11,7 @@
 | Safe testing | Checks are rate-limited, scoped, and classified. |
 | Privacy | Packet payloads are not uploaded by default. |
 | API abuse resistance | Service-layer fixed-window rate limits on `/v1` and `/internal` routes; production cannot disable limits. |
+| Internal management isolation | AstraNull staff-only management routes use staff identity, MFA, staff roles, audit, and optional network/edge restrictions; customer tenant roles never authorize `/internal/admin` or SOC execution. |
 
 ## Rate limiting and defense in depth
 
@@ -76,6 +77,7 @@ Production API and UI traffic must sit behind a provider-neutral edge control: W
 | Tampered agent update packages | Control-plane rejects unsigned or signature-invalid manifests; safe artifact basenames and SHA-256/size checks; manifest signing key must match active tenant trust key; required HTTPS `distribution` URLs with `artifact_url` basename match; agent-side verifier, `--apply-update-manifest`, and `--download-and-apply-update` reject key/signature/artifact mismatch, unsafe paths, symlinks, oversized downloads, and redirect-based fetch tricks. **Remaining:** production trust-key lifecycle operations, installer enforcement on hosts, hosted artifact custody/CDN ops evidence, unattended daemon restart and staging fleet rollout drills. |
 | Sensitive packet leakage | Metadata-only default, redaction, configurable retention. |
 | API abuse / credential stuffing | Service-layer rate limits, gateway/WAF throttling, audit on auth failures. |
+| Customer accesses internal management | Staff-only auth boundary, separate staff roles, direct-route denial, optional admin host/network allowlist, and audit on denied access. |
 
 ## RBAC enforcement
 
@@ -85,6 +87,7 @@ Every API should check:
 - tenant membership,
 - role permission,
 - service account scope (when principal is `service_account:<id>`),
+- staff principal and staff role for `/internal/*` routes,
 - resource ownership,
 - feature entitlement,
 - safety/risk class permission.
@@ -95,6 +98,9 @@ Audit these actions:
 
 - user login/logout,
 - invite/role changes,
+- public sign-up request submit/review/approve/reject/provision,
+- internal tenant lifecycle changes and subscription/entitlement changes,
+- staff support actions including invite resend, user disable, role correction, and any approved support access,
 - bootstrap token create/revoke,
 - service account create/revoke/rotate and failed service-account authentication (metadata must not include any substring of bearer secrets; rotation audit may include role/scopes only; use non-secret reasons such as `invalid_token`, `revoked`, or `expired` only),
 - agent register/revoke,

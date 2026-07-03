@@ -13,6 +13,10 @@ export const CORE_CATALOG_TARGET_GROUP_SERVICE_METHODS = Object.freeze([
   'createTargetGroup',
   'getTargetGroup',
   'addTarget',
+  'patchTargetGroup',
+  'archiveTargetGroup',
+  'patchTarget',
+  'deleteTarget',
 ]);
 
 /** @type {readonly string[]} */
@@ -86,6 +90,14 @@ export {
 } from './stateServiceAdapters.mjs';
 
 export {
+  PLACEMENT_AGENT_CONTROL_REPOSITORY_METHODS,
+  PLACEMENT_CORE_CATALOG_REPOSITORY_METHODS,
+  PLACEMENT_VALIDATION_EVIDENCE_REPOSITORY_METHODS,
+  POSTGRES_PLACEMENT_SERVICE_METHODS,
+  createPostgresPlacementServices,
+} from './placementServiceAdapters.mjs';
+
+export {
   PROBE_JOB_REPOSITORY_METHODS,
   POSTGRES_PROBE_JOB_SERVICE_METHODS,
   createPostgresProbeJobServices,
@@ -115,6 +127,18 @@ export {
   POSTGRES_WAF_POSTURE_SERVICE_METHODS,
   createPostgresWafPostureServices,
 } from './wafPostureServiceAdapters.mjs';
+
+export {
+  WAF_ORCHESTRATOR_REPOSITORY_METHODS,
+  POSTGRES_WAF_ORCHESTRATOR_SERVICE_METHODS,
+  createPostgresWafOrchestratorServices,
+} from './wafOrchestratorServiceAdapters.mjs';
+
+export {
+  INTERNAL_MANAGEMENT_REPOSITORY_METHODS,
+  POSTGRES_INTERNAL_MANAGEMENT_SERVICE_METHODS,
+  createPostgresInternalManagementServices,
+} from './internalManagementServiceAdapters.mjs';
 
 /**
  * @param {{ coreCatalog?: Record<string, unknown> }} repositories

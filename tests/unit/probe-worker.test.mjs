@@ -22,6 +22,7 @@ import { getStore } from '../../src/store.mjs';
 import { freshStore } from '../helpers/reset.mjs';
 import {
   WORKER_VERSION,
+  fetchHttpHeadWithSafeRedirects,
   parseWorkerConfig,
   pollAndProcessOnce,
   probeDns,
@@ -34,6 +35,10 @@ import {
 } from '../../workers/probe-worker.mjs';
 
 const WORKER_SECRET = 'probe-worker-secret-at-least-32-chars!!';
+const PROBE_WORKER_ENV = {
+  ASTRANULL_PROBE_WORKER_SECRET: WORKER_SECRET,
+  ASTRANULL_PROBE_TENANT_ID: 'ten_demo',
+};
 const pollCtx = { tenantId: 'ten_demo', userId: 'u1', role: 'engineer' };
 
 function completeActiveRuns() {
@@ -90,19 +95,22 @@ function runtimeSignedWorker() {
 describe('probe worker config', () => {
   it('requires a secret of at least 32 characters', () => {
     assert.throws(
-      () => parseWorkerConfig([], { ASTRANULL_PROBE_WORKER_SECRET: 'short' }),
+      () => parseWorkerConfig([], { ASTRANULL_PROBE_WORKER_SECRET: 'short', ASTRANULL_PROBE_TENANT_ID: 'ten_demo' }),
       /≥32/,
     );
   });
 
+  it('requires tenant id at boot', () => {
+    assert.throws(
+      () => parseWorkerConfig(['--secret', WORKER_SECRET], {}),
+      /tenant id is required/i,
+    );
+  });
+
   it('bounds poll interval', () => {
-    const cfg = parseWorkerConfig(['--poll-interval-ms', '50'], {
-      ASTRANULL_PROBE_WORKER_SECRET: WORKER_SECRET,
-    });
+    const cfg = parseWorkerConfig(['--poll-interval-ms', '50'], PROBE_WORKER_ENV);
     assert.equal(cfg.pollIntervalMs, 1000);
-    const cfgMax = parseWorkerConfig(['--poll-interval-ms', '999999'], {
-      ASTRANULL_PROBE_WORKER_SECRET: WORKER_SECRET,
-    });
+    const cfgMax = parseWorkerConfig(['--poll-interval-ms', '999999'], PROBE_WORKER_ENV);
     assert.equal(cfgMax.pollIntervalMs, 60_000);
   });
 
@@ -127,7 +135,7 @@ describe('probe worker request signing', () => {
     const bodyText = '';
     const headers = probeWorkerAuthHeaders(
       'worker-cli',
-      { method: 'GET', path: '/internal/probe/jobs', bodyText },
+      { method: 'GET', path: '/internal/probe/jobs', bodyText, tenantId: 'ten_demo' },
       WORKER_SECRET,
     );
     const auth = authenticateProbeWorker(
@@ -138,6 +146,7 @@ describe('probe worker request signing', () => {
       runtime,
     );
     assert.equal(auth.ok, true);
+    assert.equal(auth.workerCtx.tenantId, 'ten_demo');
     assert.equal(auth.workerCtx.workerId, 'worker-cli');
   });
 
@@ -242,7 +251,7 @@ describe('probe job signature verification', () => {
   it('processJob returns invalid_job_signature without executing probe', async () => {
     const job = baseJob();
     job.target = { ...job.target, value: 'tampered.example' };
-    const config = parseWorkerConfig([], { ASTRANULL_PROBE_WORKER_SECRET: WORKER_SECRET });
+    const config = parseWorkerConfig([], PROBE_WORKER_ENV);
     const body = await processJob(config, job);
     assert.equal(body.external_result, 'error');
     assert.equal(body.metadata.error_class, 'invalid_job_signature');
@@ -282,7 +291,7 @@ describe('probe worker metadata sanitizer', () => {
     const job = baseJob({
       target: { kind: 'url', value: `http://127.0.0.1:${port}/` },
     });
-    const config = parseWorkerConfig([], { ASTRANULL_PROBE_WORKER_SECRET: WORKER_SECRET });
+    const config = parseWorkerConfig([], PROBE_WORKER_ENV);
     const body = await processJob(config, job);
     assert.equal(body.metadata.headers, undefined);
     assert.equal(body.metadata.body, undefined);
@@ -334,6 +343,76 @@ describe('probe worker HTTP HEAD execution', () => {
     assert.equal('headers' in outcome.metadata, false);
 
     await new Promise((resolve) => server.close(resolve));
+  });
+
+  it('does not follow same-host redirects beyond the signed request cap', async () => {
+    let requests = 0;
+    const server = createHttpServer((req, res) => {
+      requests += 1;
+      assert.equal(req.method, 'HEAD');
+      assert.equal(req.url, '/start');
+      assert.equal(req.headers['x-astranull-nonce'], 'nonce-plaintext');
+      res.statusCode = 302;
+      res.setHeader('location', '/next');
+      res.end();
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address();
+
+    try {
+      const job = baseJob({
+        constraints: { max_requests: 1, timeout_ms: 1000 },
+        target: { kind: 'url', value: `http://127.0.0.1:${port}/start` },
+      });
+      const outcome = await probeHttpHead(job);
+      assert.equal(requests, 1);
+      assert.equal(outcome.requests_sent, 1);
+      assert.equal(outcome.external_result, 'error');
+      assert.equal(outcome.metadata.error_class, 'unsafe_redirect');
+      assert.equal(outcome.metadata.redirect_reason, 'request_cap_exhausted');
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it('does not leak nonce or marker headers to cross-host redirects', async () => {
+    let originRequests = 0;
+    let redirectedRequests = 0;
+    const redirected = createHttpServer((req, res) => {
+      redirectedRequests += 1;
+      assert.equal(req.headers['x-astranull-nonce'], undefined);
+      assert.equal(req.headers['x-astranull-marker'], undefined);
+      res.statusCode = 204;
+      res.end();
+    });
+    await new Promise((resolve) => redirected.listen(0, '127.0.0.1', resolve));
+    const redirectedPort = redirected.address().port;
+    const origin = createHttpServer((req, res) => {
+      originRequests += 1;
+      assert.equal(req.headers['x-astranull-nonce'], 'nonce-plaintext');
+      assert.equal(req.headers['x-astranull-marker'], 'astranull-safe-marker');
+      res.statusCode = 302;
+      res.setHeader('location', `http://127.0.0.1:${redirectedPort}/next`);
+      res.end();
+    });
+    await new Promise((resolve) => origin.listen(0, '127.0.0.1', resolve));
+    const originPort = origin.address().port;
+
+    try {
+      const job = baseJob({
+        target: { kind: 'url', value: `http://127.0.0.1:${originPort}/start` },
+      });
+      const outcome = await probeHttpHead(job);
+      assert.equal(originRequests, 1);
+      assert.equal(redirectedRequests, 0);
+      assert.equal(outcome.requests_sent, 1);
+      assert.equal(outcome.external_result, 'error');
+      assert.equal(outcome.metadata.error_class, 'unsafe_redirect');
+      assert.equal(outcome.metadata.redirect_reason, 'host_mismatch');
+    } finally {
+      await new Promise((resolve) => origin.close(resolve));
+      await new Promise((resolve) => redirected.close(resolve));
+    }
   });
 
   it('maps abort to timeout without raw response fields', async () => {
@@ -444,10 +523,13 @@ describe('probe worker poll integration', () => {
     );
     assert.ok(started.probe_job?.job_signature);
 
-    const config = parseWorkerConfig(['--worker-id', 'worker-integration'], {
-      ASTRANULL_PROBE_WORKER_SECRET: WORKER_SECRET,
-      ASTRANULL_API_URL: baseUrl,
-    });
+    const config = parseWorkerConfig(
+      ['--worker-id', 'worker-integration', '--tenant-id', 'ten_demo'],
+      {
+        ASTRANULL_PROBE_WORKER_SECRET: WORKER_SECRET,
+        ASTRANULL_API_URL: baseUrl,
+      },
+    );
     const results = await pollAndProcessOnce(config);
     assert.equal(results.length, 1);
     assert.equal(results[0].job_id, started.probe_job.id);
@@ -482,7 +564,7 @@ describe('executeProbeForJob routing', () => {
     const job = baseJob({
       target: { kind: 'url', value: `http://127.0.0.1:${port}/` },
     });
-    const config = parseWorkerConfig([], { ASTRANULL_PROBE_WORKER_SECRET: WORKER_SECRET });
+    const config = parseWorkerConfig([], PROBE_WORKER_ENV);
     const body = await processJob(config, job);
     assert.equal(body.safety_attestation.worker_version, WORKER_VERSION);
     assert.ok(body.safety_attestation.requests_sent <= job.constraints.max_requests);

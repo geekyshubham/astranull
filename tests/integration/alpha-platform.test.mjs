@@ -56,7 +56,7 @@ describe('alpha platform slice', () => {
     const body = {
       event_id: 'evt_dup_1',
       signal_type: 'health',
-      metadata: { authorization: 'Bearer ast_leaktoken123456789012345678' },
+      metadata: { api_secret_ref: 'ast_leaktoken123456789012345678' },
     };
     const first = await request(baseUrl, 'POST', '/v1/events', { headers: h, body });
     assert.equal(first.status, 201);

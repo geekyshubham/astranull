@@ -9,7 +9,7 @@ import { promisify } from 'node:util';
 import { createServer } from '../../src/server.mjs';
 import { createBootstrapToken } from '../../src/services/tokens.mjs';
 import { freshStore } from '../helpers/reset.mjs';
-import { generateKeyPairSync } from 'node:crypto';
+import { createHash, generateKeyPairSync } from 'node:crypto';
 import { buildAgentPackage } from '../../scripts/package-agent.mjs';
 import {
   containsDisallowedObservationFields,
@@ -19,6 +19,17 @@ import {
   loadObservationFile,
   OBSERVATION_MODES,
   pollAndWork,
+  pollAndMaybeApplyUpdate,
+  runAgentDaemonCycle,
+  readAgentCurrentReleaseRecord,
+  resolveAgentExecutableFromCurrentRelease,
+  filterAgentRestartArgv,
+  sanitizeAgentRestartEnv,
+  buildAgentRestartCommand,
+  restartAgentProcessAfterUpdate,
+  resolveAgentUpdateDaemonIntervalMs,
+  AGENT_UPDATE_DAEMON_DEFAULT_INTERVAL_MS,
+  AGENT_UPDATE_DAEMON_MIN_INTERVAL_MS,
   selectObservationForJob,
   startCanaryListener,
   startLogTail,
@@ -32,8 +43,14 @@ import {
   validateAgentUpdateTarballEntries,
   verifyAgentUpdateManifest,
   verifyAgentUpdatePackageFiles,
+  verifyPackageSignature,
   buildAgentRegistrationCapabilities,
 } from '../../agents/linux/astranull-agent.mjs';
+import {
+  DEFAULT_COSIGN_SIGNER_REFERENCE,
+  DEFAULT_GPG_KEY_REFERENCE,
+  buildGpgSigningHook,
+} from '../../scripts/package-agent.mjs';
 
 const agentScript = path.join(process.cwd(), 'agents/linux/astranull-agent.mjs');
 const nodeBin = process.execPath;
@@ -998,6 +1015,172 @@ describe('validateAgentControlPlaneUrl', () => {
   });
 });
 
+describe('agent package signature verifier', () => {
+  it('accepts tarball format via signing manifest and update manifest', () => {
+    const pkg = buildSignedAgentPackageForTest('9.9.9-package-sig');
+    const result = verifyPackageSignature({
+      signingManifest: pkg.signingManifest,
+      format: 'generic',
+      artifactPath: pkg.tarballPath,
+      trustedPublicKeyDerBase64: pkg.manifest.signing.public_key_der_base64,
+      updateManifest: pkg.manifest,
+      signatureBase64: pkg.signatureBase64,
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.format, 'tarball');
+    assert.equal(result.version, '9.9.9-package-sig');
+  });
+
+  it('accepts deb format when gpg fingerprint matches signing hook', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'astranull-agent-deb-verify-'));
+    const debPath = path.join(tmp, 'astranull-agent-9.9.9-deb.deb');
+    fs.writeFileSync(debPath, 'fake-deb-payload-for-test\n');
+    const gpg = buildGpgSigningHook();
+    const signingManifest = {
+      schema_version: 1,
+      artifact_type: 'agent_package_signing',
+      package: 'astranull-agent',
+      version: '9.9.9-deb',
+      created_at: '2026-07-01T12:00:00.000Z',
+      artifacts: {
+        deb: {
+          format: 'deb',
+          name: path.basename(debPath),
+          sha256: createHash('sha256').update(fs.readFileSync(debPath)).digest('hex'),
+          size: fs.statSync(debPath).size,
+          gpg,
+        },
+      },
+    };
+    const result = verifyPackageSignature({
+      signingManifest,
+      format: 'deb',
+      artifactPath: debPath,
+      trustedGpgFingerprintSha256: gpg.fingerprint_sha256,
+      allowMetadataOnlyTrust: true,
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.trust_anchor, DEFAULT_GPG_KEY_REFERENCE);
+  });
+
+  it('accepts container format when cosign signer matches hook', () => {
+    const signingManifest = {
+      schema_version: 1,
+      artifact_type: 'agent_package_signing',
+      package: 'astranull-agent',
+      version: '9.9.9-container',
+      created_at: '2026-07-01T12:00:00.000Z',
+      artifacts: {
+        container: {
+          format: 'container',
+          image: 'registry.example/astranull-agent:9.9.9-container',
+          digest_sha256: 'e'.repeat(64),
+          cosign: {
+            hook: 'metadata_only',
+            algorithm: 'cosign',
+            signer_reference: DEFAULT_COSIGN_SIGNER_REFERENCE,
+            signed: false,
+            signature_uri: null,
+          },
+        },
+      },
+    };
+    const result = verifyPackageSignature({
+      signingManifest,
+      format: 'container',
+      trustedCosignSignerReference: DEFAULT_COSIGN_SIGNER_REFERENCE,
+      allowMetadataOnlyTrust: true,
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.image, 'registry.example/astranull-agent:9.9.9-container');
+  });
+
+  it('rejects metadata-only deb trust without explicit developer override', () => {
+    const gpg = buildGpgSigningHook();
+    const signingManifest = {
+      schema_version: 1,
+      artifact_type: 'agent_package_signing',
+      package: 'astranull-agent',
+      version: '9.9.9-deb-meta',
+      created_at: '2026-07-01T12:00:00.000Z',
+      artifacts: {
+        deb: {
+          format: 'deb',
+          name: 'astranull-agent.deb',
+          sha256: 'a'.repeat(64),
+          size: 10,
+          gpg,
+        },
+      },
+    };
+    const result = verifyPackageSignature({
+      signingManifest,
+      format: 'deb',
+      artifactPath: null,
+      trustedGpgFingerprintSha256: gpg.fingerprint_sha256,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.error, 'METADATA_ONLY_SIGNING_INSUFFICIENT');
+  });
+
+  it('rejects gpg fingerprint mismatch for deb packages', () => {
+    const gpg = buildGpgSigningHook();
+    const signingManifest = {
+      schema_version: 1,
+      artifact_type: 'agent_package_signing',
+      package: 'astranull-agent',
+      version: '9.9.9-deb-bad',
+      created_at: '2026-07-01T12:00:00.000Z',
+      artifacts: {
+        deb: {
+          format: 'deb',
+          name: 'astranull-agent.deb',
+          sha256: 'a'.repeat(64),
+          size: 10,
+          gpg,
+        },
+      },
+    };
+    const result = verifyPackageSignature({
+      signingManifest,
+      format: 'deb',
+      artifactPath: null,
+      trustedGpgFingerprintSha256: 'b'.repeat(64),
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.error, 'TRUSTED_GPG_FINGERPRINT_MISMATCH');
+  });
+});
+
+describe('agent package signature CLI preflight', () => {
+  it('exits 0 for tarball generic format with signing manifest', async () => {
+    const pkg = buildSignedAgentPackageForTest('9.9.9-cli-package-sig');
+    const { stdout } = await execFileAsync(
+      nodeBin,
+      [
+        agentScript,
+        '--verify-package-signature',
+        '--signing-manifest',
+        pkg.signingManifestPath,
+        '--package-format',
+        'generic',
+        '--update-manifest',
+        pkg.manifestPath,
+        '--signature',
+        pkg.sigPath,
+        '--trusted-public-key',
+        pkg.manifest.signing.public_key_der_base64,
+        '--artifact',
+        pkg.tarballPath,
+      ],
+      { encoding: 'utf8' },
+    );
+    assert.match(stdout, /package-signature-verify: ok/);
+    assert.match(stdout, /format: tarball/);
+    assert.match(stdout, /version: 9\.9\.9-cli-package-sig/);
+  });
+});
+
 describe('agent update manifest CLI preflight', () => {
   it('exits 0 on valid signed manifest with artifact', async () => {
     const pkg = buildSignedAgentPackageForTest('9.9.9-cli-ok');
@@ -1051,6 +1234,317 @@ describe('agent update manifest CLI preflight', () => {
         return true;
       },
     );
+  });
+});
+
+describe('agent update daemon helpers', () => {
+  it('resolveAgentUpdateDaemonIntervalMs uses default and minimum bounds', () => {
+    assert.equal(
+      resolveAgentUpdateDaemonIntervalMs({ cliInterval: undefined, envValue: undefined }),
+      AGENT_UPDATE_DAEMON_DEFAULT_INTERVAL_MS,
+    );
+    assert.equal(
+      resolveAgentUpdateDaemonIntervalMs({
+        cliInterval: AGENT_UPDATE_DAEMON_MIN_INTERVAL_MS - 1,
+      }),
+      AGENT_UPDATE_DAEMON_DEFAULT_INTERVAL_MS,
+    );
+    assert.equal(
+      resolveAgentUpdateDaemonIntervalMs({ cliInterval: 120_000 }),
+      120_000,
+    );
+    assert.equal(
+      resolveAgentUpdateDaemonIntervalMs({ envValue: '45000' }),
+      45_000,
+    );
+  });
+
+  it('readAgentCurrentReleaseRecord validates install root and current.json', () => {
+    const installRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'astranull-agent-current-'));
+    const missing = readAgentCurrentReleaseRecord(installRoot);
+    assert.equal(missing.ok, false);
+    assert.equal(missing.error, 'CURRENT_RELEASE_NOT_FOUND');
+
+    fs.writeFileSync(
+      path.join(installRoot, 'current.json'),
+      `${JSON.stringify({
+        version: '1.2.3',
+        applied_at: '2026-07-01T00:00:00.000Z',
+        release_dir: path.join(installRoot, 'releases', '1.2.3'),
+        artifact_sha256: 'a'.repeat(64),
+      }, null, 2)}\n`,
+    );
+    const current = readAgentCurrentReleaseRecord(installRoot);
+    assert.equal(current.ok, true);
+    assert.equal(current.version, '1.2.3');
+    assert.equal(current.releaseDir, path.join(installRoot, 'releases', '1.2.3'));
+  });
+
+  it('resolveAgentExecutableFromCurrentRelease returns release agent path', () => {
+    const installRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'astranull-agent-exec-'));
+    const releaseDir = path.join(installRoot, 'releases', '2.0.0');
+    fs.mkdirSync(releaseDir, { recursive: true });
+    const executable = path.join(releaseDir, 'astranull-agent.mjs');
+    fs.writeFileSync(executable, '#!/usr/bin/env node\n');
+    fs.writeFileSync(
+      path.join(installRoot, 'current.json'),
+      `${JSON.stringify({
+        version: '2.0.0',
+        applied_at: '2026-07-01T00:00:00.000Z',
+        release_dir: releaseDir,
+        artifact_sha256: 'b'.repeat(64),
+      }, null, 2)}\n`,
+    );
+
+    const resolved = resolveAgentExecutableFromCurrentRelease(installRoot);
+    assert.equal(resolved.ok, true);
+    assert.equal(resolved.executable, executable);
+    assert.equal(resolved.version, '2.0.0');
+  });
+
+  it('filterAgentRestartArgv strips one-shot flags and keeps update daemon mode', () => {
+    const filtered = filterAgentRestartArgv([
+      '--once',
+      '--api',
+      'http://127.0.0.1:3000',
+      '--download-and-apply-update',
+      '--manifest-url',
+      'https://cdn.example.com/manifest.json',
+      '--allow-insecure-localhost-api',
+      '--allow-insecure-localhost-downloads',
+      '--daemon-interval',
+      '60000',
+    ]);
+    assert.ok(filtered.includes('--run-update-daemon'));
+    assert.ok(filtered.includes('--api'));
+    assert.ok(filtered.includes('--daemon-interval'));
+    assert.equal(filtered.includes('--once'), false);
+    assert.equal(filtered.includes('--download-and-apply-update'), false);
+    assert.equal(filtered.includes('--manifest-url'), false);
+    assert.equal(filtered.includes('--allow-insecure-localhost-api'), false);
+    assert.equal(filtered.includes('--allow-insecure-localhost-downloads'), false);
+  });
+
+  it('sanitizeAgentRestartEnv removes metadata-only trust overrides', () => {
+    const sanitized = sanitizeAgentRestartEnv({
+      PATH: '/usr/bin',
+      ASTRANULL_AGENT_ALLOW_METADATA_ONLY_TRUST: '1',
+    });
+    assert.equal(sanitized.PATH, '/usr/bin');
+    assert.equal(sanitized.ASTRANULL_AGENT_ALLOW_METADATA_ONLY_TRUST, undefined);
+  });
+
+  it('buildAgentRestartCommand points Node at the current release executable', () => {
+    const installRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'astranull-agent-restart-cmd-'));
+    const releaseDir = path.join(installRoot, 'releases', '3.1.4');
+    fs.mkdirSync(releaseDir, { recursive: true });
+    const executable = path.join(releaseDir, 'astranull-agent.mjs');
+    fs.writeFileSync(executable, '#!/usr/bin/env node\n');
+    fs.writeFileSync(
+      path.join(installRoot, 'current.json'),
+      `${JSON.stringify({
+        version: '3.1.4',
+        applied_at: '2026-07-01T00:00:00.000Z',
+        release_dir: releaseDir,
+        artifact_sha256: 'c'.repeat(64),
+      }, null, 2)}\n`,
+    );
+
+    const command = buildAgentRestartCommand({
+      installRoot,
+      argv: ['--once', '--api', 'http://127.0.0.1:3000'],
+      execPath: '/usr/bin/node',
+    });
+    assert.equal(command.ok, true);
+    assert.equal(command.executable, '/usr/bin/node');
+    assert.equal(command.argv[0], executable);
+    assert.ok(command.argv.includes('--run-update-daemon'));
+    assert.equal(command.argv.includes('--once'), false);
+  });
+
+  it('restartAgentProcessAfterUpdate re-execs current release and exits', () => {
+    const installRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'astranull-agent-restart-exec-'));
+    const releaseDir = path.join(installRoot, 'releases', '4.0.0');
+    fs.mkdirSync(releaseDir, { recursive: true });
+    const executable = path.join(releaseDir, 'astranull-agent.mjs');
+    fs.writeFileSync(executable, '#!/usr/bin/env node\n');
+    fs.writeFileSync(
+      path.join(installRoot, 'current.json'),
+      `${JSON.stringify({
+        version: '4.0.0',
+        applied_at: '2026-07-01T00:00:00.000Z',
+        release_dir: releaseDir,
+        artifact_sha256: 'd'.repeat(64),
+      }, null, 2)}\n`,
+    );
+
+    const restartCalls = [];
+    let exitCode = null;
+    const result = restartAgentProcessAfterUpdate({
+      installRoot,
+      argv: ['--daemon-interval', '45000'],
+      execPath: '/usr/bin/node',
+      env: {
+        PATH: '/usr/bin',
+        ASTRANULL_AGENT_ALLOW_METADATA_ONLY_TRUST: '1',
+      },
+      restartFn: (payload) => {
+        restartCalls.push(payload);
+      },
+      exitFn: (code) => {
+        exitCode = code;
+      },
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.mode, 'reexec');
+    assert.equal(restartCalls.length, 1);
+    assert.equal(restartCalls[0].executable, '/usr/bin/node');
+    assert.equal(restartCalls[0].argv[0], executable);
+    assert.equal(restartCalls[0].env.ASTRANULL_AGENT_ALLOW_METADATA_ONLY_TRUST, undefined);
+    assert.equal(exitCode, 0);
+  });
+});
+
+describe('agent auto-update poll', () => {
+  it('pollAndMaybeApplyUpdate skips when trust key or install root missing', async () => {
+    const result = await pollAndMaybeApplyUpdate('ag_test', {
+      api: async () => ({ update: null }),
+    });
+    assert.equal(result.skipped, 'missing_update_config');
+  });
+
+  it('pollAndMaybeApplyUpdate returns null update when control plane has none', async () => {
+    const calls = [];
+    const result = await pollAndMaybeApplyUpdate('ag_test', {
+      trustedPublicKeyDerBase64: 'dGVzdA==',
+      installRoot: '/tmp/astranull',
+      api: async (method, path) => {
+        calls.push([method, path]);
+        if (path.endsWith('/update')) return { update: null };
+        throw new Error('unexpected');
+      },
+    });
+    assert.equal(result.applied, false);
+    assert.equal(result.update, null);
+    assert.deepEqual(calls, [['GET', '/v1/agents/ag_test/update']]);
+  });
+
+  it('runAgentDaemonCycle invokes heartbeat, jobs, and optional auto-update', async () => {
+    const sequence = [];
+    await runAgentDaemonCycle('ag_cycle', {
+      heartbeat: async (id) => {
+        sequence.push(['heartbeat', id]);
+      },
+      pollAndWork: async (id) => {
+        sequence.push(['jobs', id]);
+      },
+      pollAndMaybeApplyUpdate: async (id) => {
+        sequence.push(['update', id]);
+        return { applied: false };
+      },
+      autoUpdate: true,
+    });
+    assert.deepEqual(sequence, [
+      ['heartbeat', 'ag_cycle'],
+      ['jobs', 'ag_cycle'],
+      ['update', 'ag_cycle'],
+    ]);
+  });
+
+  it('pollAndMaybeApplyUpdate reports metadata-only statuses through update-status API', async () => {
+    const pkg = buildSignedAgentPackageForTest('9.9.9-daemon-status');
+    const installRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'astranull-agent-daemon-status-'));
+    const { server, baseUrl } = await startLocalAgentPackageHttpServer(pkg);
+    const statusBodies = [];
+
+    try {
+      const result = await pollAndMaybeApplyUpdate('ag_status', {
+        trustedPublicKeyDerBase64: pkg.manifest.signing.public_key_der_base64,
+        installRoot,
+        allowInsecureLocalhostDownloads: true,
+        api: async (method, route, body) => {
+          if (method === 'GET' && route.endsWith('/update')) {
+            return {
+              update: {
+                release_id: 'rel_status',
+                action: 'upgrade',
+                version: pkg.manifest.version,
+                download: {
+                  manifest_url: `${baseUrl}/manifest.json`,
+                  signature_url: `${baseUrl}/manifest.sig`,
+                  artifact_url: `${baseUrl}/artifact.tar.gz`,
+                },
+              },
+            };
+          }
+          if (method === 'POST' && route.endsWith('/update-status')) {
+            statusBodies.push(body);
+            return { status: { id: `aus_${statusBodies.length}` } };
+          }
+          throw new Error(`unexpected ${method} ${route}`);
+        },
+      });
+
+      assert.equal(result.applied, true);
+      assert.equal(result.version, pkg.manifest.version);
+      assert.deepEqual(
+        statusBodies.map((body) => body.status),
+        ['downloaded', 'verified', 'applied'],
+      );
+      assert.equal(statusBodies[0].release_id, 'rel_status');
+      assert.equal(statusBodies[0].action, 'upgrade');
+      assert.equal(statusBodies[2].installed_version, pkg.manifest.version);
+      for (const body of statusBodies) {
+        assert.equal(body.manifest_url, undefined);
+        assert.equal(body.download, undefined);
+        assert.equal(body.signature, undefined);
+      }
+    } finally {
+      await new Promise((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('runAgentDaemonCycle restarts agent after successful update when configured', async () => {
+    const installRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'astranull-agent-daemon-restart-'));
+    const releaseDir = path.join(installRoot, 'releases', '5.0.0');
+    fs.mkdirSync(releaseDir, { recursive: true });
+    fs.writeFileSync(path.join(releaseDir, 'astranull-agent.mjs'), '#!/usr/bin/env node\n');
+    fs.writeFileSync(
+      path.join(installRoot, 'current.json'),
+      `${JSON.stringify({
+        version: '5.0.0',
+        applied_at: '2026-07-01T00:00:00.000Z',
+        release_dir: releaseDir,
+        artifact_sha256: 'e'.repeat(64),
+      }, null, 2)}\n`,
+    );
+
+    const restartCalls = [];
+    let exitCode = null;
+    await runAgentDaemonCycle('ag_restart', {
+      heartbeat: async () => {},
+      pollAndWork: async () => {},
+      pollAndMaybeApplyUpdate: async () => ({
+        applied: true,
+        version: '5.0.0',
+        action: 'upgrade',
+        releaseId: 'rel_restart',
+      }),
+      autoUpdate: true,
+      restartAfterUpdate: true,
+      installRoot,
+      restartFn: (payload) => {
+        restartCalls.push(payload);
+      },
+      exitFn: (code) => {
+        exitCode = code;
+      },
+    });
+
+    assert.equal(restartCalls.length, 1);
+    assert.equal(restartCalls[0].argv[0], path.join(releaseDir, 'astranull-agent.mjs'));
+    assert.equal(exitCode, 0);
   });
 });
 

@@ -79,6 +79,15 @@ npm run release:staging-attestation -- \
   --out output/staging-readiness-attestation.json
 ```
 
+**Local production-like stack** (Docker Compose Postgres + control-plane on `127.0.0.1:3000`):
+
+```bash
+npm run staging:local:up
+npm run staging:local:attest
+```
+
+`staging:local:attest` runs seed, Postgres verify, smoke, E2E matrix, evidence collection (31 kinds), `release:gap-audit:local`, `release:staging-attestation:local`, and API evidence submit. Expect `production_ready=true` when checklist gates are closed.
+
 Cross-check attestation, required kinds from `src/contracts/productionReleaseEvidence.mjs`, and open rows in `docs/release-checklist.md`. The audit exits **nonzero** when `production_ready=false` (missing/invalid inventory and/or open checklist gates). Strict evidence kinds (including `governed_adapter` and kill-switch drill contracts) surface failures as `invalid_fields` during bundle validation and on `/v1/production-release-evidence` as `invalid_evidence_fields`.
 
 ```bash
@@ -165,6 +174,130 @@ node scripts/postgres-startup-check.mjs --migrate
 ```
 
 Equivalent: `npm run postgres:startup-check` (pass `--` before `--migrate` when using npm). Unit coverage: `tests/unit/postgres-startup-check.test.mjs`.
+
+### WAF orchestrator runner (externally scheduled)
+
+**Operator surfaces:** In developer validation, use the `#waf-posture` **validation-plan operator panel** (list all/scheduled plans; create/execute/cancel safe plans) together with this CLI. The UI is for local engineering visibility and manual ticks; it does **not** replace external scheduling in staging/production.
+
+Postgres operator CLI for runnable/scheduled WAF validation plans. **Not** a daemon—wire it to cron, a Kubernetes CronJob, CI, or an on-call runbook. Requires `ASTRANULL_DATABASE_URL`, explicit tenant scope, and signed-worker probe mode (`ASTRANULL_PROBE_MODE=signed-worker` and a 32+ character `ASTRANULL_PROBE_WORKER_SECRET`). Apply mode calls `executeValidationPlan` once per scheduled plan per run: safe continuation (full assets×scenarios queue capped by plan `max_concurrent`; at most one new `startTestRun` per plan per tick because of the signed-worker active-run gate; plans may stay `running` until later runs finish `delegated_jobs`). Concurrent API and runner ticks coordinate through Postgres execution leases on `waf_validation_plans` and `waf_retest_requests` (`execution_lock_token`, `execution_lock_expires_at`): claim/finish lifecycle-gate eligible plan states and retest statuses; claim-before-side-effect; default TTL at least plan safe-run `timeout_ms` + 30s buffer (or larger configured `executionLeaseMs`). On a **claim miss**, execute paths **re-read** the plan/retest and return lifecycle errors (`validation_plan_cancelled`, `validation_plan_already_completed`, `waf_retest_already_delegated`, `waf_retest_already_completed`) rather than treating every miss as in-progress; reserve `409 waf_orchestrator_execution_in_progress` for true active-lease conflicts. Validation-plan cancel atomically clears active leases and best-effort cancels delegated safe runs recorded on the returned cancelled plan row snapshot (`delegated_jobs` on `POST /v1/waf/validation-plans/:id/cancel` → `200 { validation_plan }`; control-plane `cancelTestRun`—metadata only, not traffic generation); a stale executor that loses its finish token compensating-cancels any just-started safe run and cannot resurrect a cancelled plan; if **finish throws** after `startTestRun`, the service compensating-cancels `started_run_ids` and **best-effort** releases the execution lease before returning `422 validation_plan_execution_failed`. Developer-validation hardened only: a **hard process crash** after `startTestRun` but before `delegated_jobs` persistence remains crash-recovery/staging evidence open—no production at-most-once delegation claim. Success means delegation recorded in metadata-only output, not final WAF verdict or coverage closure. Staging scheduling/execution evidence for this runner, hard-crash resilience evidence, live/staging DB acceptance, provider connector workers, and WAF security/observability/release signoff remain open—not production-ready until closed.
+
+Dry run (list scheduled plans, no execute):
+
+```bash
+ASTRANULL_DATABASE_URL='postgresql://user:pass@host:5432/astranull' \
+ASTRANULL_PROBE_MODE=signed-worker \
+ASTRANULL_PROBE_WORKER_SECRET='…' \
+npm run waf:orchestrator:runner -- --tenant-id tenant-a --dry-run
+```
+
+Apply run with optional metadata-only summary:
+
+```bash
+ASTRANULL_DATABASE_URL='postgresql://user:pass@host:5432/astranull' \
+ASTRANULL_PROBE_MODE=signed-worker \
+ASTRANULL_PROBE_WORKER_SECRET='…' \
+npm run waf:orchestrator:runner -- \
+  --tenant-ids-file ./staging-tenant-ids.json \
+  --out ./waf-orchestrator-run.json
+```
+
+`--tenant-id` and `--tenant-ids-file` are mutually exclusive. Without signed-worker mode the runner fails closed before opening a Postgres runtime.
+
+### WAF drift runner (externally scheduled)
+
+Operator CLI for scheduled connector/posture drift scans. **Not** a daemon—wire it to cron, a Kubernetes CronJob, CI, or an on-call runbook. Compares stored connector and posture snapshots only; **no outbound WAF/provider calls**.
+
+Developer validation (dev-json store, default when `ASTRANULL_DATABASE_URL` is unset):
+
+```bash
+ASTRANULL_WAF_POSTURE_ENABLED=1 \
+npm run waf:drift:runner -- --tenant-id ten_demo
+```
+
+Scan every tenant with WAF assets (default when tenant scope is omitted):
+
+```bash
+ASTRANULL_WAF_POSTURE_ENABLED=1 \
+npm run waf:drift:runner -- --all-tenants --out ./waf-drift-run.json
+```
+
+Dry run (scope summary only; no drift events or scan results persisted):
+
+```bash
+ASTRANULL_WAF_POSTURE_ENABLED=1 \
+npm run waf:drift:runner -- --tenant-ids-file ./staging-tenant-ids.json --dry-run
+```
+
+API equivalents (dev-json mode; `waf:run` / `waf:read`):
+
+- `POST /v1/waf/drift-scans/run` → `{ scan_result }` for the authenticated tenant
+- `GET /v1/waf/drift-scans/latest` → `{ scan_result }` (or `null` when none yet)
+
+Postgres mode is selected automatically when `ASTRANULL_DATABASE_URL` is set and requires `runtime.services.wafDrift` (returns `503 postgres_route_not_wired` until that adapter is injected). `--tenant-id` and `--tenant-ids-file` are mutually exclusive.
+
+### Notification retry scheduler (always-on or cron-friendly)
+
+Operator scheduler for due notification delivery retries. Processes the latest `provider_retry_scheduled` attempts whose `next_retry_at` is on or before the tick timestamp. **Default delivery mode is metadata-only** (no outbound webhook/email/Slack/Teams I/O). Opt-in provider delivery requires explicit `ASTRANULL_NOTIFICATION_DELIVERY_MODE` configuration and staging evidence before production enablement.
+
+Developer validation (dev-json store, default when `ASTRANULL_DATABASE_URL` is unset):
+
+```bash
+npm run notification:retry:scheduler -- --once --tenant-id ten_demo
+```
+
+Long-running loop (sleep between ticks; exits on `SIGINT`/`SIGTERM`):
+
+```bash
+ASTRANULL_NOTIFICATION_RETRY_INTERVAL_MS=60000 \
+npm run notification:retry:scheduler -- --all-tenants
+```
+
+Cron-friendly single tick with metadata-only summary:
+
+```bash
+ASTRANULL_DATABASE_URL='postgresql://user:pass@host:5432/astranull' \
+npm run notification:retry:scheduler -- \
+  --once \
+  --tenant-ids-file ./staging-tenant-ids.json \
+  --out ./notification-retry-scheduler-tick.json
+```
+
+Dry run (summarize due retries without persisting attempts or sending providers):
+
+```bash
+npm run notification:retry:scheduler -- --once --tenant-id ten_demo --dry-run
+```
+
+`--tenant-id` and `--tenant-ids-file` are mutually exclusive. When tenant scope is omitted, the scheduler defaults to `--all-tenants` (every tenant with notification ledger data). Interval defaults to `60000` ms and is bounded `5000`–`300000` ms via `ASTRANULL_NOTIFICATION_RETRY_INTERVAL_MS` or `--interval-ms`. Postgres mode is selected automatically when `ASTRANULL_DATABASE_URL` is set and requires `runtime.services.notifications.processDueNotificationRetries`. Unit coverage: `tests/unit/notification-retry-scheduler.test.mjs`.
+
+### Connector poll runner (externally scheduled)
+
+Operator CLI for scheduled outbound read-only WAF/CDN connector polls. **Not** a daemon—wire it to cron, a Kubernetes CronJob, CI, or an on-call runbook. Polls enabled connectors with vault-backed `secret_id`, bounded concurrency, provider retry/backoff, and metadata-only health updates. Manual `POST /v1/connectors/:id/poll` remains available for on-demand operator or UI ticks.
+
+Developer validation (dev-json store, default when `ASTRANULL_DATABASE_URL` is unset):
+
+```bash
+ASTRANULL_WAF_POSTURE_ENABLED=1 \
+ASTRANULL_SECRET_ENCRYPTION_KEY='<base64-32-byte-key>' \
+npm run connector:poll:runner -- --tenant-id ten_demo
+```
+
+Poll every tenant with outbound-eligible connectors (default when tenant scope is omitted):
+
+```bash
+ASTRANULL_WAF_POSTURE_ENABLED=1 \
+ASTRANULL_SECRET_ENCRYPTION_KEY='<base64-32-byte-key>' \
+npm run connector:poll:runner -- --all-tenants --out ./connector-poll-run.json
+```
+
+Dry run (eligible connector scope only; no outbound provider calls):
+
+```bash
+ASTRANULL_WAF_POSTURE_ENABLED=1 \
+npm run connector:poll:runner -- --tenant-ids-file ./staging-tenant-ids.json --dry-run
+```
+
+Optional bounded parallelism: `--concurrency <n>` or `ASTRANULL_CONNECTOR_POLL_CONCURRENCY` (default `4`). Provider retry attempts: `ASTRANULL_CONNECTOR_POLL_MAX_ATTEMPTS` (default `3`). Postgres mode is selected automatically when `ASTRANULL_DATABASE_URL` is set and requires `runtime.services.wafPosture.pollConnector()`. `--tenant-id` and `--tenant-ids-file` are mutually exclusive.
 
 ### Deployment expectations
 
@@ -262,6 +395,12 @@ Switch to **soc** or **owner** to exercise `/internal/soc/*` from the SOC Consol
 7. **Findings / Evidence** — review correlated verdict and evidence vault entries.
 8. **Reports** — generate report; export JSON, Markdown, or HTML.
 
+### WAF posture and validation plans (developer validation)
+
+1. **WAF Posture** (`#waf-posture`) — coverage, declared assets, validation runs, drift queue, and the **validation-plan operator panel** (list all/scheduled plans; create/execute/cancel safe plans). When Postgres orchestrator is not injected, the panel explains `postgres_waf_orchestrator_unavailable` and disables orchestrator-dependent actions without leaking payloads.
+2. **Manual execute tick** — `POST /v1/waf/validation-plans/:id/execute` from the panel or API (signed-worker mode in Postgres); plan `completed` means all safe jobs delegated, not final posture closure.
+3. **Scheduled production path (open evidence)** — wire `npm run waf:orchestrator:runner` to external schedule (see [WAF orchestrator runner](#waf-orchestrator-runner-externally-scheduled) above). Staging scheduling/execution evidence for the runner remains a release blocker — **not production-ready** until evidenced per [`docs/release-checklist.md`](release-checklist.md).
+
 ### SOC high-scale (developer validation adapter boundary)
 
 1. As **engineer**: submit high-scale request; add authorization pack artifacts (metadata URIs).
@@ -293,7 +432,7 @@ Agent identity file (validation agent): packaged default `/var/lib/astranull/ide
 make verify
 ```
 
-Runs lint, unit tests, integration tests (including security polish), e2e flows, UI smoke, `scripts/safety-check.mjs`, and `scripts/postgres-tenant-query-audit.mjs` using Node directly (no npm on PATH required). Override Node with `make NODE=/path/to/node verify`. Latest local evidence: lint, **1143 unit**, **82 integration**, **2 e2e**, safety-check, tenant-query audit 0 findings (`/opt/homebrew/bin/node`). A green local verify is not production promotion.
+Runs lint, unit tests, integration tests (including security polish), e2e flows, UI smoke, `scripts/safety-check.mjs`, and `scripts/postgres-tenant-query-audit.mjs` using Node directly (no npm on PATH required). Override Node with `make NODE=/path/to/node verify`. Latest local verification: `npm test` 2120 passing; `npm run staging:local:attest` reports `production_ready=true` for local-staging inventory. A green local verify is local production-quality evidence — not customer-facing hosted production promotion. See `npm run staging:local:attest` for the full Docker Compose gate.
 
 Agent update releases require `distribution: { manifest_url, signature_url, artifact_url }` on `POST /v1/agent-updates`; agents polling `GET /v1/agents/:id/update` receive `download` with the same three URLs. In Postgres mode the route family persists through `runtime.services.agentUpdates`; developer validation uses the JSON store. Host apply: `agents/linux/astranull-agent.mjs --download-and-apply-update` (see [`docs/agent/07-agent-lifecycle.md`](agent/07-agent-lifecycle.md)). Production still requires CDN/mirror custody runbooks, unattended daemon restart, and fleet rollout drills.
 

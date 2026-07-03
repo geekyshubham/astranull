@@ -69,7 +69,7 @@ It answers:
 
 **Placement confidence (DET-014, separate field):** `finalizeVerdictIfReady` attaches `verdict.placement_confidence` from `computePlacementConfidence` (observation mode, bound/online agent state, and whether this run produced a correlated `agent_observation`). Correlation `confidence` remains unchanged for backward compatibility. UI and JSON report exports surface `placement_confidence.reason` so customers see evidence-based limits, not generic copy alone.
 
-**Production blockers:** staging validation across host/sidecar/canary/mirror/log modes, Postgres persistence for the verdict payload, customer installation matrix proof.
+**Production blockers:** staging validation across host/sidecar/canary/mirror/log modes, live Postgres acceptance evidence for verdict/report export paths, and customer installation matrix proof.
 
 ## Misplaced agent logic
 

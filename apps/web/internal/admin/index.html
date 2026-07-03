@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Internal Management — AstraNull</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app internal-app">
+    <aside class="sidebar">
+      <div class="brand">AstraNull Staff</div>
+      <div class="context">
+        <label>Staff ID</label>
+        <input id="staffId" value="staff_admin" />
+        <label>Staff role</label>
+        <select id="staffRole">
+          <option value="internal_admin">internal_admin</option>
+          <option value="billing_ops">billing_ops</option>
+          <option value="support_engineer">support_engineer</option>
+          <option value="security_admin">security_admin</option>
+        </select>
+      </div>
+      <nav id="staffNav">
+        <a href="#overview" data-route="overview" class="active">Overview</a>
+        <a href="#signup-queue" data-route="signup-queue">Sign-up queue</a>
+        <a href="#tenants" data-route="tenants">Tenants</a>
+        <a href="#approvals" data-route="approvals">Approval queue</a>
+        <a href="#audit" data-route="audit">Internal audit</a>
+      </nav>
+      <p class="muted staff-note">Staff-only surface. Customer principals are denied on these APIs.</p>
+    </aside>
+    <main class="content">
+      <header class="topbar">
+        <h1 id="staffPageTitle">Internal overview</h1>
+        <span class="badge">Staff management · Developer validation</span>
+      </header>
+      <section id="staffView"></section>
+    </main>
+  </div>
+  <script type="module" src="/internal-admin.js"></script>
+</body>
+</html>

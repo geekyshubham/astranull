@@ -37,13 +37,25 @@ import {
   POSTGRES_RETENTION_SERVICE_METHODS,
   WAF_POSTURE_REPOSITORY_METHODS,
   POSTGRES_WAF_POSTURE_SERVICE_METHODS,
+  WAF_ORCHESTRATOR_REPOSITORY_METHODS,
+  POSTGRES_WAF_ORCHESTRATOR_SERVICE_METHODS,
   REPORT_AUDIT_REPOSITORY_METHODS,
   REPORT_REPOSITORY_METHODS,
   SECRET_VAULT_REPOSITORY_METHODS,
   SERVICE_ACCOUNT_REPOSITORY_METHODS,
   VALIDATION_EVIDENCE_REPOSITORY_METHODS,
+  INTERNAL_MANAGEMENT_REPOSITORY_METHODS,
+  POSTGRES_INTERNAL_MANAGEMENT_SERVICE_METHODS,
 } from '../../src/persistence/postgres/serviceAdapters.mjs';
 import { POSTGRES_EVENTS_SERVICE_METHODS } from '../../src/persistence/postgres/validationServiceAdapters.mjs';
+import {
+  POSTGRES_WAF_COVERAGE_ROLLUP_SERVICE_METHODS,
+  WAF_COVERAGE_ROLLUP_REPOSITORY_METHODS,
+} from '../../src/persistence/postgres/wafCoverageRollupServiceAdapters.mjs';
+import {
+  POSTGRES_WAF_DRIFT_SERVICE_METHODS,
+  WAF_DRIFT_REPOSITORY_METHODS,
+} from '../../src/persistence/postgres/wafDriftServiceAdapters.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -181,7 +193,27 @@ function createHarness(overrides = {}) {
       }
       if (key === 'wafPosture') {
         const repo = {};
-        for (const method of WAF_POSTURE_REPOSITORY_METHODS) {
+        for (const method of [
+          ...new Set([
+            ...WAF_POSTURE_REPOSITORY_METHODS,
+            ...WAF_DRIFT_REPOSITORY_METHODS,
+            ...WAF_COVERAGE_ROLLUP_REPOSITORY_METHODS,
+          ]),
+        ]) {
+          repo[method] = async () => null;
+        }
+        return repo;
+      }
+      if (key === 'wafOrchestrator') {
+        const repo = {};
+        for (const method of WAF_ORCHESTRATOR_REPOSITORY_METHODS) {
+          repo[method] = async () => null;
+        }
+        return repo;
+      }
+      if (key === 'internalManagement') {
+        const repo = {};
+        for (const method of INTERNAL_MANAGEMENT_REPOSITORY_METHODS) {
           repo[method] = async () => null;
         }
         return repo;
@@ -242,6 +274,8 @@ describe('postgres runtime adapter', () => {
       'productionReleaseEvidence',
       'retention',
       'wafPosture',
+      'wafOrchestrator',
+      'internalManagement',
     ]);
     assert.equal(getDefaultPostgresMigrationsDir(), path.join(ROOT, 'db', 'migrations'));
   });
@@ -346,6 +380,26 @@ describe('postgres runtime adapter', () => {
     assert.ok(runtime.services.wafPosture);
     for (const method of POSTGRES_WAF_POSTURE_SERVICE_METHODS) {
       assert.equal(typeof runtime.services.wafPosture[method], 'function', method);
+    }
+    assert.ok(runtime.services.wafOrchestrator);
+    for (const method of POSTGRES_WAF_ORCHESTRATOR_SERVICE_METHODS) {
+      assert.equal(typeof runtime.services.wafOrchestrator[method], 'function', method);
+    }
+    assert.ok(runtime.services.internalManagement);
+    assert.equal(runtime.services.signupIntake, runtime.services.internalManagement);
+    for (const method of POSTGRES_INTERNAL_MANAGEMENT_SERVICE_METHODS) {
+      assert.equal(typeof runtime.services.internalManagement[method], 'function', method);
+    }
+    assert.ok(runtime.services.supplyChainRisk);
+    assert.equal(typeof runtime.services.supplyChainRisk.getPhaseAuthorizations, 'function');
+    assert.equal(typeof runtime.services.supplyChainRisk.submitPhaseAuthorization, 'function');
+    assert.ok(runtime.services.wafDrift);
+    for (const method of POSTGRES_WAF_DRIFT_SERVICE_METHODS) {
+      assert.equal(typeof runtime.services.wafDrift[method], 'function', method);
+    }
+    assert.ok(runtime.services.wafCoverageRollup);
+    for (const method of POSTGRES_WAF_COVERAGE_ROLLUP_SERVICE_METHODS) {
+      assert.equal(typeof runtime.services.wafCoverageRollup[method], 'function', method);
     }
     await runtime.close();
   });
@@ -481,5 +535,20 @@ describe('postgres runtime adapter', () => {
       RUNTIME_SOURCE,
       /createPostgresHighScaleServices\(\s*repositories,\s*\{[\s\S]*?notifications:\s*notificationServices[\s\S]*?\}\s*\)/,
     );
+  });
+
+  it('wires validation testRuns into WAF orchestrator services', () => {
+    assert.match(
+      RUNTIME_SOURCE,
+      /createPostgresWafOrchestratorServices\(\s*repositories,\s*\{[\s\S]*?testRuns:\s*validationServices\.testRuns/,
+    );
+  });
+
+  it('exposes validation testRuns on runtime services for WAF orchestrator delegation', async () => {
+    const { deps } = createHarness();
+    const runtime = await createPostgresRuntime({}, deps);
+    assert.equal(typeof runtime.services.testRuns.startTestRun, 'function');
+    assert.equal(typeof runtime.services.wafOrchestrator.executeValidationPlan, 'function');
+    await runtime.close();
   });
 });

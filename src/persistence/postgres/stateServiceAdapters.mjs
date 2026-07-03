@@ -3,6 +3,11 @@ import {
   authorizationPackComplete,
   distinctSocApprovalCount,
 } from '../../lib/highScalePolicy.mjs';
+import {
+  placementScoreFromDiagnostics,
+  publicPlacementDiagnosticsPayload,
+  summarizePlacementDiagnostics,
+} from '../../lib/placementDiagnostics.mjs';
 
 /** Evidence older than this window earns no freshness credit. */
 const RECENT_EVIDENCE_WINDOW_DAYS = 30;
@@ -263,41 +268,6 @@ function diagnoseGroup(group, agents, unboundOnlineIds, eventsByRun, runs, tenan
   };
 }
 
-function summarizePlacementDiagnostics(diagnostics) {
-  const groups = diagnostics?.groups ?? [];
-  const counts = {
-    proven: 0,
-    needs_baseline: 0,
-    missing_agent: 0,
-    misplaced_risk: 0,
-  };
-  for (const g of groups) {
-    if (counts[g.status] !== undefined) counts[g.status] += 1;
-  }
-  const total = groups.length;
-  const summary =
-    total === 0
-      ? 'No declared target groups for placement diagnostics.'
-      : `Placement diagnostics: ${counts.proven} proven, ${counts.needs_baseline} need baseline, ${counts.missing_agent} missing agent, ${counts.misplaced_risk} misplaced risk (of ${total} group(s)).`;
-
-  return {
-    total_groups: total,
-    proven: counts.proven,
-    needs_baseline: counts.needs_baseline,
-    missing_agent: counts.missing_agent,
-    misplaced_risk: counts.misplaced_risk,
-    unbound_online_agent_count: (diagnostics?.unbound_online_agent_ids ?? []).length,
-    summary,
-  };
-}
-
-function placementScoreFromDiagnostics(diagnostics, maxScore) {
-  const summary = summarizePlacementDiagnostics(diagnostics);
-  if (summary.total_groups === 0) return null;
-  const ratio = summary.proven / summary.total_groups;
-  return Math.round(Math.min(maxScore, ratio * maxScore));
-}
-
 function hasAgentObservationEvidence(eventsByRun, tenantId) {
   for (const events of eventsByRun.values()) {
     for (const e of events) {
@@ -429,7 +399,7 @@ function computeReadinessSummary({
     label: 'Agent placement & health',
     score: placementScore,
     detail: placementDetail,
-    placement_diagnostics: placementSummary,
+    placement_diagnostics: publicPlacementDiagnosticsPayload(placementDiagnostics),
   });
 
   const verdicts = [...verdictByRun.values()];

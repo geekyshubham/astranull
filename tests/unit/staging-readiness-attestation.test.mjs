@@ -243,14 +243,26 @@ describe('staging readiness attestation', () => {
     assert.ok(attestation.blocker_summary.some((line) => /Unknown evidence kind/.test(line)));
   });
 
-  it('validate-only exits non-zero when not production ready', async () => {
+  it('validate-only exits non-zero when required evidence inventory is incomplete', async () => {
     const dir = tempDir();
     const input = path.join(dir, 'input.json');
     writeJson(input, {
       records: [{ kind: 'third_party_security_review', evidence: SECURITY_REVIEW }],
     });
-    const code = await main(['--input', input, '--validate-only', '--release-id', 'rel_gate']);
+
+    const errors = [];
+    const originalError = console.error;
+    console.error = (...args) => errors.push(args.join(' '));
+    let code;
+    try {
+      code = await main(['--input', input, '--validate-only', '--release-id', 'rel_gate']);
+    } finally {
+      console.error = originalError;
+    }
+
     assert.equal(code, 1);
+    assert.match(errors.join('\n'), /evidence inventory incomplete/);
+    assert.doesNotMatch(errors.join('\n'), /not production ready/);
   });
 
   it('writes attestation output without echoing secrets from input extras', async () => {

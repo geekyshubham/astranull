@@ -61,9 +61,20 @@ export function parseUrl(req) {
   return new URL(req.url ?? '/', `http://${host}`);
 }
 
+const STATIC_ROUTE_ALIASES = {
+  '/': '/landing.html',
+  '/app': '/index.html',
+  '/signup': '/signup.html',
+  '/internal/admin': '/internal/admin/index.html',
+};
+
 export async function serveStatic(req, res, url) {
   let rel = decodeURIComponent(url.pathname);
-  if (rel === '/') rel = '/index.html';
+  if (STATIC_ROUTE_ALIASES[rel]) {
+    rel = STATIC_ROUTE_ALIASES[rel];
+  } else if (rel === '/app/') {
+    rel = '/index.html';
+  }
   if (rel === '/favicon.ico') {
     res.writeHead(204);
     res.end();

@@ -1,6 +1,6 @@
 import { withTenantContext } from './tenantContext.mjs';
 
-const ACTION_ITEM_COLUMNS = `id, tenant_id, category, title, asset_display, owner, severity,
+const ACTION_ITEM_COLUMNS = `id, tenant_id, category, title, asset_display, waf_asset_id, owner, severity,
   evidence_json, recommended_solution, retest_url, status, primary_reason, cve_pipeline_item_id,
   created_at, updated_at`;
 
@@ -35,9 +35,27 @@ function buildEvidenceJson(item = {}) {
   };
 }
 
+function deriveWafAssetId(item, evidenceJson) {
+  if (typeof item.waf_asset_id === 'string' && item.waf_asset_id.trim()) {
+    return item.waf_asset_id.trim();
+  }
+  if (typeof item.asset?.id === 'string' && item.asset.id.trim()) {
+    return item.asset.id.trim();
+  }
+  if (typeof evidenceJson.asset?.id === 'string' && evidenceJson.asset.id.trim()) {
+    return evidenceJson.asset.id.trim();
+  }
+  const dedupeKey = item.dedupe_key ?? evidenceJson.dedupe_key;
+  if (typeof dedupeKey === 'string' && dedupeKey.includes(':')) {
+    return dedupeKey.split(':')[0];
+  }
+  return null;
+}
+
 export function mapActionItemRow(row) {
   if (!row) return null;
   const evidenceJson = parseJsonObject(row.evidence_json);
+  const wafAssetId = row.waf_asset_id ?? evidenceJson.asset?.id ?? null;
   return {
     action_item_id: row.id,
     id: row.id,
@@ -45,10 +63,11 @@ export function mapActionItemRow(row) {
     category: row.category,
     title: row.title,
     asset: evidenceJson.asset ?? {
-      id: null,
+      id: wafAssetId,
       display: row.asset_display ?? 'declared asset',
     },
     asset_display: row.asset_display ?? null,
+    waf_asset_id: wafAssetId,
     owner: row.owner ?? 'security-operations',
     severity: row.severity ?? 'medium',
     evidence: {
@@ -97,18 +116,18 @@ export function createActionItemRepository(pool) {
       });
     },
 
-    async findOpenActionItemByDedupe(ctx, assetDisplay, primaryReason) {
+    async findOpenActionItemByDedupe(ctx, wafAssetId, primaryReason) {
       const tenantId = ctx.tenantId;
       return withTenantContext(pool, tenantId, async (client) => {
         const { rows } = await client.query(
           `SELECT ${ACTION_ITEM_COLUMNS}
            FROM waf_action_items
            WHERE tenant_id = $1
-             AND asset_display = $2
+             AND waf_asset_id = $2
              AND primary_reason = $3
              AND status NOT IN ('resolved', 'accepted_risk')
            LIMIT 1`,
-          [tenantId, assetDisplay, primaryReason],
+          [tenantId, wafAssetId, primaryReason],
         );
         return mapActionItemRow(rows[0] ?? null);
       });
@@ -123,16 +142,17 @@ export function createActionItemRepository(pool) {
       const primaryReason = item.primary_reason
         ?? item.dedupe_key?.split(':').slice(1).join(':')
         ?? 'waf_coverage';
+      const wafAssetId = deriveWafAssetId(item, evidenceJson);
 
       return withTenantContext(pool, tenantId, async (client) => {
         const { rows } = await client.query(
           `INSERT INTO waf_action_items (
-             id, tenant_id, category, title, asset_display, owner, severity, evidence_json,
+             id, tenant_id, category, title, asset_display, waf_asset_id, owner, severity, evidence_json,
              recommended_solution, retest_url, status, primary_reason, cve_pipeline_item_id,
              created_at, updated_at
            )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14::timestamptz, $15::timestamptz)
-           ON CONFLICT (tenant_id, asset_display, primary_reason) DO UPDATE
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13, $14, $15::timestamptz, $16::timestamptz)
+           ON CONFLICT (tenant_id, waf_asset_id, primary_reason) DO UPDATE
            SET title = EXCLUDED.title,
                owner = EXCLUDED.owner,
                severity = EXCLUDED.severity,
@@ -148,6 +168,7 @@ export function createActionItemRepository(pool) {
             item.category,
             item.title,
             assetDisplay,
+            wafAssetId,
             item.owner ?? 'security-operations',
             item.severity ?? 'medium',
             JSON.stringify(evidenceJson),

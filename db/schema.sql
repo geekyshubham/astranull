@@ -41,6 +41,101 @@ CREATE TABLE users (
   UNIQUE (tenant_id, email)
 );
 
+CREATE TABLE signup_requests (
+  id TEXT PRIMARY KEY,
+  organization_name TEXT NOT NULL,
+  contact_email TEXT NOT NULL,
+  contact_name TEXT NOT NULL,
+  email_domain TEXT NOT NULL,
+  requested_plan TEXT NOT NULL,
+  intended_use TEXT NOT NULL,
+  region TEXT NOT NULL,
+  high_scale_interest BOOLEAN NOT NULL DEFAULT FALSE,
+  state TEXT NOT NULL,
+  reviewer_staff_id TEXT,
+  decision_reason TEXT,
+  customer_notice TEXT,
+  provisioned_tenant_id TEXT REFERENCES tenants(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  decided_at TIMESTAMPTZ
+);
+
+CREATE TABLE staff_users (
+  id TEXT PRIMARY KEY,
+  email TEXT NOT NULL UNIQUE,
+  display_name TEXT,
+  staff_roles TEXT[] NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'active',
+  last_login_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE tenant_accounts (
+  tenant_id TEXT PRIMARY KEY REFERENCES tenants(id),
+  legal_name TEXT,
+  support_owner TEXT,
+  region TEXT NOT NULL DEFAULT 'us',
+  lifecycle_state TEXT NOT NULL DEFAULT 'active',
+  contract_reference TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ
+);
+
+CREATE TABLE tenant_subscriptions (
+  tenant_id TEXT PRIMARY KEY REFERENCES tenants(id),
+  plan_id TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  billing_provider_ref TEXT,
+  effective_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  renewal_at TIMESTAMPTZ,
+  limits_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  feature_entitlements_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ
+);
+
+CREATE TABLE entitlement_grants (
+  tenant_id TEXT NOT NULL REFERENCES tenants(id),
+  feature TEXT NOT NULL,
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  limit_value JSONB,
+  source TEXT NOT NULL DEFAULT 'staff_override',
+  expires_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ,
+  PRIMARY KEY (tenant_id, feature)
+);
+
+CREATE TABLE internal_approval_requests (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT REFERENCES tenants(id),
+  kind TEXT NOT NULL,
+  subject_ref TEXT,
+  state TEXT NOT NULL DEFAULT 'submitted',
+  assigned_to TEXT,
+  decision TEXT,
+  reason TEXT,
+  evidence_refs TEXT[] NOT NULL DEFAULT '{}',
+  reviewer_staff_id TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  decided_at TIMESTAMPTZ
+);
+
+CREATE TABLE internal_audit_log (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT REFERENCES tenants(id),
+  staff_id TEXT,
+  staff_role TEXT,
+  action TEXT NOT NULL,
+  resource_type TEXT,
+  resource_id TEXT,
+  reason TEXT,
+  metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE target_groups (
   id TEXT PRIMARY KEY,
   tenant_id TEXT NOT NULL REFERENCES tenants(id),
@@ -278,8 +373,21 @@ CREATE TABLE authorization_artifacts (
   reviewed_by TEXT,
   reviewed_at TIMESTAMPTZ,
   metadata_json JSONB DEFAULT '{}',
+  content_sha256 TEXT,
+  custody_id TEXT,
+  custody_uri TEXT,
+  content_type TEXT,
+  filename_redacted TEXT,
+  upload_envelope TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE INDEX idx_authorization_artifacts_tenant_request_created
+  ON authorization_artifacts(tenant_id, high_scale_request_id, created_at);
+
+CREATE INDEX idx_authorization_artifacts_tenant_custody
+  ON authorization_artifacts(tenant_id, custody_id)
+  WHERE custody_id IS NOT NULL;
 
 CREATE TABLE soc_notes (
   id TEXT PRIMARY KEY,
@@ -430,6 +538,12 @@ CREATE TABLE notification_delivery_attempts (
   destination_preview TEXT,
   status TEXT NOT NULL,
   reason TEXT,
+  attempt_number INT,
+  max_attempts INT,
+  next_retry_at TIMESTAMPTZ,
+  provider_error TEXT,
+  exhausted BOOLEAN,
+  provider_status INT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   attempted_at TIMESTAMPTZ
 );
@@ -489,6 +603,10 @@ CREATE TABLE waf_assets (
   traffic_tier TEXT NOT NULL DEFAULT 'unknown',
   compliance_tags TEXT[] NOT NULL DEFAULT '{}',
   owner_hint TEXT,
+  region_code TEXT,
+  geography_label TEXT,
+  entity_id TEXT,
+  owasp_exposure_tags TEXT[] NOT NULL DEFAULT '{}',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -544,10 +662,43 @@ CREATE TABLE waf_posture_snapshots (
   detected_product TEXT,
   coverage_required BOOLEAN NOT NULL DEFAULT TRUE,
   risk_score INT NOT NULL DEFAULT 0,
+  risk_factors_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  priority_band TEXT,
+  recommended_action TEXT,
+  scenario_pass_rate NUMERIC,
+  control_bypass_status TEXT,
   confidence NUMERIC NOT NULL DEFAULT 0,
   source_mix_json JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   is_current BOOLEAN NOT NULL DEFAULT FALSE
+);
+
+CREATE TABLE waf_coverage_daily_rollups (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL REFERENCES tenants(id),
+  rollup_date DATE NOT NULL,
+  total_assets INT NOT NULL DEFAULT 0,
+  protected INT NOT NULL DEFAULT 0,
+  underprotected INT NOT NULL DEFAULT 0,
+  unprotected INT NOT NULL DEFAULT 0,
+  unknown INT NOT NULL DEFAULT 0,
+  excluded INT NOT NULL DEFAULT 0,
+  coverage_ratio NUMERIC NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE waf_scenario_intakes (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL REFERENCES tenants(id),
+  pattern_title TEXT NOT NULL,
+  advisory_refs TEXT[] NOT NULL DEFAULT '{}',
+  proposed_scenario_family TEXT,
+  risk_class TEXT NOT NULL DEFAULT 'metadata_only',
+  intake_stage TEXT NOT NULL DEFAULT 'intake',
+  notes TEXT,
+  threat_summary TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE waf_baselines (
@@ -558,8 +709,66 @@ CREATE TABLE waf_baselines (
   baseline_json JSONB NOT NULL DEFAULT '{}'::jsonb,
   approved_by TEXT,
   approved_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE waf_validation_plans (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL REFERENCES tenants(id),
+  target_group_id TEXT NOT NULL,
+  mode TEXT NOT NULL DEFAULT 'manual',
+  schedule_interval TEXT,
+  custom_cron_expression TEXT,
+  scenarios_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  max_concurrent INT NOT NULL DEFAULT 1,
+  timeout_ms INT NOT NULL DEFAULT 60000,
+  state TEXT NOT NULL DEFAULT 'draft',
+  delegated_jobs_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  executed_at TIMESTAMPTZ,
+  cancelled_at TIMESTAMPTZ,
+  execution_lock_token TEXT,
+  execution_lock_expires_at TIMESTAMPTZ
+);
+
+CREATE TABLE waf_baseline_approvals (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL REFERENCES tenants(id),
+  baseline_id TEXT NOT NULL,
+  waf_asset_id TEXT NOT NULL,
+  approver TEXT NOT NULL,
+  approval_notes TEXT NOT NULL,
+  approved_at TIMESTAMPTZ NOT NULL,
+  fingerprint_summary_json JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE TABLE waf_retest_requests (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL REFERENCES tenants(id),
+  drift_event_id TEXT NOT NULL,
+  waf_asset_id TEXT NOT NULL,
+  retest_plan_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  requested_by TEXT NOT NULL,
+  priority TEXT NOT NULL DEFAULT 'normal',
+  status TEXT NOT NULL DEFAULT 'requested',
+  verdict TEXT,
+  verdict_reason TEXT,
+  delegated_jobs_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  completed_at TIMESTAMPTZ,
+  execution_lock_token TEXT,
+  execution_lock_expires_at TIMESTAMPTZ
+);
+
+COMMENT ON COLUMN waf_validation_plans.delegated_jobs_json IS
+  'Delegated safe test runs. Each entry may include status pending_start (reserved before startTestRun), starting (startTestRun succeeded, finalize pending), delegated (persisted with test_run_id), or failed (reconciled or start failure). Legacy entries without status are treated as delegated when test_run_id is present.';
+
+COMMENT ON COLUMN waf_retest_requests.delegated_jobs_json IS
+  'Delegated retest safe test runs. Each entry may include status pending_start (reserved before startTestRun), starting (startTestRun succeeded, finalize pending), delegated (persisted with test_run_id), or failed (reconciled or start failure). Legacy entries without status are treated as delegated when test_run_id is present.';
 
 CREATE TABLE waf_drift_events (
   id TEXT PRIMARY KEY,
@@ -574,6 +783,20 @@ CREATE TABLE waf_drift_events (
   finding_id TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   resolved_at TIMESTAMPTZ
+);
+
+CREATE TABLE waf_drift_scan_results (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL REFERENCES tenants(id),
+  scan_type TEXT NOT NULL,
+  assets_scanned INT NOT NULL DEFAULT 0,
+  drifts_detected INT NOT NULL DEFAULT 0,
+  scan_duration_ms INT NOT NULL DEFAULT 0,
+  completed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  state TEXT NOT NULL DEFAULT 'completed',
+  assets_with_connector_snapshots INT,
+  drift_check_types TEXT[] NOT NULL DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE waf_connectors (
@@ -683,6 +906,7 @@ CREATE TABLE waf_action_items (
   category TEXT NOT NULL,
   title TEXT NOT NULL,
   asset_display TEXT,
+  waf_asset_id TEXT,
   owner TEXT,
   severity TEXT NOT NULL DEFAULT 'medium',
   evidence_json JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -742,12 +966,19 @@ ALTER TABLE findings ADD CONSTRAINT findings_tenant_id_id_key UNIQUE (tenant_id,
 ALTER TABLE waf_assets ADD CONSTRAINT waf_assets_tenant_id_id_key UNIQUE (tenant_id, id);
 ALTER TABLE waf_validation_runs ADD CONSTRAINT waf_validation_runs_tenant_id_id_key UNIQUE (tenant_id, id);
 ALTER TABLE waf_baselines ADD CONSTRAINT waf_baselines_tenant_id_id_key UNIQUE (tenant_id, id);
+ALTER TABLE waf_validation_plans ADD CONSTRAINT waf_validation_plans_tenant_id_id_key UNIQUE (tenant_id, id);
+ALTER TABLE waf_baseline_approvals ADD CONSTRAINT waf_baseline_approvals_tenant_id_id_key UNIQUE (tenant_id, id);
+ALTER TABLE waf_retest_requests ADD CONSTRAINT waf_retest_requests_tenant_id_id_key UNIQUE (tenant_id, id);
+ALTER TABLE waf_drift_events ADD CONSTRAINT waf_drift_events_tenant_id_id_key UNIQUE (tenant_id, id);
+ALTER TABLE waf_drift_scan_results ADD CONSTRAINT waf_drift_scan_results_tenant_id_id_key UNIQUE (tenant_id, id);
 ALTER TABLE waf_connectors ADD CONSTRAINT waf_connectors_tenant_id_id_key UNIQUE (tenant_id, id);
 ALTER TABLE cve_pipeline_items ADD CONSTRAINT cve_pipeline_items_tenant_id_id_key UNIQUE (tenant_id, id);
 ALTER TABLE cve_asset_matches ADD CONSTRAINT cve_asset_matches_tenant_id_id_key UNIQUE (tenant_id, id);
 ALTER TABLE discovery_entities ADD CONSTRAINT discovery_entities_tenant_id_id_key UNIQUE (tenant_id, id);
 ALTER TABLE supply_chain_risks ADD CONSTRAINT supply_chain_risks_tenant_id_id_key UNIQUE (tenant_id, id);
 ALTER TABLE waf_action_items ADD CONSTRAINT waf_action_items_tenant_id_id_key UNIQUE (tenant_id, id);
+ALTER TABLE waf_coverage_daily_rollups ADD CONSTRAINT waf_coverage_daily_rollups_tenant_id_id_key UNIQUE (tenant_id, id);
+ALTER TABLE waf_scenario_intakes ADD CONSTRAINT waf_scenario_intakes_tenant_id_id_key UNIQUE (tenant_id, id);
 
 ALTER TABLE target_groups ADD CONSTRAINT fk_target_groups_environment_tenant
   FOREIGN KEY (tenant_id, environment_id) REFERENCES environments (tenant_id, id);
@@ -833,6 +1064,8 @@ ALTER TABLE waf_assets ADD CONSTRAINT fk_waf_assets_target_tenant
   FOREIGN KEY (tenant_id, target_id) REFERENCES targets (tenant_id, id);
 ALTER TABLE waf_assets ADD CONSTRAINT fk_waf_assets_environment_tenant
   FOREIGN KEY (tenant_id, environment_id) REFERENCES environments (tenant_id, id);
+ALTER TABLE waf_assets ADD CONSTRAINT fk_waf_assets_entity_tenant
+  FOREIGN KEY (tenant_id, entity_id) REFERENCES discovery_entities (tenant_id, id);
 ALTER TABLE waf_fingerprints ADD CONSTRAINT fk_waf_fingerprints_waf_asset_tenant
   FOREIGN KEY (tenant_id, waf_asset_id) REFERENCES waf_assets (tenant_id, id);
 ALTER TABLE waf_fingerprints ADD CONSTRAINT fk_waf_fingerprints_test_run_tenant
@@ -846,6 +1079,16 @@ ALTER TABLE waf_scenario_results ADD CONSTRAINT fk_waf_scenario_results_waf_vali
 ALTER TABLE waf_posture_snapshots ADD CONSTRAINT fk_waf_posture_snapshots_waf_asset_tenant
   FOREIGN KEY (tenant_id, waf_asset_id) REFERENCES waf_assets (tenant_id, id);
 ALTER TABLE waf_baselines ADD CONSTRAINT fk_waf_baselines_waf_asset_tenant
+  FOREIGN KEY (tenant_id, waf_asset_id) REFERENCES waf_assets (tenant_id, id);
+ALTER TABLE waf_validation_plans ADD CONSTRAINT fk_waf_validation_plans_target_group_tenant
+  FOREIGN KEY (tenant_id, target_group_id) REFERENCES target_groups (tenant_id, id);
+ALTER TABLE waf_baseline_approvals ADD CONSTRAINT fk_waf_baseline_approvals_baseline_tenant
+  FOREIGN KEY (tenant_id, baseline_id) REFERENCES waf_baselines (tenant_id, id);
+ALTER TABLE waf_baseline_approvals ADD CONSTRAINT fk_waf_baseline_approvals_waf_asset_tenant
+  FOREIGN KEY (tenant_id, waf_asset_id) REFERENCES waf_assets (tenant_id, id);
+ALTER TABLE waf_retest_requests ADD CONSTRAINT fk_waf_retest_requests_drift_event_tenant
+  FOREIGN KEY (tenant_id, drift_event_id) REFERENCES waf_drift_events (tenant_id, id);
+ALTER TABLE waf_retest_requests ADD CONSTRAINT fk_waf_retest_requests_waf_asset_tenant
   FOREIGN KEY (tenant_id, waf_asset_id) REFERENCES waf_assets (tenant_id, id);
 ALTER TABLE waf_drift_events ADD CONSTRAINT fk_waf_drift_events_waf_asset_tenant
   FOREIGN KEY (tenant_id, waf_asset_id) REFERENCES waf_assets (tenant_id, id);
@@ -869,8 +1112,16 @@ ALTER TABLE waf_rule_recommendations ADD CONSTRAINT fk_waf_rule_recommendations_
   FOREIGN KEY (tenant_id, cve_asset_match_id) REFERENCES cve_asset_matches (tenant_id, id);
 ALTER TABLE waf_action_items ADD CONSTRAINT fk_waf_action_items_cve_pipeline_item_tenant
   FOREIGN KEY (tenant_id, cve_pipeline_item_id) REFERENCES cve_pipeline_items (tenant_id, id);
+ALTER TABLE waf_action_items ADD CONSTRAINT fk_waf_action_items_waf_asset_tenant
+  FOREIGN KEY (tenant_id, waf_asset_id) REFERENCES waf_assets (tenant_id, id);
 
 CREATE INDEX idx_environments_tenant ON environments(tenant_id);
+CREATE UNIQUE INDEX uniq_signup_requests_active_domain ON signup_requests(email_domain) WHERE state <> 'rejected';
+CREATE UNIQUE INDEX uniq_signup_requests_active_org ON signup_requests(lower(organization_name)) WHERE state <> 'rejected';
+CREATE INDEX idx_signup_requests_state_created ON signup_requests(state, created_at DESC);
+CREATE INDEX idx_internal_approval_requests_queue ON internal_approval_requests(state, kind, created_at DESC);
+CREATE INDEX idx_internal_audit_log_tenant_created ON internal_audit_log(tenant_id, created_at DESC);
+CREATE INDEX idx_internal_audit_log_staff_created ON internal_audit_log(staff_id, created_at DESC);
 CREATE INDEX idx_target_groups_tenant ON target_groups(tenant_id);
 CREATE INDEX idx_targets_tenant_group ON targets(tenant_id, target_group_id);
 CREATE INDEX idx_agents_tenant_heartbeat ON agents(tenant_id, last_heartbeat_at);
@@ -911,6 +1162,15 @@ CREATE INDEX idx_external_asset_candidates_approval_queue ON external_asset_cand
 CREATE UNIQUE INDEX uniq_waf_posture_snapshot_current ON waf_posture_snapshots(tenant_id, waf_asset_id) WHERE is_current = TRUE;
 CREATE INDEX idx_waf_posture_snapshots_dashboard ON waf_posture_snapshots(tenant_id, status, created_at DESC);
 CREATE INDEX idx_waf_drift_events_queue ON waf_drift_events(tenant_id, drift_type, status, created_at DESC);
+CREATE INDEX idx_waf_drift_scan_results_latest ON waf_drift_scan_results(tenant_id, completed_at DESC);
+CREATE UNIQUE INDEX uniq_waf_coverage_daily_rollups_tenant_date ON waf_coverage_daily_rollups(tenant_id, rollup_date);
+CREATE INDEX idx_waf_coverage_daily_rollups_tenant_date ON waf_coverage_daily_rollups(tenant_id, rollup_date DESC);
+CREATE INDEX idx_waf_validation_plans_tenant_state ON waf_validation_plans(tenant_id, state, created_at DESC);
+CREATE INDEX idx_waf_validation_plans_scheduled ON waf_validation_plans(tenant_id, created_at DESC) WHERE state = 'scheduled';
+CREATE INDEX idx_waf_retest_requests_drift ON waf_retest_requests(tenant_id, drift_event_id, created_at DESC);
+CREATE INDEX idx_waf_validation_plans_execution_lock ON waf_validation_plans(tenant_id, execution_lock_expires_at) WHERE execution_lock_token IS NOT NULL;
+CREATE INDEX idx_waf_retest_requests_execution_lock ON waf_retest_requests(tenant_id, execution_lock_expires_at) WHERE execution_lock_token IS NOT NULL;
+CREATE INDEX idx_waf_baseline_approvals_baseline ON waf_baseline_approvals(tenant_id, baseline_id, created_at DESC);
 CREATE INDEX idx_waf_connector_snapshots_history ON waf_connector_snapshots(tenant_id, connector_id, provider, observed_at DESC);
 CREATE INDEX idx_cve_pipeline_items_lookup ON cve_pipeline_items(tenant_id, cve_id);
 CREATE UNIQUE INDEX uniq_cve_asset_matches_dedupe ON cve_asset_matches(tenant_id, cve_pipeline_item_id, waf_asset_id);
@@ -918,7 +1178,7 @@ CREATE INDEX idx_supply_chain_risks_lookup ON supply_chain_risks(tenant_id, stat
 CREATE INDEX idx_waf_action_items_status ON waf_action_items(tenant_id, status, severity);
 CREATE INDEX idx_discovery_entities_lookup ON discovery_entities(tenant_id, entity_type);
 CREATE UNIQUE INDEX uniq_supply_chain_risks_dedupe ON supply_chain_risks(tenant_id, hostname, exposure_type);
-CREATE UNIQUE INDEX uniq_waf_action_items_dedupe ON waf_action_items(tenant_id, asset_display, primary_reason);
+CREATE UNIQUE INDEX uniq_waf_action_items_dedupe ON waf_action_items(tenant_id, waf_asset_id, primary_reason);
 
 -- Row level security: app code must set app.tenant_id via set_config inside each transaction
 -- once the Postgres adapter exists. Empty/unset setting denies tenant-scoped rows (fail closed).
@@ -930,6 +1190,16 @@ ALTER TABLE environments ENABLE ROW LEVEL SECURITY;
 ALTER TABLE environments FORCE ROW LEVEL SECURITY;
 ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE users FORCE ROW LEVEL SECURITY;
+ALTER TABLE tenant_accounts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tenant_accounts FORCE ROW LEVEL SECURITY;
+ALTER TABLE tenant_subscriptions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tenant_subscriptions FORCE ROW LEVEL SECURITY;
+ALTER TABLE entitlement_grants ENABLE ROW LEVEL SECURITY;
+ALTER TABLE entitlement_grants FORCE ROW LEVEL SECURITY;
+ALTER TABLE internal_approval_requests ENABLE ROW LEVEL SECURITY;
+ALTER TABLE internal_approval_requests FORCE ROW LEVEL SECURITY;
+ALTER TABLE internal_audit_log ENABLE ROW LEVEL SECURITY;
+ALTER TABLE internal_audit_log FORCE ROW LEVEL SECURITY;
 ALTER TABLE target_groups ENABLE ROW LEVEL SECURITY;
 ALTER TABLE target_groups FORCE ROW LEVEL SECURITY;
 ALTER TABLE targets ENABLE ROW LEVEL SECURITY;
@@ -1000,8 +1270,16 @@ ALTER TABLE waf_posture_snapshots ENABLE ROW LEVEL SECURITY;
 ALTER TABLE waf_posture_snapshots FORCE ROW LEVEL SECURITY;
 ALTER TABLE waf_baselines ENABLE ROW LEVEL SECURITY;
 ALTER TABLE waf_baselines FORCE ROW LEVEL SECURITY;
+ALTER TABLE waf_validation_plans ENABLE ROW LEVEL SECURITY;
+ALTER TABLE waf_validation_plans FORCE ROW LEVEL SECURITY;
+ALTER TABLE waf_baseline_approvals ENABLE ROW LEVEL SECURITY;
+ALTER TABLE waf_baseline_approvals FORCE ROW LEVEL SECURITY;
+ALTER TABLE waf_retest_requests ENABLE ROW LEVEL SECURITY;
+ALTER TABLE waf_retest_requests FORCE ROW LEVEL SECURITY;
 ALTER TABLE waf_drift_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE waf_drift_events FORCE ROW LEVEL SECURITY;
+ALTER TABLE waf_drift_scan_results ENABLE ROW LEVEL SECURITY;
+ALTER TABLE waf_drift_scan_results FORCE ROW LEVEL SECURITY;
 ALTER TABLE waf_connectors ENABLE ROW LEVEL SECURITY;
 ALTER TABLE waf_connectors FORCE ROW LEVEL SECURITY;
 ALTER TABLE waf_connector_snapshots ENABLE ROW LEVEL SECURITY;
@@ -1018,6 +1296,8 @@ ALTER TABLE supply_chain_risks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE supply_chain_risks FORCE ROW LEVEL SECURITY;
 ALTER TABLE waf_action_items ENABLE ROW LEVEL SECURITY;
 ALTER TABLE waf_action_items FORCE ROW LEVEL SECURITY;
+ALTER TABLE waf_coverage_daily_rollups ENABLE ROW LEVEL SECURITY;
+ALTER TABLE waf_coverage_daily_rollups FORCE ROW LEVEL SECURITY;
 
 CREATE POLICY tenant_isolation_tenants ON tenants
   USING (id = current_setting('app.tenant_id', true))
@@ -1133,7 +1413,19 @@ CREATE POLICY tenant_isolation_waf_posture_snapshots ON waf_posture_snapshots
 CREATE POLICY tenant_isolation_waf_baselines ON waf_baselines
   USING (tenant_id = current_setting('app.tenant_id', true))
   WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+CREATE POLICY tenant_isolation_waf_validation_plans ON waf_validation_plans
+  USING (tenant_id = current_setting('app.tenant_id', true))
+  WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+CREATE POLICY tenant_isolation_waf_baseline_approvals ON waf_baseline_approvals
+  USING (tenant_id = current_setting('app.tenant_id', true))
+  WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+CREATE POLICY tenant_isolation_waf_retest_requests ON waf_retest_requests
+  USING (tenant_id = current_setting('app.tenant_id', true))
+  WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
 CREATE POLICY tenant_isolation_waf_drift_events ON waf_drift_events
+  USING (tenant_id = current_setting('app.tenant_id', true))
+  WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+CREATE POLICY tenant_isolation_waf_drift_scan_results ON waf_drift_scan_results
   USING (tenant_id = current_setting('app.tenant_id', true))
   WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
 CREATE POLICY tenant_isolation_waf_connectors ON waf_connectors
@@ -1158,5 +1450,14 @@ CREATE POLICY tenant_isolation_supply_chain_risks ON supply_chain_risks
   USING (tenant_id = current_setting('app.tenant_id', true))
   WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
 CREATE POLICY tenant_isolation_waf_action_items ON waf_action_items
+  USING (tenant_id = current_setting('app.tenant_id', true))
+  WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+CREATE POLICY tenant_isolation_waf_coverage_daily_rollups ON waf_coverage_daily_rollups
+  USING (tenant_id = current_setting('app.tenant_id', true))
+  WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+ALTER TABLE waf_scenario_intakes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE waf_scenario_intakes FORCE ROW LEVEL SECURITY;
+CREATE INDEX idx_waf_scenario_intakes_tenant_created ON waf_scenario_intakes(tenant_id, created_at DESC);
+CREATE POLICY tenant_isolation_waf_scenario_intakes ON waf_scenario_intakes
   USING (tenant_id = current_setting('app.tenant_id', true))
   WITH CHECK (tenant_id = current_setting('app.tenant_id', true));

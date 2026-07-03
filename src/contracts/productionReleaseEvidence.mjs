@@ -637,12 +637,43 @@ function validateKillSwitchDrillInvalidFields(evidence) {
   return invalid_fields;
 }
 
+function validateStagingE2eMatrixInvalidFields(evidence) {
+  const invalid_fields = [];
+
+  if (evidence?.overall_status !== 'passed') {
+    pushInvalidField(invalid_fields, 'overall_status', 'matrix_not_passed', {
+      allowed: ['passed'],
+      status: evidence?.overall_status ?? null,
+    });
+  }
+
+  const scenarios = evidence?.scenarios;
+  if (!Array.isArray(scenarios) || scenarios.length === 0) {
+    pushInvalidField(invalid_fields, 'scenarios', 'invalid_scenarios');
+    return invalid_fields;
+  }
+
+  scenarios.forEach((scenario, index) => {
+    if (scenario?.status !== 'passed') {
+      pushInvalidField(invalid_fields, `scenarios[${index}].status`, 'scenario_not_passed', {
+        scenario_id: scenario?.scenario_id ?? scenario?.id ?? scenario?.scenario ?? null,
+        status: scenario?.status ?? null,
+      });
+    }
+  });
+
+  return invalid_fields;
+}
+
 function validateKindSpecificInvalidFields(kind, evidence) {
   if (kind === 'governed_adapter') {
     return validateGovernedAdapterInvalidFields(evidence);
   }
   if (kind === 'kill_switch_drill') {
     return validateKillSwitchDrillInvalidFields(evidence);
+  }
+  if (kind === 'staging_e2e_matrix') {
+    return validateStagingE2eMatrixInvalidFields(evidence);
   }
   return [];
 }

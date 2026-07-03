@@ -5,6 +5,7 @@ import {
   mapWafAssetRow,
   mapWafConnectorRow,
   mapWafConnectorSnapshotRow,
+  mapWafCoverageDailyRollupRow,
   mapWafDriftEventRow,
   mapWafPostureSnapshotRow,
   mapWafValidationRunRow,
@@ -673,6 +674,100 @@ describe('postgres WAF posture repository', () => {
     const items = await repo.listConnectorSnapshots(CTX, 'conn_1');
     assertTenantWrapped(pool.client);
     assert.equal(items[0].summary.rule_count, 3);
+  });
+
+  it('maps coverage daily rollup rows with UTC date buckets', () => {
+    const mapped = mapWafCoverageDailyRollupRow({
+      id: 'rollup_1',
+      tenant_id: CTX.tenantId,
+      rollup_date: new Date('2026-07-02T00:00:00.000Z'),
+      total_assets: 10,
+      protected: 6,
+      underprotected: 2,
+      unprotected: 1,
+      unknown: 1,
+      excluded: 0,
+      coverage_ratio: 0.6,
+      created_at: new Date(FIXED_NOW),
+    });
+    assert.equal(mapped.rollup_date, '2026-07-02');
+    assert.equal(mapped.coverage_ratio, 0.6);
+    assert.equal(mapped.protected, 6);
+  });
+
+  it('upserts coverage daily rollups with tenant-scoped conflict target', async () => {
+    const pool = createRecordingPool((sql, params) => {
+      if (/INSERT INTO waf_coverage_daily_rollups/i.test(sql)) {
+        assertTenantScoped(sql, params);
+        assert.match(sql, /ON CONFLICT \(tenant_id, rollup_date\)/i);
+        return {
+          rows: [
+            {
+              id: 'rollup_1',
+              tenant_id: CTX.tenantId,
+              rollup_date: '2026-07-02',
+              total_assets: 4,
+              protected: 2,
+              underprotected: 1,
+              unprotected: 1,
+              unknown: 0,
+              excluded: 0,
+              coverage_ratio: 0.5,
+              created_at: new Date(FIXED_NOW),
+            },
+          ],
+        };
+      }
+      return { rows: [] };
+    });
+    const repo = createWafPostureRepository(pool);
+    const saved = await repo.upsertWafCoverageDailyRollup(CTX, {
+      id: 'rollup_1',
+      rollup_date: '2026-07-02',
+      total_assets: 4,
+      protected: 2,
+      underprotected: 1,
+      unprotected: 1,
+      unknown: 0,
+      excluded: 0,
+      coverage_ratio: 0.5,
+      created_at: FIXED_NOW,
+    });
+    assertTenantWrapped(pool.client);
+    assert.equal(saved.rollup_date, '2026-07-02');
+    assert.equal(saved.total_assets, 4);
+  });
+
+  it('lists coverage daily rollups for a tenant window', async () => {
+    const pool = createRecordingPool((sql, params) => {
+      if (/FROM waf_coverage_daily_rollups/i.test(sql)) {
+        assertTenantScoped(sql, params);
+        assert.deepEqual(params, [CTX.tenantId, 90]);
+        return {
+          rows: [
+            {
+              id: 'rollup_1',
+              tenant_id: CTX.tenantId,
+              rollup_date: '2026-07-02',
+              total_assets: 4,
+              protected: 2,
+              underprotected: 1,
+              unprotected: 1,
+              unknown: 0,
+              excluded: 0,
+              coverage_ratio: 0.5,
+              created_at: new Date(FIXED_NOW),
+            },
+          ],
+        };
+      }
+      return { rows: [] };
+    });
+    const repo = createWafPostureRepository(pool);
+    const items = await repo.listWafCoverageDailyRollups(CTX, { windowDays: 90 });
+    assertTenantWrapped(pool.client);
+    assert.equal(items.length, 1);
+    assert.equal(items[0].protected, 2);
   });
 
   it('patchWafDriftEvent is tenant-scoped and metadata-only', async () => {

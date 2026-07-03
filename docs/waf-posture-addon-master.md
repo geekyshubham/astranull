@@ -11,7 +11,8 @@ This package adds optional WAF posture, external discovery, drift, CVE-to-mitiga
 | Detection | WAF fingerprinting, safe marker validation, monitor-only behavior detection, origin bypass integration. |
 | Integrations | WAF/CDN/cloud/CNAPP connectors; Jira, ServiceNow, Splunk, Sentinel, XSOAR, Slack/webhooks. |
 | Agent/probe | WAF marker observations, safe probe profiles, block/challenge evidence. |
-| UX | WAF dashboard, assets, drift, validation runs, CVE pipeline, discovery inbox, integrations. |
+| UX | WAF dashboard, assets, drift, validation runs, CVE pipeline, discovery inbox, integrations, roadmap, executive rollups. |
+| Analytics | Risk scoring, entity/vendor/geography coverage, deployment tiers, compliance audit exports. |
 | Security | Safe validation policy, no raw payloads, no auto-deploy, approval gates. |
 | Active Protection | Optional dangling DNS, takeover, and dependency risk design with legal gates. |
 

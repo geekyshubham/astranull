@@ -1,0 +1,1227 @@
+{
+  "manifest": {
+    "catalog_version": "2026.07.01",
+    "fingerprint_version": "2026.07.01",
+    "entry_count": 52,
+    "entry_count_target": 50,
+    "checksum_sha256": "5a3339fba39b8403f9b53df821e0be0da1ac643fdbccbc351ebb3e8e6307ed1e"
+  },
+  "entries": [
+    {
+      "id": "waf_prod_cloudflare_waf",
+      "vendor": "cloudflare",
+      "product": "Cloudflare WAF",
+      "deployment_type": "cdn",
+      "header_name_patterns": [
+        "^cf-ray$",
+        "^cf-cache-status$",
+        "^cf-request-id$"
+      ],
+      "cookie_name_patterns": [
+        "^__cf_bm$",
+        "^__cfduid$"
+      ],
+      "dns_patterns": [
+        ".cloudflare.net",
+        ".cdn.cloudflare.net"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_cloudflare_generic_v1"
+      ],
+      "connector_provider_ids": [
+        "cloudflare"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_cloudflare_bot",
+      "vendor": "cloudflare",
+      "product": "Cloudflare Bot Management",
+      "deployment_type": "cdn",
+      "header_name_patterns": [
+        "^cf-ray$",
+        "^cf-mitigated$"
+      ],
+      "cookie_name_patterns": [
+        "^__cf_bm$"
+      ],
+      "dns_patterns": [
+        ".cloudflare.net"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_cloudflare_bot_v1"
+      ],
+      "connector_provider_ids": [
+        "cloudflare"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_akamai_kona",
+      "vendor": "akamai",
+      "product": "Akamai Kona Site Defender",
+      "deployment_type": "cdn",
+      "header_name_patterns": [
+        "^x-akamai-",
+        "^akamai-origin-hop$"
+      ],
+      "cookie_name_patterns": [
+        "^ak_bmsc$",
+        "^bm_sz$"
+      ],
+      "dns_patterns": [
+        ".akamaiedge.net",
+        ".akamaized.net"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_akamai_generic_v1"
+      ],
+      "connector_provider_ids": [
+        "akamai"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_akamai_aap",
+      "vendor": "akamai",
+      "product": "Akamai App and API Protector",
+      "deployment_type": "cdn",
+      "header_name_patterns": [
+        "^x-akamai-",
+        "^x-akamai-session-info$"
+      ],
+      "cookie_name_patterns": [
+        "^ak_bmsc$"
+      ],
+      "dns_patterns": [
+        ".akamaiedge.net"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_akamai_aap_v1"
+      ],
+      "connector_provider_ids": [
+        "akamai"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_aws_waf",
+      "vendor": "aws",
+      "product": "AWS WAF",
+      "deployment_type": "cloud_native",
+      "header_name_patterns": [
+        "^x-amzn-requestid$",
+        "^x-amz-cf-id$"
+      ],
+      "cookie_name_patterns": [
+        "^awsalb$"
+      ],
+      "dns_patterns": [
+        ".amazonaws.com",
+        ".cloudfront.net"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_aws_waf_v1"
+      ],
+      "connector_provider_ids": [
+        "aws"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_aws_cloudfront",
+      "vendor": "aws",
+      "product": "AWS CloudFront",
+      "deployment_type": "cdn",
+      "header_name_patterns": [
+        "^x-amz-cf-id$",
+        "^x-amz-cf-pop$"
+      ],
+      "cookie_name_patterns": [
+        "^CloudFront-"
+      ],
+      "dns_patterns": [
+        ".cloudfront.net"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_aws_cf_v1"
+      ],
+      "connector_provider_ids": [
+        "aws"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_aws_alb_waf",
+      "vendor": "aws",
+      "product": "AWS ALB WAF",
+      "deployment_type": "cloud_native",
+      "header_name_patterns": [
+        "^x-amzn-requestid$"
+      ],
+      "cookie_name_patterns": [
+        "^awsalb$"
+      ],
+      "dns_patterns": [
+        ".elb.amazonaws.com"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_aws_alb_v1"
+      ],
+      "connector_provider_ids": [
+        "aws"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_azure_front_door",
+      "vendor": "azure",
+      "product": "Azure Front Door WAF",
+      "deployment_type": "cloud_native",
+      "header_name_patterns": [
+        "^x-azure-ref$",
+        "^x-azure-fdid$"
+      ],
+      "cookie_name_patterns": [
+        "^ASLBSA$"
+      ],
+      "dns_patterns": [
+        ".azureedge.net",
+        ".azurefd.net"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_azure_fd_v1"
+      ],
+      "connector_provider_ids": [
+        "azure"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_azure_app_gateway",
+      "vendor": "azure",
+      "product": "Azure Application Gateway WAF",
+      "deployment_type": "cloud_native",
+      "header_name_patterns": [
+        "^x-azure-ref$"
+      ],
+      "cookie_name_patterns": [
+        "^ApplicationGatewayAffinity$"
+      ],
+      "dns_patterns": [
+        ".azurewebsites.net"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_azure_agw_v1"
+      ],
+      "connector_provider_ids": [
+        "azure"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_gcp_cloud_armor",
+      "vendor": "gcp",
+      "product": "GCP Cloud Armor",
+      "deployment_type": "cloud_native",
+      "header_name_patterns": [
+        "^x-cloud-trace-context$"
+      ],
+      "cookie_name_patterns": [
+        "^GCP-"
+      ],
+      "dns_patterns": [
+        ".googleusercontent.com"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_gcp_armor_v1"
+      ],
+      "connector_provider_ids": [
+        "gcp"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_gcp_cdn",
+      "vendor": "gcp",
+      "product": "GCP Cloud CDN",
+      "deployment_type": "cdn",
+      "header_name_patterns": [
+        "^x-goog-",
+        "^x-cloud-trace-context$"
+      ],
+      "cookie_name_patterns": [
+        "^NID$"
+      ],
+      "dns_patterns": [
+        ".googleusercontent.com",
+        ".cdn.cloudflare.net"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_gcp_cdn_v1"
+      ],
+      "connector_provider_ids": [
+        "gcp"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_imperva_waf",
+      "vendor": "imperva",
+      "product": "Imperva WAF",
+      "deployment_type": "cdn",
+      "header_name_patterns": [
+        "^x-iinfo$",
+        "^x-cdn$"
+      ],
+      "cookie_name_patterns": [
+        "^incap_ses",
+        "^visid_incap"
+      ],
+      "dns_patterns": [
+        ".incapdns.net"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_imperva_v1"
+      ],
+      "connector_provider_ids": [
+        "imperva"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_imperva_incap",
+      "vendor": "imperva",
+      "product": "Incapsula CDN",
+      "deployment_type": "cdn",
+      "header_name_patterns": [
+        "^x-iinfo$"
+      ],
+      "cookie_name_patterns": [
+        "^incap_ses"
+      ],
+      "dns_patterns": [
+        ".incapdns.net"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_incap_v1"
+      ],
+      "connector_provider_ids": [
+        "imperva"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_fortinet_fortiweb",
+      "vendor": "fortinet",
+      "product": "FortiWeb",
+      "deployment_type": "appliance",
+      "header_name_patterns": [
+        "^fortigate",
+        "^fortiweb"
+      ],
+      "cookie_name_patterns": [
+        "^FORTIWEB"
+      ],
+      "dns_patterns": [
+        ".fortinet.com"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_fortiweb_v1"
+      ],
+      "connector_provider_ids": [
+        "fortinet"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_barracuda_waf",
+      "vendor": "barracuda",
+      "product": "Barracuda WAF",
+      "deployment_type": "appliance",
+      "header_name_patterns": [
+        "^barra_counter_session$",
+        "^barra_counter_status$"
+      ],
+      "cookie_name_patterns": [
+        "^barra_counter_session$"
+      ],
+      "dns_patterns": [
+        ".barracudanetworks.com"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_barracuda_v1"
+      ],
+      "connector_provider_ids": [
+        "barracuda"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_fastly_waf",
+      "vendor": "fastly",
+      "product": "Fastly WAF",
+      "deployment_type": "cdn",
+      "header_name_patterns": [
+        "^x-served-by$",
+        "^x-cache$"
+      ],
+      "cookie_name_patterns": [
+        "^fastly-"
+      ],
+      "dns_patterns": [
+        ".fastly.net",
+        ".fastlylb.net"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_fastly_v1"
+      ],
+      "connector_provider_ids": [
+        "fastly"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_f5_asm",
+      "vendor": "f5",
+      "product": "F5 BIG-IP ASM",
+      "deployment_type": "appliance",
+      "header_name_patterns": [
+        "^x-cnection$",
+        "^bigipserver"
+      ],
+      "cookie_name_patterns": [
+        "^BIGipServer"
+      ],
+      "dns_patterns": [
+        ".f5.com"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_f5_asm_v1"
+      ],
+      "connector_provider_ids": [
+        "f5"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_f5_advanced",
+      "vendor": "f5",
+      "product": "F5 Advanced WAF",
+      "deployment_type": "appliance",
+      "header_name_patterns": [
+        "^x-cnection$",
+        "^x-wa-info$"
+      ],
+      "cookie_name_patterns": [
+        "^TS"
+      ],
+      "dns_patterns": [
+        ".f5.com"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_f5_adv_v1"
+      ],
+      "connector_provider_ids": [
+        "f5"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_palo_alto",
+      "vendor": "palo_alto",
+      "product": "Palo Alto WAF",
+      "deployment_type": "cloud_native",
+      "header_name_patterns": [
+        "^x-pan-",
+        "^x-paloalto-"
+      ],
+      "cookie_name_patterns": [
+        "^PANW$"
+      ],
+      "dns_patterns": [
+        ".paloaltonetworks.com"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_palo_v1"
+      ],
+      "connector_provider_ids": [
+        "palo_alto"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_modsecurity",
+      "vendor": "modsecurity",
+      "product": "ModSecurity OWASP CRS",
+      "deployment_type": "reverse_proxy",
+      "header_name_patterns": [
+        "^mod_security",
+        "^modsec"
+      ],
+      "cookie_name_patterns": [
+        "^modsec"
+      ],
+      "dns_patterns": [
+        ".modsecurity.org"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_modsec_v1"
+      ],
+      "connector_provider_ids": [
+        "generic_waf"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_coraza",
+      "vendor": "coraza",
+      "product": "Coraza WAF",
+      "deployment_type": "reverse_proxy",
+      "header_name_patterns": [
+        "^coraza-"
+      ],
+      "cookie_name_patterns": [
+        "^coraza$"
+      ],
+      "dns_patterns": [
+        ".coraza.io"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_coraza_v1"
+      ],
+      "connector_provider_ids": [
+        "generic_waf"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_unknown_custom",
+      "vendor": "unknown",
+      "product": "Unknown Custom WAF",
+      "deployment_type": "custom",
+      "header_name_patterns": [
+        "^x-waf-"
+      ],
+      "cookie_name_patterns": [
+        "^waf_session$"
+      ],
+      "dns_patterns": [],
+      "block_page_signature_ids": [
+        "block_sig_unknown_v1"
+      ],
+      "connector_provider_ids": [],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_sucuri",
+      "vendor": "sucuri",
+      "product": "Sucuri WAF",
+      "deployment_type": "cdn",
+      "header_name_patterns": [
+        "^x-sucuri-",
+        "^x-sucuri-cache$"
+      ],
+      "cookie_name_patterns": [
+        "^sucuri_cloudproxy"
+      ],
+      "dns_patterns": [
+        ".sucuri.net"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_sucuri_v1"
+      ],
+      "connector_provider_ids": [
+        "sucuri"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_stackpath",
+      "vendor": "stackpath",
+      "product": "StackPath WAF",
+      "deployment_type": "cdn",
+      "header_name_patterns": [
+        "^x-sp-",
+        "^x-hw$"
+      ],
+      "cookie_name_patterns": [
+        "^sp_"
+      ],
+      "dns_patterns": [
+        ".stackpathdns.com"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_stackpath_v1"
+      ],
+      "connector_provider_ids": [
+        "stackpath"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_bunny",
+      "vendor": "bunny",
+      "product": "Bunny CDN WAF",
+      "deployment_type": "cdn",
+      "header_name_patterns": [
+        "^cdn-pullzone$",
+        "^cdn-requestid$"
+      ],
+      "cookie_name_patterns": [
+        "^bunnycdn$"
+      ],
+      "dns_patterns": [
+        ".b-cdn.net"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_bunny_v1"
+      ],
+      "connector_provider_ids": [
+        "bunny"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_keycdn",
+      "vendor": "keycdn",
+      "product": "KeyCDN WAF",
+      "deployment_type": "cdn",
+      "header_name_patterns": [
+        "^x-edge-location$"
+      ],
+      "cookie_name_patterns": [
+        "^kc_"
+      ],
+      "dns_patterns": [
+        ".kxcdn.com"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_keycdn_v1"
+      ],
+      "connector_provider_ids": [
+        "keycdn"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_edgio",
+      "vendor": "edgio",
+      "product": "Edgio WAF",
+      "deployment_type": "cdn",
+      "header_name_patterns": [
+        "^x-edgio-",
+        "^x-ec-"
+      ],
+      "cookie_name_patterns": [
+        "^edgio$"
+      ],
+      "dns_patterns": [
+        ".edgio.net",
+        ".limelightcdn.net"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_edgio_v1"
+      ],
+      "connector_provider_ids": [
+        "edgio"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_radware",
+      "vendor": "radware",
+      "product": "Radware AppWall",
+      "deployment_type": "appliance",
+      "header_name_patterns": [
+        "^x-rdwr-",
+        "^x-sl-compstate$"
+      ],
+      "cookie_name_patterns": [
+        "^rdwr$"
+      ],
+      "dns_patterns": [
+        ".radwarecloud.com"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_radware_v1"
+      ],
+      "connector_provider_ids": [
+        "radware"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_citrix",
+      "vendor": "citrix",
+      "product": "Citrix NetScaler WAF",
+      "deployment_type": "appliance",
+      "header_name_patterns": [
+        "^ns_af$",
+        "^citrix-"
+      ],
+      "cookie_name_patterns": [
+        "^NSC_"
+      ],
+      "dns_patterns": [
+        ".citrix.com"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_citrix_v1"
+      ],
+      "connector_provider_ids": [
+        "citrix"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_sophos",
+      "vendor": "sophos",
+      "product": "Sophos WAF",
+      "deployment_type": "appliance",
+      "header_name_patterns": [
+        "^x-sophos-"
+      ],
+      "cookie_name_patterns": [
+        "^sophos$"
+      ],
+      "dns_patterns": [
+        ".sophos.com"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_sophos_v1"
+      ],
+      "connector_provider_ids": [
+        "sophos"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_checkpoint",
+      "vendor": "checkpoint",
+      "product": "Check Point CloudGuard WAF",
+      "deployment_type": "cloud_native",
+      "header_name_patterns": [
+        "^x-chkp-"
+      ],
+      "cookie_name_patterns": [
+        "^chkp$"
+      ],
+      "dns_patterns": [
+        ".checkpoint.com"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_checkpoint_v1"
+      ],
+      "connector_provider_ids": [
+        "checkpoint"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_nginx_modsec",
+      "vendor": "nginx",
+      "product": "NGINX ModSecurity",
+      "deployment_type": "reverse_proxy",
+      "header_name_patterns": [
+        "^x-nginx-",
+        "^mod_security"
+      ],
+      "cookie_name_patterns": [
+        "^nginx$"
+      ],
+      "dns_patterns": [],
+      "block_page_signature_ids": [
+        "block_sig_nginx_modsec_v1"
+      ],
+      "connector_provider_ids": [
+        "generic_waf"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_haproxy",
+      "vendor": "haproxy",
+      "product": "HAProxy WAF",
+      "deployment_type": "reverse_proxy",
+      "header_name_patterns": [
+        "^x-haproxy-"
+      ],
+      "cookie_name_patterns": [
+        "^haproxy$"
+      ],
+      "dns_patterns": [],
+      "block_page_signature_ids": [
+        "block_sig_haproxy_v1"
+      ],
+      "connector_provider_ids": [
+        "generic_waf"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_wallarm",
+      "vendor": "wallarm",
+      "product": "Wallarm API Security",
+      "deployment_type": "cloud_native",
+      "header_name_patterns": [
+        "^x-wallarm-"
+      ],
+      "cookie_name_patterns": [
+        "^wallarm$"
+      ],
+      "dns_patterns": [
+        ".wallarm.com"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_wallarm_v1"
+      ],
+      "connector_provider_ids": [
+        "wallarm"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_signal_sciences",
+      "vendor": "signal_sciences",
+      "product": "Signal Sciences",
+      "deployment_type": "cdn",
+      "header_name_patterns": [
+        "^x-sigsci-"
+      ],
+      "cookie_name_patterns": [
+        "^sigsci$"
+      ],
+      "dns_patterns": [
+        ".signalsciences.net"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_sigsci_v1"
+      ],
+      "connector_provider_ids": [
+        "fastly"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_threatx",
+      "vendor": "threatx",
+      "product": "ThreatX WAF",
+      "deployment_type": "cloud_native",
+      "header_name_patterns": [
+        "^x-threatx-"
+      ],
+      "cookie_name_patterns": [
+        "^threatx$"
+      ],
+      "dns_patterns": [
+        ".threatx.com"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_threatx_v1"
+      ],
+      "connector_provider_ids": [
+        "threatx"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_reblaze",
+      "vendor": "reblaze",
+      "product": "Reblaze WAF",
+      "deployment_type": "cdn",
+      "header_name_patterns": [
+        "^x-rbz-"
+      ],
+      "cookie_name_patterns": [
+        "^rbz$"
+      ],
+      "dns_patterns": [
+        ".reblaze.com"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_reblaze_v1"
+      ],
+      "connector_provider_ids": [
+        "reblaze"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_datadome",
+      "vendor": "datadome",
+      "product": "DataDome Bot Protection",
+      "deployment_type": "cdn",
+      "header_name_patterns": [
+        "^x-datadome-"
+      ],
+      "cookie_name_patterns": [
+        "^datadome$"
+      ],
+      "dns_patterns": [
+        ".datadome.co"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_datadome_v1"
+      ],
+      "connector_provider_ids": [
+        "datadome"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_perimeterx",
+      "vendor": "perimeterx",
+      "product": "PerimeterX HUMAN Security",
+      "deployment_type": "cdn",
+      "header_name_patterns": [
+        "^x-px-",
+        "^x-human-"
+      ],
+      "cookie_name_patterns": [
+        "^_px"
+      ],
+      "dns_patterns": [
+        ".perimeterx.net"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_perimeterx_v1"
+      ],
+      "connector_provider_ids": [
+        "perimeterx"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_kasada",
+      "vendor": "kasada",
+      "product": "Kasada Bot Management",
+      "deployment_type": "cdn",
+      "header_name_patterns": [
+        "^x-kpsdk-"
+      ],
+      "cookie_name_patterns": [
+        "^kasada$"
+      ],
+      "dns_patterns": [
+        ".kasada.io"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_kasada_v1"
+      ],
+      "connector_provider_ids": [
+        "kasada"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_oracle_waf",
+      "vendor": "oracle",
+      "product": "Oracle Cloud WAF",
+      "deployment_type": "cloud_native",
+      "header_name_patterns": [
+        "^x-oracle-"
+      ],
+      "cookie_name_patterns": [
+        "^oci$"
+      ],
+      "dns_patterns": [
+        ".oraclecloud.net"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_oracle_v1"
+      ],
+      "connector_provider_ids": [
+        "oracle"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_alibaba_waf",
+      "vendor": "alibaba",
+      "product": "Alibaba Cloud WAF",
+      "deployment_type": "cloud_native",
+      "header_name_patterns": [
+        "^x-alicdn-"
+      ],
+      "cookie_name_patterns": [
+        "^aliyungf_tc$"
+      ],
+      "dns_patterns": [
+        ".aliyuncs.com"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_alibaba_v1"
+      ],
+      "connector_provider_ids": [
+        "alibaba"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_tencent_waf",
+      "vendor": "tencent",
+      "product": "Tencent Cloud WAF",
+      "deployment_type": "cloud_native",
+      "header_name_patterns": [
+        "^x-tencent-"
+      ],
+      "cookie_name_patterns": [
+        "^qcloud$"
+      ],
+      "dns_patterns": [
+        ".myqcloud.com"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_tencent_v1"
+      ],
+      "connector_provider_ids": [
+        "tencent"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_huawei_waf",
+      "vendor": "huawei",
+      "product": "Huawei Cloud WAF",
+      "deployment_type": "cloud_native",
+      "header_name_patterns": [
+        "^x-hw-"
+      ],
+      "cookie_name_patterns": [
+        "^hwcloud$"
+      ],
+      "dns_patterns": [
+        ".myhuaweicloud.com"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_huawei_v1"
+      ],
+      "connector_provider_ids": [
+        "huawei"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_nsfocus",
+      "vendor": "nsfocus",
+      "product": "NSFOCUS WAF",
+      "deployment_type": "appliance",
+      "header_name_patterns": [
+        "^x-nsfocus-"
+      ],
+      "cookie_name_patterns": [
+        "^nsfocus$"
+      ],
+      "dns_patterns": [
+        ".nsfocus.com"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_nsfocus_v1"
+      ],
+      "connector_provider_ids": [
+        "nsfocus"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_fortra",
+      "vendor": "fortra",
+      "product": "Fortra TrustedShield",
+      "deployment_type": "appliance",
+      "header_name_patterns": [
+        "^x-fortra-"
+      ],
+      "cookie_name_patterns": [
+        "^fortra$"
+      ],
+      "dns_patterns": [
+        ".fortra.com"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_fortra_v1"
+      ],
+      "connector_provider_ids": [
+        "fortra"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_sonicwall",
+      "vendor": "sonicwall",
+      "product": "SonicWall WAF",
+      "deployment_type": "appliance",
+      "header_name_patterns": [
+        "^x-sonicwall-"
+      ],
+      "cookie_name_patterns": [
+        "^sonicwall$"
+      ],
+      "dns_patterns": [
+        ".sonicwall.com"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_sonicwall_v1"
+      ],
+      "connector_provider_ids": [
+        "sonicwall"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_envoy_wasm",
+      "vendor": "envoy",
+      "product": "Envoy WASM WAF",
+      "deployment_type": "reverse_proxy",
+      "header_name_patterns": [
+        "^x-envoy-"
+      ],
+      "cookie_name_patterns": [
+        "^envoy$"
+      ],
+      "dns_patterns": [],
+      "block_page_signature_ids": [
+        "block_sig_envoy_v1"
+      ],
+      "connector_provider_ids": [
+        "generic_waf"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_kong_waf",
+      "vendor": "kong",
+      "product": "Kong WAF Plugin",
+      "deployment_type": "reverse_proxy",
+      "header_name_patterns": [
+        "^x-kong-"
+      ],
+      "cookie_name_patterns": [
+        "^kong$"
+      ],
+      "dns_patterns": [],
+      "block_page_signature_ids": [
+        "block_sig_kong_v1"
+      ],
+      "connector_provider_ids": [
+        "kong"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_openresty",
+      "vendor": "openresty",
+      "product": "OpenResty WAF",
+      "deployment_type": "reverse_proxy",
+      "header_name_patterns": [
+        "^x-openresty-"
+      ],
+      "cookie_name_patterns": [
+        "^openresty$"
+      ],
+      "dns_patterns": [],
+      "block_page_signature_ids": [
+        "block_sig_openresty_v1"
+      ],
+      "connector_provider_ids": [
+        "generic_waf"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_generic_cdn",
+      "vendor": "generic_cdn",
+      "product": "Generic CDN Edge",
+      "deployment_type": "cdn",
+      "header_name_patterns": [
+        "^x-cdn-",
+        "^x-edge-"
+      ],
+      "cookie_name_patterns": [
+        "^cdn_session$"
+      ],
+      "dns_patterns": [
+        ".cdn.net"
+      ],
+      "block_page_signature_ids": [
+        "block_sig_generic_cdn_v1"
+      ],
+      "connector_provider_ids": [
+        "generic_cdn"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    },
+    {
+      "id": "waf_prod_generic_reverse_proxy",
+      "vendor": "generic_reverse_proxy",
+      "product": "Generic Reverse Proxy WAF",
+      "deployment_type": "reverse_proxy",
+      "header_name_patterns": [
+        "^x-waf-proxy$"
+      ],
+      "cookie_name_patterns": [
+        "^waf_proxy$"
+      ],
+      "dns_patterns": [],
+      "block_page_signature_ids": [
+        "block_sig_generic_rp_v1"
+      ],
+      "connector_provider_ids": [
+        "generic_waf"
+      ],
+      "fingerprint_version": "2026.07.01",
+      "enabled": true
+    }
+  ]
+}

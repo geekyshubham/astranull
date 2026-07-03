@@ -11,9 +11,12 @@ import {
 import {
   approveBaseline,
   cancelValidationPlan,
+  completeRetest,
   createValidationPlan as createValidationPlanService,
+  executeRetest,
   executeValidationPlan,
   getScheduledPlans,
+  listRetests,
   listValidationPlans,
   orchestratorDelegationSurface,
   requestRetest,
@@ -98,8 +101,20 @@ function seedStore() {
     wafValidationPlans: [],
     wafBaselineApprovals: [],
     wafRetestRequests: [],
+    agents: [
+      {
+        id: 'ag_waf_1',
+        tenant_id: 'ten_demo',
+        status: 'online',
+        capabilities: ['canary', 'heartbeat'],
+        target_group_id: 'tg_1',
+      },
+    ],
     testRuns: [],
     probeJobs: [],
+    events: [],
+    agentJobs: [],
+    verdicts: [],
     auditLog: [],
   });
 }
@@ -304,9 +319,10 @@ describe('WAF orchestrator service', () => {
     assert.equal(audit.metadata.previous_state, 'scheduled');
   });
 
-  it('delegates validation execution to probe coordinator without direct traffic generation', () => {
+  it('delegates validation execution through startTestRun safe path without direct traffic generation', () => {
     const surface = orchestratorDelegationSurface();
-    assert.equal(surface.uses_probe_coordinator, true);
+    assert.equal(surface.uses_start_test_run_safe_path, true);
+    assert.equal(surface.avoids_direct_probe_job_creation, true);
     assert.equal(surface.avoids_direct_traffic_stub, true);
 
     const created = createValidationPlanService(ctx, {
@@ -319,13 +335,17 @@ describe('WAF orchestrator service', () => {
     const beforeJobs = getStore().probeJobs.length;
 
     const executed = executeValidationPlan(ctx, created.validation_plan.id, runtimeConfig);
-    assert.equal(executed.validation_plan.state, 'completed');
-    assert.equal(executed.delegated_jobs.length, 2);
-    assert.equal(getStore().probeJobs.length, beforeJobs + 2);
+    assert.equal(executed.error, undefined);
+    assert.equal(executed.validation_plan.state, 'running');
+    assert.equal(executed.continuation_required, true);
+    assert.equal(executed.delegated_jobs.length, 1);
+    assert.equal(getStore().probeJobs.length, beforeJobs + 1);
+    assert.equal(executed.delegated_jobs[0].status, 'delegated');
 
     const audit = getStore().auditLog.find((e) => e.action === 'waf.validation_plan.executed');
     assert.ok(audit);
-    assert.equal(audit.metadata.delegated_job_count, 2);
+    assert.equal(audit.metadata.delegated_job_count, 1);
+    assert.equal(audit.metadata.new_delegated_job_count, 1);
     assert.ok(Array.isArray(audit.metadata.probe_job_ids));
   });
 
@@ -359,5 +379,116 @@ describe('WAF orchestrator service', () => {
     assert.ok(audit);
     assert.equal(audit.metadata.requested_by, 'usr_demo');
     assert.equal(audit.metadata.priority, 'urgent');
+  });
+
+  it('executeRetest delegates only and ignores request-body verdict fields', () => {
+    const requested = requestRetest(ctx, 'drift_1', {
+      retest_plan: ['marker'],
+      requested_by: 'usr_demo',
+      priority: 'normal',
+    });
+    const retestId = requested.retest_request.id;
+    const runtimeConfig = loadRuntimeConfig();
+
+    const executed = executeRetest(
+      ctx,
+      retestId,
+      {
+        validation_passed: true,
+        posture_status: 'protected',
+        results: [{ scenario_family: 'marker', passed: true, observed_action: 'block' }],
+      },
+      runtimeConfig,
+    );
+
+    assert.equal(executed.error, undefined);
+    assert.equal(executed.retest_request.status, 'delegated');
+    assert.equal(executed.verdict, undefined);
+    assert.equal(executed.delegated_jobs.length, 1);
+    assert.ok(executed.delegated_jobs[0].test_run_id);
+    assert.equal(
+      getStore().auditLog.some((e) => e.action === 'waf.retest.delegated'),
+      true,
+    );
+    assert.equal(
+      getStore().auditLog.some((e) => e.action === 'waf.retest.completed'),
+      false,
+    );
+
+    const drift = getStore().wafDriftEvents.find((e) => e.id === 'drift_1');
+    assert.equal(drift.status, 'retest_pending');
+  });
+
+  it('completeRetest closes from delegated test-run verdict evidence and resolves drift', () => {
+    const requested = requestRetest(ctx, 'drift_1', {
+      retest_plan: ['marker'],
+      requested_by: 'usr_demo',
+      priority: 'normal',
+    });
+    const retestId = requested.retest_request.id;
+    const executed = executeRetest(ctx, retestId, {}, loadRuntimeConfig());
+    const delegatedRunId = executed.delegated_jobs[0].test_run_id;
+
+    const run = getStore().testRuns.find((r) => r.id === delegatedRunId);
+    run.status = 'verdicted';
+    run.check_id = 'waf.marker_rule.safe';
+    run.probe_job_id = executed.delegated_jobs[0].probe_job_id;
+    getStore().verdicts.push({
+      id: 'ver_retest_1',
+      tenant_id: 'ten_demo',
+      test_run_id: delegatedRunId,
+      check_id: 'waf.marker_rule.safe',
+      verdict: 'protected',
+      confidence: 'medium',
+      created_at: new Date().toISOString(),
+    });
+    getStore().wafRetestRequests.find((r) => r.id === retestId).status = 'delegated';
+
+    const completed = completeRetest(ctx, retestId);
+    assert.equal(completed.error, undefined);
+    assert.equal(completed.verdict.verdict, 'resolved');
+    assert.equal(completed.retest_request.status, 'completed');
+    assert.equal(
+      getStore().wafDriftEvents.find((e) => e.id === 'drift_1').status,
+      'resolved',
+    );
+    assert.equal(
+      getStore().auditLog.some((e) => e.action === 'waf.retest.completed'),
+      true,
+    );
+  });
+
+  it('completeRetest fail-closes when delegated runs lack terminal verdict evidence', () => {
+    const requested = requestRetest(ctx, 'drift_1', {
+      retest_plan: ['marker'],
+      requested_by: 'usr_demo',
+      priority: 'normal',
+    });
+    const retestId = requested.retest_request.id;
+    executeRetest(ctx, retestId, {}, loadRuntimeConfig());
+    getStore().wafRetestRequests.find((r) => r.id === retestId).status = 'delegated';
+
+    const blocked = completeRetest(ctx, retestId);
+    assert.equal(blocked.error, 'waf_retest_closure_not_ready');
+    assert.equal(blocked.status, 422);
+  });
+
+  it('listRetests filters by drift_event_id, waf_asset_id, and status', () => {
+    requestRetest(ctx, 'drift_1', {
+      retest_plan: ['marker'],
+      requested_by: 'usr_demo',
+      priority: 'normal',
+    });
+    const listed = listRetests(ctx, {
+      drift_event_id: 'drift_1',
+      waf_asset_id: 'waf_1',
+      status: 'requested',
+    });
+    assert.equal(listed.items.length, 1);
+    assert.equal(listed.items[0].drift_event_id, 'drift_1');
+    assert.equal(listed.items[0].waf_asset_id, 'waf_1');
+
+    const empty = listRetests(ctx, { status: 'delegated' });
+    assert.equal(empty.items.length, 0);
   });
 });

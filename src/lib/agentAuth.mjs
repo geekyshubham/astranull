@@ -71,6 +71,17 @@ export function requireAgentAuth(headers, agentId, runtimeConfig = {}) {
     return { agent, credential };
   }
 
+  const persistenceMode = String(runtimeConfig.persistenceMode ?? process.env.ASTRANULL_PERSISTENCE_MODE ?? '')
+    .trim()
+    .toLowerCase();
+  if (process.env.NODE_ENV === 'production' || persistenceMode === 'postgres') {
+    const legacyAgent = getStore().agents.find((a) => a.id === agentId);
+    if (legacyAgent) {
+      auditAgentAuthDenied(legacyAgent.tenant_id, agentId, 'legacy_credential_rejected');
+    }
+    return { error: 'unauthorized', status: 401 };
+  }
+
   const agent = getStore().agents.find((a) => a.id === agentId);
   if (!agent) return { error: 'unauthorized', status: 401 };
 

@@ -1,0 +1,1628 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "AstraNull WAF Posture and Orchestrator API",
+    "version": "0.2.0-contract-draft",
+    "description": "Machine-readable contract for the optional AstraNull WAF posture add-on and WAF orchestrator routes. AstraNull is a no-access-first DDoS readiness validation platform: core flows do not require cloud or WAF credentials, and customer target scope is declared—not discovered as a required feature. WAF validation is safe-by-default: bounded safe checks, metadata-only evidence, rejection of raw packet/payload/header/body fields, and SOC-gated high-scale paths remain outside this add-on’s customer-runnable surface. Enable with `ASTRANULL_WAF_POSTURE_ENABLED=1`. When disabled, `/v1/waf/*` returns `404` with `waf_feature_disabled`. This artifact documents intended HTTP shapes and RBAC from `docs/backend/13-waf-posture-api-contract.md`; it is not a claim that staging/live execution, provider connectors, security observability, or release signoff gates are closed—the WAF orchestrator is not production-ready until those external gates close.",
+    "contact": {
+      "name": "AstraNull API contract",
+      "url": "https://github.com/checkred/astranull/blob/main/docs/backend/13-waf-posture-api-contract.md"
+    },
+    "license": {
+      "name": "Proprietary",
+      "identifier": "LicenseRef-AstraNull-Internal"
+    }
+  },
+  "servers": [
+    {
+      "url": "https://api.example.invalid",
+      "description": "Placeholder base URL; replace per deployment. Tenant isolation and bearer auth apply to all `/v1/waf/*` routes."
+    }
+  ],
+  "tags": [
+    {
+      "name": "waf-assets",
+      "description": "Customer-declared WAF assets and metadata. Permission `waf:read` / `waf:write`. No automatic discovery approval."
+    },
+    {
+      "name": "waf-coverage",
+      "description": "Coverage rollups from declared assets and metadata-only posture signals. Permission `waf:read`."
+    },
+    {
+      "name": "waf-validations",
+      "description": "Safe customer-runnable WAF validation runs. Permission `waf:run` to start; `waf:read` to list/detail. Catalog caps on requests, timeout, and concurrency; raw payload fields rejected."
+    },
+    {
+      "name": "waf-orchestrator",
+      "description": "Validation plans and retest orchestration with safe continuation (at most one new safe `startTestRun` per tick in Postgres signed-worker mode), DB execution leases, and metadata-only `delegated_jobs`. Permission `waf:run` for mutate/execute; `waf:read` for list. Plan `completed` means all jobs delegated—not final WAF verdict closure."
+    },
+    {
+      "name": "waf-action-items",
+      "description": "Grouped remediation action items (metadata-only). Permission `waf:read` / `waf:write`."
+    },
+    {
+      "name": "waf-reports",
+      "description": "Metadata-only WAF posture report exports with custody manifests. Permission `waf:read`."
+    },
+    {
+      "name": "waf-cve-playbooks",
+      "description": "Multi-vendor CVE mitigation playbooks with coordinated safe retest. Permissions `cve_pipeline:read`, `cve_pipeline:write`, `waf:run`."
+    }
+  ],
+  "paths": {
+    "/v1/waf/assets": {
+      "get": {
+        "tags": ["waf-assets"],
+        "summary": "List WAF assets",
+        "operationId": "listWafAssets",
+        "security": [{ "bearerAuth": ["waf:read"] }],
+        "parameters": [
+          { "name": "status", "in": "query", "schema": { "type": "string" } },
+          { "name": "vendor", "in": "query", "schema": { "type": "string" } },
+          { "name": "group", "in": "query", "schema": { "type": "string" } },
+          { "name": "owner", "in": "query", "schema": { "type": "string" } },
+          { "name": "criticality", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tenant-scoped assets",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["items"],
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/WafAsset" }
+                    },
+                    "page": { "$ref": "#/components/schemas/PageCursor" }
+                  }
+                }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/WafFeatureDisabled" },
+          "403": { "$ref": "#/components/responses/RbacDenied" }
+        }
+      },
+      "post": {
+        "tags": ["waf-assets"],
+        "summary": "Create WAF asset",
+        "operationId": "createWafAsset",
+        "security": [{ "bearerAuth": ["waf:write"] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/WafAssetCreate" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created asset",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["asset"],
+                  "properties": {
+                    "asset": { "$ref": "#/components/schemas/WafAsset" }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/ApiErrorResponse" },
+          "404": { "$ref": "#/components/responses/WafFeatureDisabled" }
+        }
+      }
+    },
+    "/v1/waf/assets/{id}": {
+      "get": {
+        "tags": ["waf-assets"],
+        "summary": "Get WAF asset detail",
+        "operationId": "getWafAsset",
+        "security": [{ "bearerAuth": ["waf:read"] }],
+        "parameters": [{ "$ref": "#/components/parameters/WafAssetId" }],
+        "responses": {
+          "200": {
+            "description": "Asset with posture and related summaries (metadata-only)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/WafAssetDetail" }
+              }
+            }
+          },
+          "404": {
+            "description": "Missing asset or feature disabled",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" },
+                "examples": {
+                  "notFound": { "value": { "error": "waf_asset_not_found" } },
+                  "disabled": { "value": { "error": "waf_feature_disabled" } }
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": ["waf-assets"],
+        "summary": "Patch WAF asset metadata",
+        "operationId": "patchWafAsset",
+        "security": [{ "bearerAuth": ["waf:write"] }],
+        "parameters": [{ "$ref": "#/components/parameters/WafAssetId" }],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/WafAssetPatch" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated asset; unsafe/raw fields rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "asset": { "$ref": "#/components/schemas/WafAsset" }
+                  }
+                }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/WafFeatureDisabled" }
+        }
+      }
+    },
+    "/v1/waf/coverage": {
+      "get": {
+        "tags": ["waf-coverage"],
+        "summary": "WAF coverage summary",
+        "operationId": "getWafCoverage",
+        "security": [{ "bearerAuth": ["waf:read"] }],
+        "parameters": [
+          {
+            "name": "window_days",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 365, "default": 90 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Coverage rollup with ratio and trend series",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/WafCoverageSummary" }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/WafFeatureDisabled" }
+        }
+      }
+    },
+    "/v1/waf/coverage/vendors": {
+      "get": {
+        "tags": ["waf-coverage"],
+        "summary": "Vendor coverage breakdown",
+        "operationId": "getWafCoverageVendors",
+        "security": [{ "bearerAuth": ["waf:read"] }],
+        "responses": {
+          "200": {
+            "description": "Vendor mix rollup",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/WafCoverageVendors" }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/WafFeatureDisabled" }
+        }
+      }
+    },
+    "/v1/waf/coverage/entities": {
+      "get": {
+        "tags": ["waf-coverage"],
+        "summary": "Entity coverage rollup",
+        "operationId": "getWafCoverageEntities",
+        "security": [{ "bearerAuth": ["waf:read"] }],
+        "parameters": [
+          {
+            "name": "entity_type",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Business-unit and subsidiary coverage",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/WafCoverageEntities" }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/WafFeatureDisabled" }
+        }
+      }
+    },
+    "/v1/waf/coverage/geography": {
+      "get": {
+        "tags": ["waf-coverage"],
+        "summary": "Geography coverage rollup",
+        "operationId": "getWafCoverageGeography",
+        "security": [{ "bearerAuth": ["waf:read"] }],
+        "parameters": [
+          {
+            "name": "region_code",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Declared geography coverage",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/WafCoverageGeography" }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/WafFeatureDisabled" }
+        }
+      }
+    },
+    "/v1/waf/coverage/criticality": {
+      "get": {
+        "tags": ["waf-coverage"],
+        "summary": "Business criticality coverage rollup",
+        "operationId": "getWafCoverageCriticality",
+        "security": [{ "bearerAuth": ["waf:read"] }],
+        "parameters": [
+          {
+            "name": "business_criticality",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "criticality",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "Alias for business_criticality"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Executive breakdown by declared business criticality",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/WafCoverageCriticality" }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/WafFeatureDisabled" }
+        }
+      }
+    },
+    "/v1/waf/coverage/risk-roadmap": {
+      "get": {
+        "tags": ["waf-coverage"],
+        "summary": "Tiered deployment roadmap",
+        "operationId": "getWafRiskRoadmap",
+        "security": [{ "bearerAuth": ["waf:read"] }],
+        "parameters": [
+          { "name": "entity_id", "in": "query", "required": false, "schema": { "type": "string" } },
+          { "name": "region_code", "in": "query", "required": false, "schema": { "type": "string" } },
+          { "name": "vendor", "in": "query", "required": false, "schema": { "type": "string" } },
+          { "name": "min_score", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 0, "maximum": 100 } },
+          { "name": "limit_per_tier", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tier 1-4 roadmap items with risk evidence",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/WafRiskRoadmap" }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/WafFeatureDisabled" }
+        }
+      }
+    },
+    "/v1/waf/coverage/vendor-consolidation": {
+      "get": {
+        "tags": ["waf-coverage"],
+        "summary": "Vendor consolidation advisory",
+        "operationId": "getWafVendorConsolidation",
+        "security": [{ "bearerAuth": ["waf:read"] }],
+        "responses": {
+          "200": {
+            "description": "Read-only vendor consolidation advisory metadata",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/WafVendorConsolidation" }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/WafFeatureDisabled" }
+        }
+      }
+    },
+    "/v1/waf/validations": {
+      "get": {
+        "tags": ["waf-validations"],
+        "summary": "List validation runs",
+        "operationId": "listWafValidations",
+        "security": [{ "bearerAuth": ["waf:read"] }],
+        "responses": {
+          "200": {
+            "description": "Validation runs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/WafValidationRun" }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/WafFeatureDisabled" }
+        }
+      },
+      "post": {
+        "tags": ["waf-validations"],
+        "summary": "Start safe WAF validation",
+        "operationId": "startWafValidation",
+        "security": [{ "bearerAuth": ["waf:run"] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/WafValidationStart" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Validation started (metadata-only probe profiles)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/WafValidationStartResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/ApiErrorResponse" },
+          "404": { "$ref": "#/components/responses/WafFeatureDisabled" }
+        }
+      }
+    },
+    "/v1/waf/validation-plans": {
+      "get": {
+        "tags": ["waf-orchestrator"],
+        "summary": "List validation plans",
+        "operationId": "listValidationPlans",
+        "security": [{ "bearerAuth": ["waf:read"] }],
+        "responses": {
+          "200": {
+            "description": "Plans",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/WafValidationPlan" }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "503": { "$ref": "#/components/responses/PostgresOrchestratorUnavailable" },
+          "404": { "$ref": "#/components/responses/WafFeatureDisabled" }
+        }
+      },
+      "post": {
+        "tags": ["waf-orchestrator"],
+        "summary": "Create safe validation plan",
+        "operationId": "createValidationPlan",
+        "security": [{ "bearerAuth": ["waf:run"] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/WafValidationPlanCreate" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Plan created in safe orchestrator allowlist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["validation_plan"],
+                  "properties": {
+                    "validation_plan": { "$ref": "#/components/schemas/WafValidationPlan" }
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unsafe plan rejected",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" },
+                "example": { "error": "unsafe_orchestrator_plan" }
+              }
+            }
+          },
+          "503": { "$ref": "#/components/responses/PostgresOrchestratorUnavailable" }
+        }
+      }
+    },
+    "/v1/waf/validation-plans/scheduled": {
+      "get": {
+        "tags": ["waf-orchestrator"],
+        "summary": "List scheduled validation plans",
+        "operationId": "listScheduledValidationPlans",
+        "security": [{ "bearerAuth": ["waf:read"] }],
+        "responses": {
+          "200": {
+            "description": "Scheduled plans for operator runner / cron (externally scheduled—not in-repo daemon)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/WafValidationPlan" }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "503": { "$ref": "#/components/responses/PostgresOrchestratorUnavailable" }
+        }
+      }
+    },
+    "/v1/waf/validation-plans/{id}/execute": {
+      "post": {
+        "tags": ["waf-orchestrator"],
+        "summary": "Execute validation plan (safe continuation)",
+        "description": "Postgres signed-worker mode: at most one new safe test run per call; may return `continuation_required: true` while `delegated_jobs` remain. Claims a DB execution lease before side effects. Does not start unmanaged DDoS traffic.",
+        "operationId": "executeValidationPlan",
+        "security": [{ "bearerAuth": ["waf:run"] }],
+        "parameters": [{ "$ref": "#/components/parameters/ValidationPlanId" }],
+        "responses": {
+          "200": {
+            "description": "Plan execution progress",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ValidationPlanExecuteResponse" }
+              }
+            }
+          },
+          "404": {
+            "description": "Plan not found",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" },
+                "example": { "error": "validation_plan_not_found" }
+              }
+            }
+          },
+          "409": {
+            "description": "Lifecycle or lease conflict",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          },
+          "422": {
+            "description": "Runtime or batch preflight failure",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          },
+          "503": { "$ref": "#/components/responses/PostgresOrchestratorUnavailable" }
+        }
+      }
+    },
+    "/v1/waf/validation-plans/{id}/cancel": {
+      "post": {
+        "tags": ["waf-orchestrator"],
+        "summary": "Cancel validation plan execution",
+        "description": "Atomically cancels eligible plans, clears execution leases, and best-effort cancels delegated safe runs via control-plane `cancelTestRun` (metadata/run cancellation only—not raw traffic generation).",
+        "operationId": "cancelValidationPlan",
+        "security": [{ "bearerAuth": ["waf:run"] }],
+        "parameters": [{ "$ref": "#/components/parameters/ValidationPlanId" }],
+        "responses": {
+          "200": {
+            "description": "Cancelled plan snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["validation_plan"],
+                  "properties": {
+                    "validation_plan": { "$ref": "#/components/schemas/WafValidationPlan" }
+                  }
+                }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/ApiErrorResponse" },
+          "409": { "$ref": "#/components/responses/ApiErrorResponse" }
+        }
+      }
+    },
+    "/v1/waf/reports/{kind}/export": {
+      "get": {
+        "tags": ["waf-reports"],
+        "summary": "Export metadata-only WAF posture report with custody manifest",
+        "description": "Developer-validation local export only. JSON returns `{ payload, custody }`; markdown returns redacted text with embedded custody section. No raw bodies, headers, tokens, secrets, or provider URLs.",
+        "operationId": "exportWafReport",
+        "security": [{ "bearerAuth": ["waf:read"] }],
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": ["executive_coverage", "technical_evidence", "drift_audit", "connector_health", "compliance_audit", "board_roadmap_brief"]
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "schema": { "type": "string", "enum": ["json", "markdown"], "default": "json" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Report export",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/WafReportExport" }
+              },
+              "text/markdown": {
+                "schema": { "type": "string" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/ApiErrorResponse" },
+          "404": { "$ref": "#/components/responses/WafFeatureDisabled" }
+        }
+      }
+    },
+    "/v1/waf/retests": {
+      "get": {
+        "tags": ["waf-orchestrator"],
+        "summary": "List WAF retest requests",
+        "operationId": "listWafRetests",
+        "security": [{ "bearerAuth": ["waf:read"] }],
+        "parameters": [
+          {
+            "name": "drift_event_id",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "format": "uuid" },
+            "description": "Optional filter to retests for a specific drift event"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tenant-scoped retest requests (newest first)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/WafRetestRequest" }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/WafFeatureDisabled" },
+          "503": { "$ref": "#/components/responses/PostgresOrchestratorUnavailable" }
+        }
+      }
+    },
+    "/v1/waf/drift-events/{id}/retest": {
+      "post": {
+        "tags": ["waf-orchestrator"],
+        "summary": "Request drift retest",
+        "operationId": "requestDriftRetest",
+        "security": [{ "bearerAuth": ["waf:run"] }],
+        "parameters": [{ "$ref": "#/components/parameters/DriftEventId" }],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "note": { "type": "string", "description": "Metadata-only operator note" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Retest request created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["retest_request"],
+                  "properties": {
+                    "retest_request": { "$ref": "#/components/schemas/WafRetestRequest" }
+                  }
+                }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/ApiErrorResponse" }
+        }
+      }
+    },
+    "/v1/waf/retests/{id}/execute": {
+      "post": {
+        "tags": ["waf-orchestrator"],
+        "summary": "Execute retest (delegation-only)",
+        "description": "Postgres: ignores verdict-ish body fields; audits delegation when new jobs start. Safe continuation like validation plans.",
+        "operationId": "executeRetest",
+        "security": [{ "bearerAuth": ["waf:run"] }],
+        "parameters": [{ "$ref": "#/components/parameters/RetestId" }],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "note": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Retest delegation progress",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RetestExecuteResponse" }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/ApiErrorResponse" },
+          "409": { "$ref": "#/components/responses/ApiErrorResponse" },
+          "422": { "$ref": "#/components/responses/ApiErrorResponse" },
+          "503": { "$ref": "#/components/responses/PostgresOrchestratorUnavailable" }
+        }
+      }
+    },
+    "/v1/waf/retests/{id}/complete": {
+      "post": {
+        "tags": ["waf-orchestrator"],
+        "summary": "Complete retest from test-run verdict evidence",
+        "description": "Closes retest only when delegated test runs are terminal with verdict evidence via `getTestRun`. Atomic drift transition and audit—not posture closure by itself.",
+        "operationId": "completeRetest",
+        "security": [{ "bearerAuth": ["waf:run"] }],
+        "parameters": [{ "$ref": "#/components/parameters/RetestId" }],
+        "responses": {
+          "200": {
+            "description": "Retest completed",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RetestCompleteResponse" }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/ApiErrorResponse" },
+          "409": { "$ref": "#/components/responses/ApiErrorResponse" },
+          "422": { "$ref": "#/components/responses/ApiErrorResponse" }
+        }
+      }
+    },
+    "/v1/waf/cve-pipeline/{id}/playbook": {
+      "get": {
+        "tags": ["waf-cve-playbooks"],
+        "summary": "Get grouped CVE mitigation playbook",
+        "description": "Returns a metadata-only multi-vendor playbook for a CVE pipeline item with ordered vendor slices. Planned route (WAF-020); contract documented for OpenAPI parity.",
+        "operationId": "getCveMitigationPlaybook",
+        "security": [{ "bearerAuth": ["cve_pipeline:read"] }],
+        "parameters": [{ "$ref": "#/components/parameters/CvePipelineItemId" }],
+        "responses": {
+          "200": {
+            "description": "Grouped playbook for pipeline item",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["playbook"],
+                  "properties": {
+                    "playbook": { "$ref": "#/components/schemas/CveMitigationPlaybook" }
+                  }
+                }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/ApiErrorResponse" }
+        }
+      }
+    },
+    "/v1/waf/cve-pipeline/{id}/playbook/approve": {
+      "post": {
+        "tags": ["waf-cve-playbooks"],
+        "summary": "Approve CVE mitigation playbook for ticketing",
+        "description": "Human approval gate before ticketing. Planned route (WAF-020).",
+        "operationId": "approveCveMitigationPlaybook",
+        "security": [{ "bearerAuth": ["cve_pipeline:write"] }],
+        "parameters": [{ "$ref": "#/components/parameters/CvePipelineItemId" }],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "note": { "type": "string", "description": "Metadata-only reviewer note" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Approved playbook ready for tickets",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["playbook"],
+                  "properties": {
+                    "playbook": { "$ref": "#/components/schemas/CveMitigationPlaybook" }
+                  }
+                }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/ApiErrorResponse" }
+        }
+      }
+    },
+    "/v1/waf/cve-pipeline/playbooks/{id}/retest": {
+      "post": {
+        "tags": ["waf-cve-playbooks"],
+        "summary": "Coordinated safe retest across playbook vendor slices",
+        "description": "Starts bounded safe retest across all assets in an approved playbook. Planned route (WAF-020).",
+        "operationId": "retestCveMitigationPlaybook",
+        "security": [{ "bearerAuth": ["waf:run"] }],
+        "parameters": [{ "$ref": "#/components/parameters/CvePlaybookId" }],
+        "responses": {
+          "201": {
+            "description": "Coordinated retest started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "playbook": { "$ref": "#/components/schemas/CveMitigationPlaybook" },
+                    "retest_request": { "$ref": "#/components/schemas/WafRetestRequest" }
+                  }
+                }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/ApiErrorResponse" }
+        }
+      }
+    },
+    "/v1/waf/action-items": {
+      "get": {
+        "tags": ["waf-action-items"],
+        "summary": "List WAF action items",
+        "operationId": "listWafActionItems",
+        "security": [{ "bearerAuth": ["waf:read"] }],
+        "responses": {
+          "200": {
+            "description": "Grouped action items (metadata-only)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/WafActionItem" }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/WafFeatureDisabled" }
+        }
+      },
+      "post": {
+        "tags": ["waf-action-items"],
+        "summary": "Create or dedupe action item from finding",
+        "operationId": "createWafActionItem",
+        "security": [{ "bearerAuth": ["waf:write"] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/WafActionItemCreate" }
+            }
+          }
+        },
+        "responses": {
+          "201": { "$ref": "#/components/responses/WafActionItemMutation" },
+          "200": { "$ref": "#/components/responses/WafActionItemMutation" },
+          "404": { "$ref": "#/components/responses/ApiErrorResponse" }
+        }
+      }
+    },
+    "/v1/waf/action-items/{id}": {
+      "patch": {
+        "tags": ["waf-action-items"],
+        "summary": "Update action item status",
+        "operationId": "patchWafActionItem",
+        "security": [{ "bearerAuth": ["waf:write"] }],
+        "parameters": [{ "$ref": "#/components/parameters/ActionItemId" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/WafActionItemPatch" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/WafActionItemMutation" },
+          "404": { "$ref": "#/components/responses/ApiErrorResponse" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "AstraNull bearer auth: OIDC JWT (`oidc-jwt`), signed-session (non-production), or service account token (`svc_…`). Effective access requires tenant isolation plus RBAC permission per route (`waf:read`, `waf:write`, `waf:run`, connector/discovery/CVE permissions on extended routes documented in the markdown contract). Developer validation may use `x-tenant-id` / `x-user-id` / `x-role` headers when `ASTRANULL_WAF_POSTURE_ENABLED=1` and auth mode allows—forbidden in production."
+      }
+    },
+    "parameters": {
+      "WafAssetId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "ValidationPlanId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "DriftEventId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "RetestId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "ActionItemId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "CvePipelineItemId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "CvePlaybookId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string", "format": "uuid" }
+      }
+    },
+    "responses": {
+      "WafFeatureDisabled": {
+        "description": "WAF add-on disabled (`ASTRANULL_WAF_POSTURE_ENABLED` unset or not `1`)",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ApiError" },
+            "example": { "error": "waf_feature_disabled" }
+          }
+        }
+      },
+      "PostgresOrchestratorUnavailable": {
+        "description": "Postgres WAF orchestrator service not injected",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ApiError" },
+            "example": { "error": "postgres_waf_orchestrator_unavailable" }
+          }
+        }
+      },
+      "RbacDenied": {
+        "description": "Missing permission for route",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ApiError" },
+            "example": { "error": "forbidden", "message": "rbac.denied" }
+          }
+        }
+      },
+      "ApiErrorResponse": {
+        "description": "Error envelope",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ApiError" }
+          }
+        }
+      },
+      "WafActionItemMutation": {
+        "description": "Action item result",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "action_item": { "$ref": "#/components/schemas/WafActionItem" },
+                "created": { "type": "boolean" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "ApiError": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "string",
+            "enum": [
+              "waf_feature_disabled",
+              "waf_asset_not_found",
+              "waf_asset_not_approved",
+              "unsafe_waf_profile",
+              "marker_profile_required",
+              "unsafe_orchestrator_plan",
+              "postgres_waf_orchestrator_unavailable",
+              "validation_plan_not_found",
+              "validation_plan_already_completed",
+              "validation_plan_cancelled",
+              "validation_plan_not_cancellable",
+              "waf_orchestrator_execution_not_ready",
+              "waf_orchestrator_signed_worker_required",
+              "waf_orchestration_batch_too_large",
+              "validation_plan_execution_failed",
+              "waf_orchestrator_execution_in_progress",
+              "waf_retest_not_found",
+              "waf_retest_already_completed",
+              "waf_retest_already_delegated",
+              "waf_retest_closure_not_ready",
+              "waf_drift_event_not_found",
+              "waf_report_kind_invalid",
+              "forbidden",
+              "not_found"
+            ]
+          },
+          "message": { "type": "string" }
+        },
+        "description": "Standard JSON error shape. Orchestrator and WAF routes fail closed on missing services, unsafe profiles, lease conflicts, and cross-tenant access."
+      },
+      "PageCursor": {
+        "type": "object",
+        "properties": {
+          "next_cursor": { "type": "string", "nullable": true }
+        }
+      },
+      "WafAsset": {
+        "type": "object",
+        "required": ["id", "target_group_id", "canonical_url", "created_at"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "target_group_id": { "type": "string", "format": "uuid" },
+          "target_id": { "type": "string", "format": "uuid", "nullable": true },
+          "canonical_url": { "type": "string", "format": "uri" },
+          "asset_kind": { "type": "string" },
+          "expected_waf_required": { "type": "boolean" },
+          "expected_vendor_hint": { "type": "string", "nullable": true },
+          "business_criticality": { "type": "string" },
+          "traffic_tier": { "type": "string" },
+          "compliance_tags": { "type": "array", "items": { "type": "string" } },
+          "owner_hint": { "type": "string" },
+          "status": { "type": "string" },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" }
+        },
+        "description": "Customer-declared WAF asset. No cloud credential required for core validation."
+      },
+      "WafAssetCreate": {
+        "type": "object",
+        "required": ["target_group_id", "canonical_url"],
+        "properties": {
+          "target_group_id": { "type": "string", "format": "uuid" },
+          "target_id": { "type": "string", "format": "uuid" },
+          "canonical_url": { "type": "string", "format": "uri" },
+          "asset_kind": { "type": "string" },
+          "expected_waf_required": { "type": "boolean" },
+          "expected_vendor_hint": { "type": "string" },
+          "business_criticality": { "type": "string" },
+          "traffic_tier": { "type": "string" },
+          "compliance_tags": { "type": "array", "items": { "type": "string" } },
+          "owner_hint": { "type": "string" }
+        }
+      },
+      "WafAssetPatch": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "owner_hint": { "type": "string" },
+          "business_criticality": { "type": "string" },
+          "traffic_tier": { "type": "string" },
+          "compliance_tags": { "type": "array", "items": { "type": "string" } },
+          "expected_vendor_hint": { "type": "string" }
+        },
+        "description": "Partial metadata only; raw payload/header/body fields are rejected."
+      },
+      "WafAssetDetail": {
+        "type": "object",
+        "properties": {
+          "asset": { "$ref": "#/components/schemas/WafAsset" },
+          "current_posture": { "$ref": "#/components/schemas/WafPostureSnapshot" },
+          "latest_validation": { "$ref": "#/components/schemas/WafValidationRun" },
+          "baseline": { "type": "object", "description": "Metadata-only baseline summary" },
+          "drift": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/WafDriftEvent" }
+          },
+          "recommendations": { "type": "array", "items": { "type": "object" } }
+        }
+      },
+      "WafPostureSnapshot": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "waf_asset_id": { "type": "string", "format": "uuid" },
+          "status": {
+            "type": "string",
+            "enum": ["protected", "underprotected", "unprotected", "unknown", "excluded"]
+          },
+          "reason_codes": { "type": "array", "items": { "type": "string" } },
+          "detected_vendor": { "type": "string" },
+          "detected_product": { "type": "string" },
+          "risk_score": { "type": "integer", "minimum": 0, "maximum": 100 },
+          "risk_factors": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/WafRiskFactor" }
+          },
+          "priority_band": {
+            "type": "string",
+            "enum": ["tier_1", "tier_2", "tier_3", "tier_4"]
+          },
+          "recommended_action": { "type": "string" },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "source_mix": {
+            "type": "object",
+            "properties": {
+              "external": { "type": "boolean" },
+              "agent": { "type": "boolean" },
+              "connector": { "type": "boolean" }
+            }
+          },
+          "created_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "WafDriftEvent": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "waf_asset_id": { "type": "string", "format": "uuid" },
+          "drift_type": { "type": "string" },
+          "severity": { "type": "string" },
+          "status": { "type": "string" },
+          "before_summary": { "type": "object", "additionalProperties": true },
+          "after_summary": { "type": "object", "additionalProperties": true },
+          "finding_id": { "type": "string", "format": "uuid" },
+          "created_at": { "type": "string", "format": "date-time" }
+        },
+        "description": "Behavior drift summaries are metadata-only (no raw HTTP bodies or packets)."
+      },
+      "WafRiskFactor": {
+        "type": "object",
+        "properties": {
+          "factor": { "type": "string" },
+          "value": { "type": "string" },
+          "contribution": { "type": "integer", "minimum": 0, "maximum": 100 }
+        }
+      },
+      "WafCoverageTrendPoint": {
+        "type": "object",
+        "properties": {
+          "date": { "type": "string", "format": "date" },
+          "coverage_ratio": { "type": "number" },
+          "protected": { "type": "integer" },
+          "underprotected": { "type": "integer" },
+          "unprotected": { "type": "integer" },
+          "unknown": { "type": "integer" },
+          "excluded": { "type": "integer" }
+        }
+      },
+      "WafCoverageSummary": {
+        "type": "object",
+        "properties": {
+          "total": { "type": "integer" },
+          "total_assets": { "type": "integer" },
+          "protected": { "type": "integer" },
+          "underprotected": { "type": "integer" },
+          "unprotected": { "type": "integer" },
+          "unknown": { "type": "integer" },
+          "excluded": { "type": "integer" },
+          "coverage_ratio": { "type": "number" },
+          "percentages": { "type": "object", "additionalProperties": { "type": "number" } },
+          "trend": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/WafCoverageTrendPoint" }
+          },
+          "window_days": { "type": "integer" }
+        }
+      },
+      "WafCoverageVendors": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/WafCoverageVendorItem" }
+          },
+          "vendor_mix": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/WafVendorMixItem" }
+          }
+        }
+      },
+      "WafCoverageVendorItem": {
+        "type": "object",
+        "properties": {
+          "vendor": { "type": "string" },
+          "product": { "type": "string" },
+          "asset_count": { "type": "integer" },
+          "protected_count": { "type": "integer" },
+          "underprotected_count": { "type": "integer" },
+          "unprotected_count": { "type": "integer" },
+          "unknown_count": { "type": "integer" }
+        }
+      },
+      "WafVendorMixItem": {
+        "type": "object",
+        "properties": {
+          "vendor": { "type": "string" },
+          "product": { "type": "string" },
+          "protected_share_pct": { "type": "number" },
+          "asset_count": { "type": "integer" },
+          "protected_count": { "type": "integer" }
+        }
+      },
+      "WafCoverageEntities": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/WafCoverageEntityItem" }
+          }
+        }
+      },
+      "WafCoverageEntityItem": {
+        "type": "object",
+        "properties": {
+          "entity_id": { "type": "string" },
+          "entity_type": { "type": "string" },
+          "name": { "type": "string" },
+          "coverage_ratio": { "type": "number" },
+          "protected": { "type": "integer" },
+          "underprotected": { "type": "integer" },
+          "unprotected": { "type": "integer" },
+          "critical_gap_count": { "type": "integer" }
+        }
+      },
+      "WafCoverageGeography": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/WafCoverageGeographyItem" }
+          }
+        }
+      },
+      "WafCoverageGeographyItem": {
+        "type": "object",
+        "properties": {
+          "region_code": { "type": "string" },
+          "region_label": { "type": "string" },
+          "asset_count": { "type": "integer" },
+          "coverage_ratio": { "type": "number" },
+          "unprotected_critical_count": { "type": "integer" }
+        }
+      },
+      "WafCoverageCriticality": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/WafCoverageCriticalityItem" }
+          }
+        }
+      },
+      "WafCoverageCriticalityItem": {
+        "type": "object",
+        "properties": {
+          "business_criticality": { "type": "string" },
+          "asset_count": { "type": "integer" },
+          "coverage_ratio": { "type": "number" },
+          "protected": { "type": "integer" },
+          "underprotected": { "type": "integer" },
+          "unprotected": { "type": "integer" },
+          "critical_gap_count": { "type": "integer" }
+        }
+      },
+      "WafRiskRoadmap": {
+        "type": "object",
+        "properties": {
+          "tiers": { "$ref": "#/components/schemas/WafRiskRoadmapTiers" },
+          "generated_at": { "type": "string", "format": "date-time" },
+          "method": { "type": "string", "enum": ["waf_risk_v1"] }
+        }
+      },
+      "WafRiskRoadmapTiers": {
+        "type": "object",
+        "properties": {
+          "tier_1": { "type": "array", "items": { "$ref": "#/components/schemas/WafRiskRoadmapItem" } },
+          "tier_2": { "type": "array", "items": { "$ref": "#/components/schemas/WafRiskRoadmapItem" } },
+          "tier_3": { "type": "array", "items": { "$ref": "#/components/schemas/WafRiskRoadmapItem" } },
+          "tier_4": { "type": "array", "items": { "$ref": "#/components/schemas/WafRiskRoadmapItem" } }
+        }
+      },
+      "WafRiskRoadmapItem": {
+        "type": "object",
+        "properties": {
+          "waf_asset_id": { "type": "string", "format": "uuid" },
+          "hostname": { "type": "string" },
+          "owner_hint": { "type": "string" },
+          "detected_vendor": { "type": "string" },
+          "risk_score": { "type": "integer", "minimum": 0, "maximum": 100 },
+          "priority_band": { "type": "string", "enum": ["tier_1", "tier_2", "tier_3", "tier_4"] },
+          "primary_reason_codes": { "type": "array", "items": { "type": "string" } },
+          "recommended_action": { "type": "string" },
+          "finding_ids": { "type": "array", "items": { "type": "string" } },
+          "action_item_ids": { "type": "array", "items": { "type": "string" } },
+          "posture_status": { "type": "string" }
+        }
+      },
+      "WafVendorConsolidation": {
+        "type": "object",
+        "properties": {
+          "vendor_footprint": { "type": "array", "items": { "type": "object" } },
+          "overlap_candidates": { "type": "array", "items": { "type": "object" } },
+          "consolidation_opportunities": { "type": "array", "items": { "type": "object" } },
+          "operating_cost_signals": { "type": "array", "items": { "type": "object" } }
+        },
+        "description": "Advisory metadata only; non-prescriptive vendor consolidation overlay."
+      },
+      "WafValidationStart": {
+        "type": "object",
+        "required": ["waf_asset_id", "modes"],
+        "properties": {
+          "waf_asset_id": { "type": "string", "format": "uuid" },
+          "modes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "fingerprint",
+                "marker",
+                "origin_bypass",
+                "rate_limit_safe",
+                "connector_only",
+                "combined"
+              ]
+            }
+          },
+          "marker_profile": {
+            "type": "object",
+            "description": "Allowlisted marker metadata; server generates nonce"
+          },
+          "probe_profile": {
+            "type": "object",
+            "description": "Bounded safe probe profile; cannot exceed catalog maximums"
+          }
+        }
+      },
+      "WafValidationRun": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "waf_asset_id": { "type": "string", "format": "uuid" },
+          "status": { "type": "string" },
+          "modes": { "type": "array", "items": { "type": "string" } },
+          "created_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "WafValidationStartResponse": {
+        "type": "object",
+        "properties": {
+          "validation_run": { "$ref": "#/components/schemas/WafValidationRun" },
+          "test_run": { "type": "object", "description": "Linked safe test run metadata" },
+          "probe_job": { "type": "object", "description": "Signed-worker probe job metadata when applicable" }
+        }
+      },
+      "WafValidationPlanCreate": {
+        "type": "object",
+        "required": ["target_group_id", "scenarios"],
+        "properties": {
+          "target_group_id": { "type": "string", "format": "uuid" },
+          "name": { "type": "string" },
+          "scheduled_at": { "type": "string", "format": "date-time" },
+          "max_concurrent": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Caps assets × scenarios work queue; preflight `waf_orchestration_batch_too_large` when exceeded"
+          },
+          "timeout_ms": { "type": "integer", "minimum": 100, "maximum": 30000 },
+          "scenarios": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "waf_asset_id": { "type": "string", "format": "uuid" },
+                "check_id": { "type": "string" },
+                "mode": { "type": "string" }
+              }
+            }
+          }
+        },
+        "description": "Safe orchestrator plan body only; unsafe scenarios return `unsafe_orchestrator_plan`."
+      },
+      "WafValidationPlan": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "target_group_id": { "type": "string", "format": "uuid" },
+          "state": {
+            "type": "string",
+            "enum": ["draft", "scheduled", "running", "completed", "cancelled"]
+          },
+          "max_concurrent": { "type": "integer" },
+          "timeout_ms": { "type": "integer" },
+          "scheduled_at": { "type": "string", "format": "date-time", "nullable": true },
+          "delegated_jobs": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/DelegatedJob" }
+          },
+          "execution_lock_token": { "type": "string", "nullable": true },
+          "execution_lock_expires_at": { "type": "string", "format": "date-time", "nullable": true },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" }
+        },
+        "description": "`completed` indicates all planned jobs delegated—not final WAF posture or coverage closure."
+      },
+      "DelegatedJob": {
+        "type": "object",
+        "properties": {
+          "waf_asset_id": { "type": "string", "format": "uuid" },
+          "scenario_key": { "type": "string" },
+          "test_run_id": { "type": "string", "format": "uuid" },
+          "probe_job_id": { "type": "string", "format": "uuid", "nullable": true },
+          "status": { "type": "string" },
+          "metadata": {
+            "type": "object",
+            "description": "Metadata-only delegation summary; no raw traffic payloads"
+          }
+        }
+      },
+      "ValidationPlanExecuteResponse": {
+        "type": "object",
+        "required": ["validation_plan"],
+        "properties": {
+          "validation_plan": { "$ref": "#/components/schemas/WafValidationPlan" },
+          "delegated_jobs": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/DelegatedJob" }
+          },
+          "continuation_required": {
+            "type": "boolean",
+            "description": "True when pending delegation remains after this tick"
+          }
+        }
+      },
+      "WafRetestRequest": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "drift_event_id": { "type": "string", "format": "uuid" },
+          "waf_asset_id": { "type": "string", "format": "uuid" },
+          "status": {
+            "type": "string",
+            "enum": ["requested", "running", "delegated", "completed"]
+          },
+          "verdict": { "type": "string", "nullable": true },
+          "delegated_jobs": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/DelegatedJob" }
+          },
+          "execution_lock_token": { "type": "string", "nullable": true },
+          "execution_lock_expires_at": { "type": "string", "format": "date-time", "nullable": true },
+          "created_at": { "type": "string", "format": "date-time" },
+          "completed_at": { "type": "string", "format": "date-time", "nullable": true }
+        },
+        "description": "`delegated` means all retest scenarios delegated—not verdict/drift closure until `complete`."
+      },
+      "RetestExecuteResponse": {
+        "type": "object",
+        "required": ["retest_request"],
+        "properties": {
+          "retest_request": { "$ref": "#/components/schemas/WafRetestRequest" },
+          "delegated_jobs": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/DelegatedJob" }
+          },
+          "continuation_required": { "type": "boolean" },
+          "validation_run": { "$ref": "#/components/schemas/WafValidationRun" }
+        }
+      },
+      "RetestCompleteResponse": {
+        "type": "object",
+        "properties": {
+          "retest_request": { "$ref": "#/components/schemas/WafRetestRequest" },
+          "verdict": { "type": "string" },
+          "delegated_jobs": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/DelegatedJob" }
+          }
+        }
+      },
+      "WafActionItem": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "waf_asset_id": { "type": "string", "format": "uuid" },
+          "primary_reason": { "type": "string" },
+          "status": { "type": "string" },
+          "finding_ids": { "type": "array", "items": { "type": "string", "format": "uuid" } },
+          "title": { "type": "string" },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" }
+        },
+        "description": "Deduped remediation grouping; metadata-only ticket pointers."
+      },
+      "WafActionItemCreate": {
+        "type": "object",
+        "required": ["finding_id"],
+        "properties": {
+          "finding_id": { "type": "string", "format": "uuid" },
+          "status": { "type": "string" },
+          "owner_hint": { "type": "string" }
+        }
+      },
+      "WafActionItemPatch": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "string" },
+          "notes": { "type": "string" }
+        }
+      },
+      "WafReportExport": {
+        "type": "object",
+        "required": ["payload", "custody"],
+        "properties": {
+          "payload": {
+            "type": "object",
+            "description": "Metadata-only WAF report body (kind-specific summaries; no raw traffic or secrets)"
+          },
+          "custody": {
+            "type": "object",
+            "description": "Chain-of-custody manifest with content_sha256 over canonical JSON payload"
+          }
+        }
+      },
+      "CveMitigationPlaybook": {
+        "type": "object",
+        "properties": {
+          "playbook_id": { "type": "string", "format": "uuid" },
+          "cve_pipeline_item_id": { "type": "string", "format": "uuid" },
+          "cve_id": { "type": "string" },
+          "status": {
+            "type": "string",
+            "enum": ["draft", "approved", "in_progress", "retest_pending", "closed"]
+          },
+          "vendor_slices": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/CveMitigationPlaybookVendorSlice" }
+          },
+          "asset_count": { "type": "integer" },
+          "severity": { "type": "string" },
+          "known_exploited": { "type": "boolean" },
+          "created_at": { "type": "string", "format": "date-time" },
+          "approved_at": { "type": "string", "format": "date-time", "nullable": true }
+        },
+        "description": "Grouped multi-vendor CVE mitigation checklist (metadata only; no auto-deploy)."
+      },
+      "CveMitigationPlaybookVendorSlice": {
+        "type": "object",
+        "properties": {
+          "vendor": { "type": "string" },
+          "product": { "type": "string" },
+          "asset_count": { "type": "integer" },
+          "ordered_actions": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Metadata-only vendor-specific mitigation checklist"
+          },
+          "hostname_scope_hashes": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Stable scope fingerprints only; no raw hostnames in tickets when redacted"
+          },
+          "status": { "type": "string", "enum": ["pending", "deployed", "retest_passed", "accepted_risk"] }
+        }
+      }
+    }
+  },
+  "security": [{ "bearerAuth": [] }],
+  "x-astranull-contract": {
+    "markdown_source": "docs/backend/13-waf-posture-api-contract.md",
+    "feature_flag": "ASTRANULL_WAF_POSTURE_ENABLED",
+    "orchestrator_runner": "scripts/waf-orchestrator-runner.mjs",
+    "production_gates_open": [
+      "endpoint_integration_tests",
+      "staging_live_orchestrator_runner_evidence",
+      "provider_connector_workers",
+      "waf_security_observability_release_signoff"
+    ]
+  }
+}

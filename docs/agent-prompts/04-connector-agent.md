@@ -5,7 +5,9 @@ Read:
 1. `docs/integrations/01-waf-cdn-cloud-connectors.md`
 2. `docs/integrations/02-remediation-siem-soar-connectors.md`
 3. `docs/backend/12-waf-posture-data-model.md`
-4. Existing `docs/api.md` secrets section.
+4. `docs/backend/16-waf-analytics-schema-extensions.md`
+5. `docs/detection/17-multi-vendor-cve-mitigation-playbook.md`
+6. Existing `docs/api.md` secrets section.
 
 Your task:
 

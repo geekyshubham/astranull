@@ -13,11 +13,15 @@ const PREFIX = {
   finding: 'fnd',
   report: 'rpt',
   hs: 'hsr',
+  cust: 'cust',
   job: 'job',
   evidence: 'evd',
   agentUpdateRelease: 'aup',
   agentUpdateStatus: 'aus',
   agentUpdateTrustKey: 'autk',
+  signup: 'sgn',
+  internalAudit: 'iaud',
+  approval: 'appr',
 };
 
 export function newId(kind) {

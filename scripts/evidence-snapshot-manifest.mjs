@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { sha256CanonicalJson } from '../src/lib/custody.mjs';
+import { verifyCustodyManifestSignature } from '../src/lib/evidenceSigning.mjs';
 import { redactObject, redactString } from '../src/lib/redact.mjs';
 
 const DEFAULT_OUT = 'output/evidence-snapshot-manifest.json';
@@ -160,6 +161,41 @@ function validateSigner(signer, index) {
       gaps.push(`${prefix}.${field}:missing`);
     }
   }
+  if (hasValue(signer.signature) && typeof signer.signature !== 'string') {
+    gaps.push(`${prefix}.signature:invalid_type`);
+  }
+  return gaps;
+}
+
+/**
+ * @param {{
+ *   tenantId: string,
+ *   snapshot: Record<string, unknown>,
+ *   index: number,
+ *   env?: NodeJS.ProcessEnv,
+ * }} input
+ */
+export function validateSnapshotSignature(input) {
+  const gaps = [];
+  const prefix = `snapshots[${input.index}].signer`;
+  const signer = input.snapshot?.signer;
+  if (!isObject(signer) || !hasValue(signer.signature)) {
+    return gaps;
+  }
+  const verification = verifyCustodyManifestSignature({
+    tenantId: input.tenantId,
+    custodyManifestDigest: String(input.snapshot.custody_manifest_digest ?? ''),
+    signer,
+    env: input.env,
+  });
+  if (verification.ok) {
+    return gaps;
+  }
+  if (verification.error === 'unknown_signing_key_reference' || verification.error === 'invalid_signing_key_config') {
+    gaps.push(`${prefix}:verification_unconfigured`);
+    return gaps;
+  }
+  gaps.push(`${prefix}.signature:${verification.error}`);
   return gaps;
 }
 
@@ -178,7 +214,7 @@ function validateOperatorSignoff(signoff, index) {
   return gaps;
 }
 
-function validateSnapshotEntry(snapshot, index) {
+function validateSnapshotEntry(snapshot, index, tenantId, env = process.env) {
   const gaps = [];
   const prefix = `snapshots[${index}]`;
   if (!isObject(snapshot)) {
@@ -202,6 +238,9 @@ function validateSnapshotEntry(snapshot, index) {
   }
   gaps.push(...validateRetentionPolicy(snapshot.retention_policy, index));
   gaps.push(...validateSigner(snapshot.signer, index));
+  if (hasValue(tenantId)) {
+    gaps.push(...validateSnapshotSignature({ tenantId, snapshot, index, env }));
+  }
   gaps.push(...validateOperatorSignoff(snapshot.operator_signoff, index));
 
   const declaredHash = String(snapshot.snapshot_hash ?? '');
@@ -225,14 +264,14 @@ function validateSnapshotEntry(snapshot, index) {
   return gaps;
 }
 
-function validateSnapshotChain(snapshots) {
+function validateSnapshotChain(snapshots, tenantId, env = process.env) {
   const gaps = [];
   if (!Array.isArray(snapshots) || snapshots.length === 0) {
     gaps.push('snapshots:missing_or_empty');
     return gaps;
   }
   snapshots.forEach((snapshot, index) => {
-    gaps.push(...validateSnapshotEntry(snapshot, index));
+    gaps.push(...validateSnapshotEntry(snapshot, index, tenantId, env));
   });
   const first = snapshots[0];
   if (isObject(first) && first.previous_snapshot_hash !== null) {
@@ -274,7 +313,7 @@ export function validateEvidenceSnapshotBatch(batch) {
     ]),
   ].sort();
 
-  gaps.push(...validateSnapshotChain(batch.snapshots));
+  gaps.push(...validateSnapshotChain(batch.snapshots, batch.tenant_id));
 
   const ok = gaps.length === 0 && forbidden_fields.length === 0;
   const snapshot_count = Array.isArray(batch.snapshots) ? batch.snapshots.length : 0;
@@ -364,6 +403,7 @@ export function createEvidenceSnapshotManifest(input) {
     gaps: validation.gaps,
     caveats: [
       'Metadata-only immutable evidence snapshot manifest; no raw payloads, logs, tokens, secrets, database URLs, or ciphertext.',
+      'When signer.signature is present, signatures are verified against tenant-scoped key references from ASTRANULL_EVIDENCE_SIGNING_KEYS_JSON (no private keys in-repo).',
       'This utility does not implement external object storage, KMS/HSM signing, or durable immutable archives.',
     ],
   };

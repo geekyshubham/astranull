@@ -40,6 +40,13 @@ const REQUIRED_TABLES = [
   'tenants',
   'environments',
   'users',
+  'signup_requests',
+  'staff_users',
+  'tenant_accounts',
+  'tenant_subscriptions',
+  'entitlement_grants',
+  'internal_approval_requests',
+  'internal_audit_log',
   'target_groups',
   'targets',
   'bootstrap_tokens',
@@ -71,7 +78,11 @@ const REQUIRED_TABLES = [
   'waf_scenario_results',
   'waf_posture_snapshots',
   'waf_baselines',
+  'waf_validation_plans',
+  'waf_baseline_approvals',
+  'waf_retest_requests',
   'waf_drift_events',
+  'waf_drift_scan_results',
   'waf_connectors',
   'waf_connector_snapshots',
   'cve_pipeline_items',
@@ -80,6 +91,8 @@ const REQUIRED_TABLES = [
   'discovery_entities',
   'supply_chain_risks',
   'waf_action_items',
+  'waf_coverage_daily_rollups',
+  'waf_scenario_intakes',
 ];
 
 const REQUIRED_COLUMNS = [
@@ -118,12 +131,26 @@ const REQUIRED_COLUMNS = [
   [/CREATE TABLE high_scale_telemetry[\s\S]*?metrics_json/m, 'high_scale_telemetry.metrics_json'],
   [/CREATE TABLE soc_reports[\s\S]*?derived_json/m, 'soc_reports.derived_json'],
   [/CREATE TABLE notification_delivery_attempts[\s\S]*?destination_preview/m, 'notification_delivery_attempts.destination_preview'],
+  [/CREATE TABLE notification_delivery_attempts[\s\S]*?attempt_number/m, 'notification_delivery_attempts.attempt_number'],
+  [/CREATE TABLE notification_delivery_attempts[\s\S]*?max_attempts/m, 'notification_delivery_attempts.max_attempts'],
+  [/CREATE TABLE notification_delivery_attempts[\s\S]*?next_retry_at/m, 'notification_delivery_attempts.next_retry_at'],
+  [/CREATE TABLE notification_delivery_attempts[\s\S]*?provider_error/m, 'notification_delivery_attempts.provider_error'],
+  [/CREATE TABLE notification_delivery_attempts[\s\S]*?exhausted/m, 'notification_delivery_attempts.exhausted'],
+  [/CREATE TABLE notification_delivery_attempts[\s\S]*?provider_status/m, 'notification_delivery_attempts.provider_status'],
   [/CREATE TABLE verdicts[\s\S]*?placement_confidence_json/m, 'verdicts.placement_confidence_json'],
   [/CREATE TABLE production_release_evidence[\s\S]*?evidence_json/m, 'production_release_evidence.evidence_json'],
   [/CREATE TABLE production_release_evidence[\s\S]*?validation_json/m, 'production_release_evidence.validation_json'],
+  [/CREATE TABLE authorization_artifacts[\s\S]*?content_sha256/m, 'authorization_artifacts.content_sha256'],
+  [/CREATE TABLE authorization_artifacts[\s\S]*?custody_id/m, 'authorization_artifacts.custody_id'],
+  [/CREATE TABLE authorization_artifacts[\s\S]*?upload_envelope/m, 'authorization_artifacts.upload_envelope'],
   [/CREATE TABLE waf_scenario_results[\s\S]*?evidence_summary_json/m, 'waf_scenario_results.evidence_summary_json'],
   [/CREATE TABLE waf_connectors[\s\S]*?config_json/m, 'waf_connectors.config_json'],
   [/CREATE TABLE waf_connectors[\s\S]*?status TEXT NOT NULL DEFAULT 'disabled'/m, 'waf_connectors.status default disabled'],
+  [/CREATE TABLE waf_baselines[\s\S]*?updated_at/m, 'waf_baselines.updated_at'],
+  [/CREATE TABLE waf_validation_plans[\s\S]*?execution_lock_token/m, 'waf_validation_plans.execution_lock_token'],
+  [/CREATE TABLE waf_validation_plans[\s\S]*?execution_lock_expires_at/m, 'waf_validation_plans.execution_lock_expires_at'],
+  [/CREATE TABLE waf_retest_requests[\s\S]*?execution_lock_token/m, 'waf_retest_requests.execution_lock_token'],
+  [/CREATE TABLE waf_retest_requests[\s\S]*?execution_lock_expires_at/m, 'waf_retest_requests.execution_lock_expires_at'],
 ];
 
 const WAF_FORBIDDEN_RAW_COLUMN_PATTERNS = [
@@ -154,11 +181,26 @@ const REQUIRED_INDEXES = [
   'idx_high_scale_telemetry_request_observed',
   'idx_notification_delivery_attempts_event',
   'idx_production_release_evidence_tenant_kind_created',
+  'idx_authorization_artifacts_tenant_request_created',
+  'idx_authorization_artifacts_tenant_custody',
+  'uniq_signup_requests_active_domain',
+  'uniq_signup_requests_active_org',
+  'idx_signup_requests_state_created',
+  'idx_internal_approval_requests_queue',
+  'idx_internal_audit_log_tenant_created',
+  'idx_internal_audit_log_staff_created',
   'idx_waf_assets_tenant_group_url',
   'idx_external_asset_candidates_approval_queue',
   'uniq_waf_posture_snapshot_current',
   'idx_waf_posture_snapshots_dashboard',
   'idx_waf_drift_events_queue',
+  'idx_waf_drift_scan_results_latest',
+  'idx_waf_validation_plans_tenant_state',
+  'idx_waf_validation_plans_scheduled',
+  'idx_waf_retest_requests_drift',
+  'idx_waf_validation_plans_execution_lock',
+  'idx_waf_retest_requests_execution_lock',
+  'idx_waf_baseline_approvals_baseline',
   'idx_waf_connector_snapshots_history',
   'idx_cve_pipeline_items_lookup',
   'uniq_cve_asset_matches_dedupe',
@@ -174,6 +216,11 @@ const TENANT_RLS_TABLES = [
   'tenants',
   'environments',
   'users',
+  'tenant_accounts',
+  'tenant_subscriptions',
+  'entitlement_grants',
+  'internal_approval_requests',
+  'internal_audit_log',
   'target_groups',
   'targets',
   'bootstrap_tokens',
@@ -209,7 +256,11 @@ const TENANT_RLS_TABLES = [
   'waf_scenario_results',
   'waf_posture_snapshots',
   'waf_baselines',
+  'waf_validation_plans',
+  'waf_baseline_approvals',
+  'waf_retest_requests',
   'waf_drift_events',
+  'waf_drift_scan_results',
   'waf_connectors',
   'waf_connector_snapshots',
   'cve_pipeline_items',
@@ -218,6 +269,8 @@ const TENANT_RLS_TABLES = [
   'discovery_entities',
   'supply_chain_risks',
   'waf_action_items',
+  'waf_coverage_daily_rollups',
+  'waf_scenario_intakes',
 ];
 
 const REQUIRED_RLS = [
@@ -270,12 +323,19 @@ export const TENANT_PARENT_UNIQUE_KEYS = [
   'waf_assets_tenant_id_id_key',
   'waf_validation_runs_tenant_id_id_key',
   'waf_baselines_tenant_id_id_key',
+  'waf_validation_plans_tenant_id_id_key',
+  'waf_baseline_approvals_tenant_id_id_key',
+  'waf_retest_requests_tenant_id_id_key',
+  'waf_drift_events_tenant_id_id_key',
+  'waf_drift_scan_results_tenant_id_id_key',
   'waf_connectors_tenant_id_id_key',
   'cve_pipeline_items_tenant_id_id_key',
   'cve_asset_matches_tenant_id_id_key',
   'discovery_entities_tenant_id_id_key',
   'supply_chain_risks_tenant_id_id_key',
   'waf_action_items_tenant_id_id_key',
+  'waf_coverage_daily_rollups_tenant_id_id_key',
+  'waf_scenario_intakes_tenant_id_id_key',
 ];
 
 /** Named composite FK constraints enforced in schema + baseline migration. */
@@ -321,6 +381,7 @@ export const TENANT_CONSISTENT_FK_CONSTRAINTS = [
   'fk_waf_assets_target_group_tenant',
   'fk_waf_assets_target_tenant',
   'fk_waf_assets_environment_tenant',
+  'fk_waf_assets_entity_tenant',
   'fk_waf_fingerprints_waf_asset_tenant',
   'fk_waf_fingerprints_test_run_tenant',
   'fk_waf_validation_runs_test_run_tenant',
@@ -328,6 +389,11 @@ export const TENANT_CONSISTENT_FK_CONSTRAINTS = [
   'fk_waf_scenario_results_waf_validation_run_tenant',
   'fk_waf_posture_snapshots_waf_asset_tenant',
   'fk_waf_baselines_waf_asset_tenant',
+  'fk_waf_validation_plans_target_group_tenant',
+  'fk_waf_baseline_approvals_baseline_tenant',
+  'fk_waf_baseline_approvals_waf_asset_tenant',
+  'fk_waf_retest_requests_drift_event_tenant',
+  'fk_waf_retest_requests_waf_asset_tenant',
   'fk_waf_drift_events_waf_asset_tenant',
   'fk_waf_drift_events_baseline_tenant',
   'fk_waf_drift_events_finding_tenant',
@@ -340,6 +406,7 @@ export const TENANT_CONSISTENT_FK_CONSTRAINTS = [
   'fk_waf_rule_recommendations_cve_asset_match_tenant',
   'fk_external_asset_candidates_entity',
   'fk_waf_action_items_cve_pipeline_item_tenant',
+  'fk_waf_action_items_waf_asset_tenant',
 ];
 
 const TENANT_FK_COMPOSITE_SHAPE =
@@ -585,12 +652,34 @@ export function validateDbSchema({ schemaSql, migrationSqls = [] } = {}) {
         /ADD CONSTRAINT fk_waf_action_items_cve_pipeline_item_tenant\b/,
       ),
     );
+    errors.push(
+      assertPattern(
+        'migration:0017_waf_analytics_extensions',
+        combinedMigration,
+        /CREATE TABLE IF NOT EXISTS waf_coverage_daily_rollups/,
+      ),
+    );
+    errors.push(
+      assertPattern(
+        'migration:waf_analytics_rls',
+        combinedMigration,
+        /ALTER TABLE waf_coverage_daily_rollups FORCE ROW LEVEL SECURITY/,
+      ),
+    );
+    errors.push(
+      assertPattern(
+        'migration:waf_assets_geography',
+        combinedMigration,
+        /ADD COLUMN IF NOT EXISTS region_code TEXT/,
+      ),
+    );
     for (const idx of [
       'idx_supply_chain_risks_lookup',
       'idx_waf_action_items_status',
       'idx_discovery_entities_lookup',
       'uniq_supply_chain_risks_dedupe',
       'uniq_waf_action_items_dedupe',
+      'uniq_waf_coverage_daily_rollups_tenant_date',
     ]) {
       errors.push(
         assertPattern(

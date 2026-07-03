@@ -1,3 +1,4 @@
+import { normalizeContentSha256 } from './authorizationArtifactLedger.mjs';
 import { newId } from './ids.mjs';
 import { redactObject, redactString } from './redact.mjs';
 import {
@@ -90,11 +91,27 @@ const TELEMETRY_METRICS_DENYLIST = new Set([
   'payload',
   'body',
   'headers',
+  'request_body',
+  'request_headers',
   'authorization',
   'cookie',
   'raw_log',
   'log_line',
 ]);
+const TELEMETRY_METRICS_COMPACT_DENYLIST = new Set(
+  [...TELEMETRY_METRICS_DENYLIST].map((key) => key.replace(/_/g, '')),
+);
+
+function normalizeTelemetryFieldKey(key) {
+  return String(key)
+    .trim()
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2')
+    .replace(/([a-z])([A-Z])/g, '$1_$2')
+    .replace(/[^a-zA-Z0-9]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .toLowerCase();
+}
 
 export function telemetryObjectContainsForbiddenKeys(value) {
   if (value == null) return false;
@@ -106,7 +123,16 @@ export function telemetryObjectContainsForbiddenKeys(value) {
   }
   if (typeof value !== 'object') return false;
   for (const key of Object.keys(value)) {
-    if (TELEMETRY_METRICS_DENYLIST.has(key.toLowerCase())) return true;
+    const normalized = normalizeTelemetryFieldKey(key);
+    const compact = normalized.replace(/_/g, '');
+    if (
+      TELEMETRY_METRICS_DENYLIST.has(normalized)
+      || TELEMETRY_METRICS_COMPACT_DENYLIST.has(compact)
+      || normalized.startsWith('raw_')
+      || compact.startsWith('raw')
+    ) {
+      return true;
+    }
     if (telemetryObjectContainsForbiddenKeys(value[key])) return true;
   }
   return false;
@@ -779,12 +805,29 @@ export function persistArtifactProofMetadata(body) {
   return proof;
 }
 
-export function buildArtifactFromUpload(ctx, body) {
+export function buildArtifactFromUpload(ctx, body, options = {}) {
   const proof = persistArtifactProofMetadata(body);
+  const custodyId = newId('cust');
+  const contentSha256 = normalizeContentSha256(body.content_sha256);
   return {
     id: newId('art'),
     type: body.type,
     status: 'pending_review',
+    content_sha256: contentSha256,
+    custody_id: custodyId,
+    custody_uri:
+      body.custody_uri != null && String(body.custody_uri).trim() !== ''
+        ? redactString(String(body.custody_uri))
+        : `custody://${custodyId}`,
+    content_type:
+      body.content_type != null && String(body.content_type).trim() !== ''
+        ? redactString(String(body.content_type))
+        : null,
+    filename_redacted:
+      body.filename != null && String(body.filename).trim() !== ''
+        ? redactString(String(body.filename))
+        : null,
+    upload_envelope: options.uploadEnvelope ?? 'json',
     provider_name: body.provider_name ?? null,
     provider_ref: body.provider_ref ?? null,
     valid_window: proof.valid_window ?? body.valid_window ?? null,

@@ -1,4 +1,4 @@
-import { withTenantContext } from './tenantContext.mjs';
+import { runWithTenantClient, withTenantContext } from './tenantContext.mjs';
 
 const CVE_PIPELINE_ITEM_COLUMNS = `id, tenant_id, cve_id, published_at, severity, known_exploited,
   public_poc_signal, state, triage_summary_json, created_at, updated_at`;
@@ -29,11 +29,16 @@ function parseJsonObject(value) {
 
 function buildTriageSummaryJson(item = {}) {
   const existing = parseJsonObject(item.triage_summary_json);
-  return {
+  const summary = {
     affected_products: item.affected_products ?? existing.affected_products ?? [],
     vendor_advisories: item.vendor_advisories ?? existing.vendor_advisories ?? [],
     triage_result: item.triage_result ?? existing.triage_result ?? null,
   };
+  const descriptionSummary = item.description_summary ?? existing.description_summary;
+  if (typeof descriptionSummary === 'string' && descriptionSummary.trim()) {
+    summary.description_summary = descriptionSummary.trim();
+  }
+  return summary;
 }
 
 export function mapCvePipelineItemRow(row) {
@@ -83,6 +88,10 @@ function decodeMatchSources(matchSources = []) {
       meta.asset_display = value.slice('__meta:asset_display:'.length);
       continue;
     }
+    if (value.startsWith('__meta:last_waf_validation_run_id:')) {
+      meta.last_waf_validation_run_id = value.slice('__meta:last_waf_validation_run_id:'.length);
+      continue;
+    }
     if (!match_source) {
       match_source = value;
       continue;
@@ -96,6 +105,7 @@ function decodeMatchSources(matchSources = []) {
     requires_review: meta.requires_review ?? false,
     exposure_claim_allowed: meta.exposure_claim_allowed ?? false,
     asset_display: meta.asset_display ?? null,
+    last_waf_validation_run_id: meta.last_waf_validation_run_id ?? null,
     match_reasons,
   };
 }
@@ -112,6 +122,9 @@ function encodeMatchSources(match = {}) {
   sources.push(`__meta:exposure_claim_allowed:${match.exposure_claim_allowed === true}`);
   if (match.asset_display) {
     sources.push(`__meta:asset_display:${match.asset_display}`);
+  }
+  if (match.last_waf_validation_run_id) {
+    sources.push(`__meta:last_waf_validation_run_id:${match.last_waf_validation_run_id}`);
   }
   for (const reason of match.match_reasons ?? []) {
     const trimmed = String(reason).trim();
@@ -136,6 +149,7 @@ export function mapCveAssetMatchRow(row, assetDisplay = null) {
     requires_review: decoded.requires_review,
     exposure_claim_allowed: decoded.exposure_claim_allowed,
     validation_status: row.validation_status ?? 'pending',
+    last_waf_validation_run_id: decoded.last_waf_validation_run_id ?? null,
     risk_score: Number(row.risk_score ?? 0),
     finding_id: row.finding_id ?? null,
     created_at: toIso(row.created_at),
@@ -218,9 +232,39 @@ export function createCvePipelineRepository(pool) {
       });
     },
 
-    async updateCvePipelineItemStage(ctx, id, stage, extras = {}) {
+    async saveMitigationPlaybook(ctx, id, playbook, options = {}) {
       const tenantId = ctx.tenantId;
-      return withTenantContext(pool, tenantId, async (client) => {
+      return runWithTenantClient(pool, tenantId, options.client, async (client) => {
+        const existing = await client.query(
+          `SELECT state, triage_summary_json
+           FROM cve_pipeline_items
+           WHERE tenant_id = $1 AND id = $2`,
+          [tenantId, id],
+        );
+        const row = existing.rows[0];
+        if (!row) return null;
+
+        const currentSummary = parseJsonObject(row.triage_summary_json);
+        const triageSummary = {
+          ...currentSummary,
+          mitigation_playbook: playbook,
+        };
+        const updatedAt = playbook.updated_at ?? new Date().toISOString();
+        const { rows } = await client.query(
+          `UPDATE cve_pipeline_items
+           SET triage_summary_json = $3::jsonb,
+               updated_at = $4::timestamptz
+           WHERE tenant_id = $1 AND id = $2
+           RETURNING ${CVE_PIPELINE_ITEM_COLUMNS}`,
+          [tenantId, id, JSON.stringify(triageSummary), updatedAt],
+        );
+        return mapCvePipelineItemRow(rows[0] ?? null);
+      });
+    },
+
+    async updateCvePipelineItemStage(ctx, id, stage, extras = {}, options = {}) {
+      const tenantId = ctx.tenantId;
+      return runWithTenantClient(pool, tenantId, options.client, async (client) => {
         const existing = await client.query(
           `SELECT triage_summary_json
            FROM cve_pipeline_items
@@ -233,6 +277,17 @@ export function createCvePipelineRepository(pool) {
           ...(extras.triage_result !== undefined ? { triage_result: extras.triage_result } : {}),
           ...(extras.affected_products !== undefined ? { affected_products: extras.affected_products } : {}),
           ...(extras.vendor_advisories !== undefined ? { vendor_advisories: extras.vendor_advisories } : {}),
+          ...(extras.validation_bindings !== undefined
+            ? {
+                validation_bindings: {
+                  ...(currentSummary.validation_bindings ?? {}),
+                  ...extras.validation_bindings,
+                },
+              }
+            : {}),
+          ...(extras.mitigation_playbook !== undefined
+            ? { mitigation_playbook: extras.mitigation_playbook }
+            : {}),
         };
         const updatedAt = extras.updated_at ?? new Date().toISOString();
         const { rows } = await client.query(
@@ -270,6 +325,52 @@ export function createCvePipelineRepository(pool) {
            FROM cve_asset_matches
            WHERE tenant_id = $1 AND id = $2`,
           [tenantId, id],
+        );
+        return mapCveAssetMatchRow(rows[0] ?? null);
+      });
+    },
+
+    async updateCveAssetMatch(ctx, id, updates = {}, options = {}) {
+      const tenantId = ctx.tenantId;
+      return runWithTenantClient(pool, tenantId, options.client, async (client) => {
+        const existing = await client.query(
+          `SELECT ${CVE_ASSET_MATCH_COLUMNS}
+           FROM cve_asset_matches
+           WHERE tenant_id = $1 AND id = $2`,
+          [tenantId, id],
+        );
+        const current = mapCveAssetMatchRow(existing.rows[0] ?? null);
+        if (!current) return null;
+
+        const merged = {
+          ...current,
+          ...updates,
+          match_sources: encodeMatchSources({
+            ...current,
+            ...updates,
+          }),
+        };
+        const updatedAt = updates.updated_at ?? new Date().toISOString();
+        const { rows } = await client.query(
+          `UPDATE cve_asset_matches
+           SET match_confidence = $3,
+               match_sources = $4,
+               validation_status = $5,
+               risk_score = $6,
+               finding_id = $7,
+               updated_at = $8::timestamptz
+           WHERE tenant_id = $1 AND id = $2
+           RETURNING ${CVE_ASSET_MATCH_COLUMNS}`,
+          [
+            tenantId,
+            id,
+            merged.match_confidence ?? current.match_confidence ?? 0,
+            merged.match_sources,
+            merged.validation_status ?? current.validation_status ?? 'pending',
+            merged.risk_score ?? current.risk_score ?? 0,
+            merged.finding_id ?? current.finding_id ?? null,
+            updatedAt,
+          ],
         );
         return mapCveAssetMatchRow(rows[0] ?? null);
       });
@@ -320,6 +421,56 @@ export function createCvePipelineRepository(pool) {
           [tenantId, matchId],
         );
         return rows.map(mapWafRuleRecommendationRow);
+      });
+    },
+
+    async listWafRuleRecommendationsForPipelineItem(ctx, pipelineItemId, options = {}) {
+      const tenantId = ctx.tenantId;
+      return runWithTenantClient(pool, tenantId, options.client, async (client) => {
+        const { rows } = await client.query(
+          `SELECT ${WAF_RULE_RECOMMENDATION_COLUMNS}
+           FROM waf_rule_recommendations rec
+           INNER JOIN cve_asset_matches m
+             ON m.tenant_id = rec.tenant_id
+            AND m.id = rec.cve_asset_match_id
+           WHERE rec.tenant_id = $1
+             AND m.cve_pipeline_item_id = $2
+           ORDER BY rec.created_at ASC`,
+          [tenantId, pipelineItemId],
+        );
+        return rows.map(mapWafRuleRecommendationRow);
+      });
+    },
+
+    async updateWafRuleRecommendation(ctx, id, updates = {}, options = {}) {
+      const tenantId = ctx.tenantId;
+      return runWithTenantClient(pool, tenantId, options.client, async (client) => {
+        const existing = await client.query(
+          `SELECT ${WAF_RULE_RECOMMENDATION_COLUMNS}
+           FROM waf_rule_recommendations
+           WHERE tenant_id = $1 AND id = $2`,
+          [tenantId, id],
+        );
+        const current = mapWafRuleRecommendationRow(existing.rows[0] ?? null);
+        if (!current) return null;
+
+        const updatedAt = updates.updated_at ?? new Date().toISOString();
+        const { rows } = await client.query(
+          `UPDATE waf_rule_recommendations
+           SET approval_status = $3,
+               ticket_id = $4,
+               updated_at = $5::timestamptz
+           WHERE tenant_id = $1 AND id = $2
+           RETURNING ${WAF_RULE_RECOMMENDATION_COLUMNS}`,
+          [
+            tenantId,
+            id,
+            updates.approval_status ?? current.approval_status,
+            updates.ticket_id ?? current.ticket_id ?? null,
+            updatedAt,
+          ],
+        );
+        return mapWafRuleRecommendationRow(rows[0] ?? null);
       });
     },
 

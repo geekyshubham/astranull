@@ -9,6 +9,7 @@ import { hostname } from 'node:os';
 import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { enrichProbeMetadataWithWafCatalog } from '../src/lib/wafProductCatalog.mjs';
 import {
   probeWorkerAuthHeaders,
   verifyProbeJobSignature,
@@ -60,6 +61,12 @@ export function parseWorkerConfig(argv = process.argv.slice(2), env = process.en
   if (!secret || String(secret).length < MIN_SECRET_LENGTH) {
     throw new Error(
       'Probe worker secret is required (≥32 chars). Set --secret or ASTRANULL_PROBE_WORKER_SECRET.',
+    );
+  }
+
+  if (!tenantIdStr) {
+    throw new Error(
+      'Probe worker tenant id is required. Set --tenant-id or ASTRANULL_PROBE_TENANT_ID.',
     );
   }
 
@@ -161,15 +168,20 @@ function buildResultBody(job, externalResult, metadata, attestationBase) {
   const att = clampAttestation(job, attestationBase.requests_sent, attestationBase.duration_ms);
   const safeMetadata = sanitizeProbeMetadata(metadata);
   const profileKind = profileKindForJob(job, safeMetadata);
-  return {
-    external_result: externalResult,
-    metadata: {
+  const enrichedMetadata = enrichProbeMetadataWithWafCatalog(
+    {
       probe_kind: safeMetadata.probe_kind ?? 'unknown',
       profile_kind: profileKind,
       target_kind: job.target?.kind ?? null,
       vector_family: job.vector_family ?? null,
       ...safeMetadata,
     },
+    job.check_id,
+  );
+
+  return {
+    external_result: externalResult,
+    metadata: enrichedMetadata,
     safety_attestation: {
       ...att,
       worker_version: WORKER_VERSION,
@@ -225,6 +237,95 @@ function dnsQueryName(job) {
   return value;
 }
 
+const MAX_SAFE_HTTP_REDIRECTS = 3;
+
+/**
+ * Follow redirects manually without leaking nonce/marker headers to third-party hosts.
+ *
+ * @param {string} startUrl
+ * @param {Record<string, string>} sensitiveHeaders
+ * @param {{ signal?: AbortSignal, maxRequests?: number }} options
+ * @param {{ fetchFn?: typeof fetch }} deps
+ */
+export async function fetchHttpHeadWithSafeRedirects(startUrl, sensitiveHeaders, options = {}, deps = {}) {
+  const fetchFn = deps.fetchFn ?? fetch;
+  const originalHost = new URL(startUrl).host;
+  const maxRequests = Number.isFinite(Number(options.maxRequests)) && Number(options.maxRequests) > 0
+    ? Math.floor(Number(options.maxRequests))
+    : Number.POSITIVE_INFINITY;
+  let currentUrl = startUrl;
+  let redirectCount = 0;
+  let requestsSent = 0;
+  let res;
+
+  while (redirectCount <= MAX_SAFE_HTTP_REDIRECTS) {
+    if (requestsSent >= maxRequests) {
+      return {
+        res,
+        redirectBlocked: true,
+        redirectReason: 'request_cap_exhausted',
+        requestsSent,
+      };
+    }
+    const headers = redirectCount === 0 ? sensitiveHeaders : {};
+    requestsSent += 1;
+    res = await fetchFn(currentUrl, {
+      method: 'HEAD',
+      headers,
+      signal: options.signal,
+      redirect: 'manual',
+    });
+
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers.get('location');
+      if (!location) {
+        return {
+          res,
+          redirectBlocked: true,
+          redirectReason: 'missing_location',
+          requestsSent,
+        };
+      }
+      const nextUrl = new URL(location, currentUrl);
+      if (nextUrl.host !== originalHost) {
+        return {
+          res,
+          redirectBlocked: true,
+          redirectReason: 'host_mismatch',
+          finalHost: nextUrl.host,
+          requestsSent,
+        };
+      }
+      if (requestsSent >= maxRequests) {
+        return {
+          res,
+          redirectBlocked: true,
+          redirectReason: 'request_cap_exhausted',
+          requestsSent,
+        };
+      }
+      currentUrl = nextUrl.href;
+      redirectCount += 1;
+      continue;
+    }
+
+    return {
+      res,
+      redirectBlocked: false,
+      redirectCount,
+      finalUrl: currentUrl,
+      requestsSent,
+    };
+  }
+
+  return {
+    res,
+    redirectBlocked: true,
+    redirectReason: 'redirect_limit_exceeded',
+    requestsSent,
+  };
+}
+
 export async function probeHttpHead(job, deps = {}) {
   const fetchFn = deps.fetchFn ?? fetch;
   const url = resolveHttpUrl(job);
@@ -256,22 +357,55 @@ export async function probeHttpHead(job, deps = {}) {
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let requestsSent = 0;
   try {
-    const headers = {};
-    if (job.nonce) headers['x-astranull-nonce'] = job.nonce;
+    const sensitiveHeaders = {};
+    if (job.nonce) sensitiveHeaders['x-astranull-nonce'] = job.nonce;
     const marker = job.probe_profile?.marker;
-    if (marker) headers['x-astranull-marker'] = String(marker);
-    const res = await fetchFn(url, {
-      method: 'HEAD',
-      headers,
-      signal: controller.signal,
-      redirect: 'follow',
-    });
-    requestsSent = 1;
+    if (marker) sensitiveHeaders['x-astranull-marker'] = String(marker);
+
+    const outcome = await fetchHttpHeadWithSafeRedirects(
+      url,
+      sensitiveHeaders,
+      { signal: controller.signal, maxRequests },
+      { fetchFn },
+    );
+    requestsSent = outcome.requestsSent ?? 1;
     const durationMs = Date.now() - started;
+
+    if (requestsSent > maxRequests) {
+      return {
+        external_result: 'error',
+        metadata: withProfileKind(job, {
+          probe_kind: 'http_head',
+          error_class: 'request_cap_exceeded',
+          requests_sent: requestsSent,
+          max_requests: maxRequests,
+          duration_ms: durationMs,
+        }),
+        requests_sent: requestsSent,
+        duration_ms: durationMs,
+      };
+    }
+
+    if (outcome.redirectBlocked) {
+      return {
+        external_result: 'error',
+        metadata: withProfileKind(job, {
+          probe_kind: 'http_head',
+          error_class: 'unsafe_redirect',
+          redirect_reason: outcome.redirectReason ?? 'redirect_blocked',
+          redirect_host: outcome.finalHost ?? null,
+          duration_ms: durationMs,
+        }),
+        requests_sent: requestsSent,
+        duration_ms: durationMs,
+      };
+    }
+
+    const res = outcome.res;
     let finalHost = null;
     let finalScheme = null;
     try {
-      const finalUrl = new URL(res.url || url);
+      const finalUrl = new URL(outcome.finalUrl || res.url || url);
       finalHost = finalUrl.host;
       finalScheme = finalUrl.protocol.replace(/:$/, '');
     } catch {
@@ -285,6 +419,7 @@ export async function probeHttpHead(job, deps = {}) {
         duration_ms: durationMs,
         final_scheme: finalScheme,
         final_host: finalHost,
+        redirect_count: outcome.redirectCount ?? 0,
       }),
       requests_sent: requestsSent,
       duration_ms: durationMs,

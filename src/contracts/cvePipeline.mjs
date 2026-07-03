@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { getCheckById } from './checks.mjs';
 import { assertNoRawWafEvidence } from './wafPosture.mjs';
 
 export const CVE_PIPELINE_STAGES = Object.freeze([
@@ -52,6 +54,17 @@ export const SUPPORTED_VENDORS = Object.freeze([
   'fortinet',
   'generic',
 ]);
+
+export const CVE_VALIDATION_STATUSES = Object.freeze([
+  'pending',
+  'validation_pending',
+  'exposed',
+  'not_exploitable',
+  'inconclusive',
+  'skipped',
+]);
+
+export const CVE_SAFE_VALIDATION_CHECK_ID = 'waf.fingerprint.safe';
 
 const CVE_ID_PATTERN = /^CVE-\d{4}-\d{4,}$/i;
 const SEVERITY_LEVELS = new Set(['critical', 'high', 'medium', 'low', 'none', 'unknown']);
@@ -556,4 +569,584 @@ export function assertValidStageTransition(currentStage, nextStage) {
   const err = new Error(`Invalid stage transition from ${current} to ${next}.`);
   err.code = 'invalid_cve_pipeline_stage';
   throw err;
+}
+
+function boundedProbeLimit(value, fallback, max) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) return fallback;
+  return Math.min(parsed, max);
+}
+
+export function resolveSafeCveValidationCheck(item, match) {
+  validateCvePipelineItem(item);
+  if (!match || typeof match !== 'object') {
+    const err = new Error('CVE asset match is required to resolve a safe validation check.');
+    err.code = 'invalid_cve_pipeline_item';
+    throw err;
+  }
+  if (match.validation_status === 'inconclusive' || match.validation_status === 'skipped') {
+    return null;
+  }
+  if (!match.exposure_claim_allowed) {
+    return null;
+  }
+  const check = getCheckById(CVE_SAFE_VALIDATION_CHECK_ID);
+  if (!check) {
+    const err = new Error(`Safe CVE validation check is unavailable: ${CVE_SAFE_VALIDATION_CHECK_ID}`);
+    err.code = 'cve_validation_check_unavailable';
+    throw err;
+  }
+  return CVE_SAFE_VALIDATION_CHECK_ID;
+}
+
+export function assertCveSafeValidationAllowed(item, match, body = {}) {
+  validateCvePipelineItem(item);
+  if (match === null || match === undefined || typeof match !== 'object' || Array.isArray(match)) {
+    const err = new Error('CVE asset match is required for safe validation.');
+    err.code = 'invalid_cve_pipeline_item';
+    throw err;
+  }
+  const forbidden = collectForbiddenKeys(body);
+  if (forbidden.length > 0) {
+    const err = new Error(`Forbidden CVE validation field: ${forbidden[0]}`);
+    err.code = 'unsafe_cve_pipeline_item';
+    err.forbidden_paths = forbidden;
+    throw err;
+  }
+  try {
+    assertNoRawWafEvidence(body);
+  } catch (rawErr) {
+    const err = new Error(rawErr.message);
+    err.code = 'unsafe_cve_pipeline_item';
+    throw err;
+  }
+
+  if (match.validation_status === 'inconclusive' || match.validation_status === 'skipped') {
+    const err = new Error('CVE asset match is not eligible for safe validation.');
+    err.code = 'cve_validation_not_applicable';
+    throw err;
+  }
+
+  const socApproved = parseBooleanDefault(body.soc_approved, false);
+  if (item.known_exploited && match.requires_review && !socApproved) {
+    const err = new Error(
+      'Known-exploited CVE matches requiring review need SOC approval before safe validation.',
+    );
+    err.code = 'cve_validation_soc_gated';
+    throw err;
+  }
+
+  if (body.risk_class === 'soc_gated' || body.risk_class === 'prohibited') {
+    const err = new Error('soc_gated and prohibited validations require SOC workflow.');
+    err.code = 'unsafe_waf_profile';
+    throw err;
+  }
+
+  return true;
+}
+
+export function buildSafeCveValidationRequest(item, match, asset = {}) {
+  assertCveSafeValidationAllowed(item, match);
+  const checkId = resolveSafeCveValidationCheck(item, match);
+  if (!checkId) {
+    const err = new Error('CVE asset match does not qualify for safe validation.');
+    err.code = 'cve_validation_not_applicable';
+    throw err;
+  }
+
+  const check = getCheckById(checkId);
+  const probe = check?.probe_profile && typeof check.probe_profile === 'object' ? check.probe_profile : {};
+  const wafAssetId = match.waf_asset_id ?? asset.id ?? asset.waf_asset_id ?? null;
+  if (!wafAssetId) {
+    const err = new Error('CVE asset match requires a bound waf_asset_id.');
+    err.code = 'invalid_cve_pipeline_item';
+    throw err;
+  }
+
+  return {
+    waf_asset_id: wafAssetId,
+    modes: ['fingerprint'],
+    probe_profile: {
+      max_requests: boundedProbeLimit(probe.max_requests, 3, 3),
+      timeout_ms: boundedProbeLimit(probe.timeout_ms, 5000, 5000),
+      risk_class: 'safe',
+    },
+    marker_profile: {
+      marker_type: 'header',
+      expected_action: 'log_only_expected',
+    },
+  };
+}
+
+export function buildCveValidationEvidenceBinding(item, match, validationRun, checkId) {
+  validateCvePipelineItem(item);
+  return {
+    cve_id: item.cve_id,
+    cve_pipeline_item_id: item.id ?? match.cve_pipeline_item_id ?? null,
+    cve_asset_match_id: match.id ?? null,
+    waf_asset_id: match.waf_asset_id ?? null,
+    waf_validation_run_id: validationRun?.id ?? null,
+    check_id: checkId,
+    match_confidence: match.match_confidence ?? null,
+    confidence_level: match.confidence_level ?? null,
+    validation_status: 'validation_pending',
+    bound_at: new Date().toISOString(),
+  };
+}
+
+export const CVE_DEPLOYED_RECOMMENDATION_STATUSES = Object.freeze([
+  'deployed',
+  'deployed_external',
+  'retest_pending',
+]);
+
+export const CVE_RETEST_PIPELINE_STAGES = Object.freeze(['ticket', 'retest']);
+
+const CVE_RETEST_CLOSURE_STATUSES = new Set(['not_exploitable', 'skipped', 'inconclusive']);
+
+export function isCveRecommendationDeployed(recommendation) {
+  if (!recommendation || typeof recommendation !== 'object') return false;
+  const status = String(recommendation.approval_status ?? '').trim().toLowerCase();
+  return CVE_DEPLOYED_RECOMMENDATION_STATUSES.includes(status);
+}
+
+export function assertCvePostMitigationRetestAllowed(item, match, recommendation, body = {}) {
+  validateCvePipelineItem(item);
+  if (match === null || match === undefined || typeof match !== 'object' || Array.isArray(match)) {
+    const err = new Error('CVE asset match is required for post-mitigation retest.');
+    err.code = 'invalid_cve_pipeline_item';
+    throw err;
+  }
+  if (!recommendation || typeof recommendation !== 'object') {
+    const err = new Error('Deployed WAF rule recommendation is required for post-mitigation retest.');
+    err.code = 'cve_deployed_recommendation_required';
+    throw err;
+  }
+  if (!isCveRecommendationDeployed(recommendation)) {
+    const err = new Error('Recommendation must be marked deployed before post-mitigation retest.');
+    err.code = 'cve_deployed_recommendation_required';
+    throw err;
+  }
+
+  const forbidden = collectForbiddenKeys(body);
+  if (forbidden.length > 0) {
+    const err = new Error(`Forbidden CVE retest field: ${forbidden[0]}`);
+    err.code = 'unsafe_cve_pipeline_item';
+    err.forbidden_paths = forbidden;
+    throw err;
+  }
+  try {
+    assertNoRawWafEvidence(body);
+  } catch (rawErr) {
+    const err = new Error(rawErr.message);
+    err.code = 'unsafe_cve_pipeline_item';
+    throw err;
+  }
+
+  const socApproved = parseBooleanDefault(body.soc_approved, false);
+  if (item.known_exploited && match.requires_review && !socApproved) {
+    const err = new Error(
+      'Known-exploited CVE matches requiring review need SOC approval before post-mitigation retest.',
+    );
+    err.code = 'cve_validation_soc_gated';
+    throw err;
+  }
+
+  if (body.risk_class === 'soc_gated' || body.risk_class === 'prohibited') {
+    const err = new Error('soc_gated and prohibited validations require SOC workflow.');
+    err.code = 'unsafe_waf_profile';
+    throw err;
+  }
+
+  return true;
+}
+
+export function buildCvePostMitigationRetestRequest(item, match, asset = {}, recommendation = {}) {
+  assertCvePostMitigationRetestAllowed(item, match, recommendation);
+  const checkId = resolveSafeCveValidationCheck(item, match);
+  if (!checkId) {
+    const err = new Error('CVE asset match does not qualify for post-mitigation retest.');
+    err.code = 'cve_validation_not_applicable';
+    throw err;
+  }
+
+  const check = getCheckById(checkId);
+  const probe = check?.probe_profile && typeof check.probe_profile === 'object' ? check.probe_profile : {};
+  const wafAssetId = match.waf_asset_id ?? asset.id ?? asset.waf_asset_id ?? null;
+  if (!wafAssetId) {
+    const err = new Error('CVE asset match requires a bound waf_asset_id.');
+    err.code = 'invalid_cve_pipeline_item';
+    throw err;
+  }
+
+  return {
+    waf_asset_id: wafAssetId,
+    modes: ['fingerprint'],
+    probe_profile: {
+      max_requests: boundedProbeLimit(probe.max_requests, 3, 3),
+      timeout_ms: boundedProbeLimit(probe.timeout_ms, 5000, 5000),
+      risk_class: 'safe',
+    },
+    marker_profile: {
+      marker_type: 'header',
+      expected_action: 'block',
+    },
+  };
+}
+
+export function buildCveRetestEvidenceBinding(item, match, validationRun, checkId, recommendation = {}) {
+  const base = buildCveValidationEvidenceBinding(item, match, validationRun, checkId);
+  return {
+    ...base,
+    retest_phase: 'post_mitigation',
+    waf_rule_recommendation_id: recommendation.id ?? null,
+    recommendation_type: recommendation.recommendation_type ?? null,
+    validation_status: 'retest_pending',
+  };
+}
+
+export function deriveCveRetestOutcomeFromValidationRun(validationRun) {
+  if (!validationRun || validationRun.status !== 'finalized') {
+    return {
+      status: 'retest_pending',
+      closure_ready: false,
+      verdict: null,
+    };
+  }
+
+  const summary = validationRun.summary_json && typeof validationRun.summary_json === 'object'
+    ? validationRun.summary_json
+    : {};
+  if (summary.validation_passed === true || summary.posture_status === 'protected') {
+    return {
+      status: 'not_exploitable',
+      closure_ready: true,
+      verdict: 'mitigated',
+    };
+  }
+  if (summary.validation_failed === true || summary.posture_status === 'underprotected') {
+    return {
+      status: 'exposed',
+      closure_ready: true,
+      verdict: 'persistent_exposure',
+    };
+  }
+  return {
+    status: 'inconclusive',
+    closure_ready: true,
+    verdict: 'inconclusive',
+  };
+}
+
+export function resolveCvePipelineRetestClosure(matchOutcomes = []) {
+  if (!Array.isArray(matchOutcomes) || matchOutcomes.length === 0) {
+    return {
+      ready: false,
+      resolved_match_count: 0,
+      pending_match_count: 0,
+      open_match_count: 0,
+      verdict: null,
+    };
+  }
+
+  let resolved_match_count = 0;
+  let pending_match_count = 0;
+  let open_match_count = 0;
+
+  for (const outcome of matchOutcomes) {
+    if (!outcome?.closure_ready) {
+      pending_match_count += 1;
+      continue;
+    }
+    if (outcome.status === 'not_exploitable') {
+      resolved_match_count += 1;
+      continue;
+    }
+    if (CVE_RETEST_CLOSURE_STATUSES.has(outcome.status)) {
+      resolved_match_count += 1;
+      continue;
+    }
+    open_match_count += 1;
+  }
+
+  const ready = pending_match_count === 0 && open_match_count === 0 && resolved_match_count > 0;
+  let verdict = null;
+  if (ready) {
+    verdict = 'resolved';
+  } else if (pending_match_count > 0) {
+    verdict = 'retest_pending';
+  } else if (open_match_count > 0) {
+    verdict = 'keep_open';
+  }
+
+  return {
+    ready,
+    resolved_match_count,
+    pending_match_count,
+    open_match_count,
+    verdict,
+  };
+}
+
+export const CVE_PLAYBOOK_STATUSES = Object.freeze([
+  'draft',
+  'approved',
+  'retest_pending',
+  'resolved',
+  'accepted_risk',
+]);
+
+const VENDOR_DEPLOYMENT_ORDER = Object.fromEntries(
+  SUPPORTED_VENDORS.map((vendor, index) => [vendor, index + 1]),
+);
+
+export function resolveVendorDeploymentOrder(vendor) {
+  const key = String(vendor ?? 'generic').trim().toLowerCase();
+  return VENDOR_DEPLOYMENT_ORDER[key] ?? 99;
+}
+
+export function hostnameScopeHash(assetDisplay) {
+  const raw = String(assetDisplay ?? '').trim().toLowerCase();
+  if (!raw) return null;
+  try {
+    const hostname = new URL(raw).hostname.toLowerCase();
+    return createHash('sha256').update(hostname).digest('hex');
+  } catch {
+    return createHash('sha256').update(raw).digest('hex');
+  }
+}
+
+function recommendationActionSummary(recommendation) {
+  const payload = recommendation?.recommendation_json ?? recommendation?.recommendation ?? {};
+  if (typeof payload.action_summary === 'string' && payload.action_summary.trim()) {
+    return payload.action_summary.trim();
+  }
+  return `Deploy vendor-specific WAF mitigations for ${recommendation?.vendor ?? 'generic'}.`;
+}
+
+export function groupRecommendationsIntoVendorSlices(recommendations = [], matches = []) {
+  if (!Array.isArray(recommendations)) {
+    const err = new Error('recommendations must be an array.');
+    err.code = 'invalid_cve_playbook';
+    throw err;
+  }
+  const matchById = new Map(matches.map((match) => [match.id, match]));
+  const byVendor = new Map();
+
+  for (const recommendation of recommendations) {
+    const vendor = String(recommendation.vendor ?? 'generic').trim().toLowerCase();
+    const slice = byVendor.get(vendor) ?? {
+      vendor,
+      recommendation_ids: [],
+      asset_ids: new Set(),
+      action_summaries: [],
+      hostname_scope_hashes: new Set(),
+    };
+    slice.recommendation_ids.push(recommendation.id);
+    if (recommendation.waf_asset_id) {
+      slice.asset_ids.add(recommendation.waf_asset_id);
+    }
+    const linkedMatch = matchById.get(recommendation.cve_asset_match_id);
+    if (linkedMatch?.asset_display) {
+      const hash = hostnameScopeHash(linkedMatch.asset_display);
+      if (hash) slice.hostname_scope_hashes.add(hash);
+    }
+    slice.action_summaries.push(recommendationActionSummary(recommendation));
+    byVendor.set(vendor, slice);
+  }
+
+  return [...byVendor.values()]
+    .map((slice) => ({
+      vendor: slice.vendor,
+      asset_count: slice.asset_ids.size || slice.recommendation_ids.length,
+      recommendation_ids: [...new Set(slice.recommendation_ids.filter(Boolean))],
+      deployment_order: resolveVendorDeploymentOrder(slice.vendor),
+      action_summary: slice.action_summaries[0],
+      hostname_scope_hashes: [...slice.hostname_scope_hashes],
+      child_action_item_id: slice.child_action_item_id ?? null,
+    }))
+    .sort((left, right) => left.deployment_order - right.deployment_order);
+}
+
+export function buildCveMitigationPlaybook(pipelineItem, recommendations = [], matches = [], existing = null) {
+  validateCvePipelineItem(pipelineItem);
+  const vendor_slices = groupRecommendationsIntoVendorSlices(recommendations, matches);
+  if (vendor_slices.length === 0) {
+    const err = new Error('At least one WAF rule recommendation is required to build a mitigation playbook.');
+    err.code = 'cve_playbook_recommendations_required';
+    throw err;
+  }
+
+  const affected_asset_count = new Set(
+    recommendations.map((rec) => rec.waf_asset_id).filter(Boolean),
+  ).size || matches.length;
+
+  return {
+    playbook_id: existing?.playbook_id ?? null,
+    cve_id: pipelineItem.cve_id,
+    pipeline_item_id: pipelineItem.id,
+    severity: pipelineItem.severity ?? 'unknown',
+    known_exploited: pipelineItem.known_exploited ?? false,
+    affected_asset_count,
+    vendor_slices,
+    coordinated_retest_plan_id: existing?.coordinated_retest_plan_id ?? pipelineItem.id,
+    status: existing?.status ?? 'draft',
+    human_approval_required: true,
+    parent_action_item_id: existing?.parent_action_item_id ?? null,
+    approved_at: existing?.approved_at ?? null,
+    approval_note: existing?.approval_note ?? null,
+    created_at: existing?.created_at ?? null,
+    updated_at: null,
+  };
+}
+
+export function assertCvePlaybookApprovable(playbook, pipelineItem) {
+  if (!playbook || typeof playbook !== 'object') {
+    const err = new Error('CVE mitigation playbook is required.');
+    err.code = 'invalid_cve_playbook';
+    throw err;
+  }
+  validateCvePipelineItem(pipelineItem);
+  if (!CVE_PLAYBOOK_STATUSES.includes(playbook.status)) {
+    const err = new Error(`Unsupported playbook status: ${playbook.status}`);
+    err.code = 'invalid_cve_playbook';
+    throw err;
+  }
+  if (playbook.status !== 'draft') {
+    const err = new Error('Only draft playbooks can be approved.');
+    err.code = 'cve_playbook_not_approvable';
+    throw err;
+  }
+  if (!Array.isArray(playbook.vendor_slices) || playbook.vendor_slices.length === 0) {
+    const err = new Error('Playbook must include at least one vendor slice.');
+    err.code = 'cve_playbook_recommendations_required';
+    throw err;
+  }
+  return true;
+}
+
+export function assertCvePlaybookCoordinatedRetestAllowed(playbook) {
+  if (!playbook || typeof playbook !== 'object') {
+    const err = new Error('CVE mitigation playbook is required.');
+    err.code = 'invalid_cve_playbook';
+    throw err;
+  }
+  if (!['approved', 'retest_pending'].includes(playbook.status)) {
+    const err = new Error('Coordinated retest requires an approved playbook.');
+    err.code = 'cve_playbook_not_approved';
+    throw err;
+  }
+  return true;
+}
+
+export function buildPlaybookVendorChecklist(playbook) {
+  return (playbook.vendor_slices ?? []).map((slice) => ({
+    vendor: slice.vendor,
+    deployment_order: slice.deployment_order,
+    asset_count: slice.asset_count,
+    action_summary: slice.action_summary,
+  }));
+}
+
+export function buildPlaybookParentActionItem(playbook, pipelineItemId, actionItemId) {
+  const vendorCount = playbook.vendor_slices.length;
+  const checklist = buildPlaybookVendorChecklist(playbook);
+  const retestPath = `/v1/waf/cve-pipeline/${pipelineItemId}/coordinated-retest`;
+
+  return {
+    action_item_id: actionItemId,
+    category: 'cve_mitigation',
+    title: `CVE mitigation playbook: ${playbook.cve_id} (${vendorCount} vendor${vendorCount === 1 ? '' : 's'}, ${playbook.affected_asset_count} assets)`,
+    asset: {
+      display: `${playbook.cve_id} multi-vendor playbook`,
+    },
+    owner: 'security-operations',
+    severity: ['critical', 'high', 'medium', 'low'].includes(playbook.severity) ? playbook.severity : 'high',
+    evidence: {
+      summary: [
+        `Coordinated CVE mitigation playbook for ${playbook.cve_id}.`,
+        `Known exploited: ${playbook.known_exploited ? 'yes' : 'no'}.`,
+        `Vendor slices: ${vendorCount}.`,
+        'Deploy mitigations per vendor console using the ordered checklist below.',
+      ].join(' '),
+      links: [
+        {
+          type: 'playbook',
+          url: `/v1/waf/cve-pipeline/${pipelineItemId}/playbook`,
+          label: 'CVE mitigation playbook',
+        },
+        {
+          type: 'retest',
+          url: retestPath,
+          label: 'Coordinated retest endpoint',
+        },
+      ],
+      vendor_checklist: checklist,
+      playbook_id: playbook.playbook_id,
+      pipeline_item_id: pipelineItemId,
+      known_exploited: playbook.known_exploited === true,
+    },
+    recommended_solution: checklist
+      .map((entry) => `${entry.deployment_order}. ${entry.vendor}: ${entry.action_summary}`)
+      .join(' '),
+    retest_url: retestPath,
+    status: 'open',
+    dedupe_key: `cve_playbook:${playbook.playbook_id}:parent`,
+    playbook_id: playbook.playbook_id,
+    cve_pipeline_item_id: pipelineItemId,
+    waf_asset_id: `cve_playbook:${pipelineItemId}`,
+    primary_reason: 'cve_mitigation_parent',
+  };
+}
+
+export function buildPlaybookChildActionItem(playbook, slice, pipelineItemId, actionItemId, parentActionItemId) {
+  const retestPath = `/v1/waf/cve-pipeline/${pipelineItemId}/coordinated-retest`;
+  return {
+    action_item_id: actionItemId,
+    category: 'cve_mitigation',
+    title: `${playbook.cve_id}: ${slice.vendor} mitigation (${slice.asset_count} asset${slice.asset_count === 1 ? '' : 's'})`,
+    asset: {
+      display: `${slice.vendor} vendor slice`,
+    },
+    owner: 'security-operations',
+    severity: ['critical', 'high', 'medium', 'low'].includes(playbook.severity) ? playbook.severity : 'high',
+    evidence: {
+      summary: [
+        `Vendor slice ${slice.deployment_order} for ${playbook.cve_id}.`,
+        slice.action_summary,
+        'Hostname scope is represented by metadata-only SHA-256 hashes only.',
+      ].join(' '),
+      links: [
+        {
+          type: 'playbook',
+          url: `/v1/waf/cve-pipeline/${pipelineItemId}/playbook`,
+          label: 'Parent CVE playbook',
+        },
+      ],
+      hostname_scope_hashes: slice.hostname_scope_hashes ?? [],
+      vendor: slice.vendor,
+      recommendation_ids: slice.recommendation_ids ?? [],
+      playbook_id: playbook.playbook_id,
+      pipeline_item_id: pipelineItemId,
+    },
+    recommended_solution: slice.action_summary,
+    retest_url: retestPath,
+    status: 'open',
+    dedupe_key: `cve_playbook:${playbook.playbook_id}:${slice.vendor}`,
+    playbook_id: playbook.playbook_id,
+    parent_action_item_id: parentActionItemId,
+    cve_pipeline_item_id: pipelineItemId,
+    waf_asset_id: `cve_playbook:${pipelineItemId}:${slice.vendor}`,
+    primary_reason: `cve_mitigation_vendor:${slice.vendor}`,
+  };
+}
+
+export function resolvePlaybookStatusFromRetestClosure(closure, currentStatus = 'approved') {
+  if (closure?.ready) {
+    return 'resolved';
+  }
+  if (currentStatus === 'approved') {
+    return 'retest_pending';
+  }
+  return currentStatus;
 }

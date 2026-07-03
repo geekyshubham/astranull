@@ -5,6 +5,56 @@ import { incMetric } from '../lib/metrics.mjs';
 import { getStore, persistStore } from '../store.mjs';
 import { recordEvidence } from './evidence.mjs';
 
+const EVENT_RAW_FIELD_DENYLIST = new Set([
+  'packet_payload',
+  'raw_packet',
+  'raw_packets',
+  'packet_data',
+  'raw_payload',
+  'exploit_payload',
+  'body',
+  'headers',
+  'request_body',
+  'request_headers',
+  'authorization',
+  'cookie',
+  'raw_log',
+  'log_line',
+]);
+const EVENT_RAW_FIELD_COMPACT_DENYLIST = new Set(
+  [...EVENT_RAW_FIELD_DENYLIST].map((key) => key.replace(/_/g, '')),
+);
+
+function normalizeEventRawFieldKey(key) {
+  return String(key)
+    .trim()
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2')
+    .replace(/([a-z])([A-Z])/g, '$1_$2')
+    .replace(/[^a-zA-Z0-9]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .toLowerCase();
+}
+
+function eventIngestContainsRawFields(value) {
+  if (value == null || typeof value !== 'object') return false;
+  if (Array.isArray(value)) return value.some((item) => eventIngestContainsRawFields(item));
+  for (const [key, child] of Object.entries(value)) {
+    const normalized = normalizeEventRawFieldKey(key);
+    const compact = normalized.replace(/_/g, '');
+    if (
+      EVENT_RAW_FIELD_DENYLIST.has(normalized)
+      || EVENT_RAW_FIELD_COMPACT_DENYLIST.has(compact)
+      || normalized.startsWith('raw_')
+      || compact.startsWith('raw')
+    ) {
+      return true;
+    }
+    if (eventIngestContainsRawFields(child)) return true;
+  }
+  return false;
+}
+
 function ensureVault() {
   const store = getStore();
   if (!store.evidenceVault) store.evidenceVault = [];
@@ -37,7 +87,7 @@ export function ingestEvent(ctx, body) {
     return { duplicate: true, event: store.ingestedEventIds[key] };
   }
 
-  if (body.packet_payload || body.raw_packet) {
+  if (eventIngestContainsRawFields(body)) {
     return { error: 'packet_payload_forbidden', status: 400 };
   }
 

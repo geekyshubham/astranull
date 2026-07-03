@@ -21,6 +21,44 @@ function asArray(value) {
   return Array.isArray(value) ? value : [];
 }
 
+function mergeArrayByKey(existing, incoming, keyFn) {
+  const merged = [];
+  const indexByKey = new Map();
+  for (const item of asArray(existing)) {
+    const key = keyFn(item);
+    if (key) indexByKey.set(key, merged.length);
+    merged.push(item);
+  }
+  for (const item of asArray(incoming)) {
+    const key = keyFn(item);
+    if (key && indexByKey.has(key)) {
+      merged[indexByKey.get(key)] = { ...merged[indexByKey.get(key)], ...item };
+    } else {
+      if (key) indexByKey.set(key, merged.length);
+      merged.push(item);
+    }
+  }
+  return merged;
+}
+
+function artifactMergeKey(artifact) {
+  return artifact?.id ? String(artifact.id) : null;
+}
+
+function checklistMergeKey(item) {
+  if (!item || typeof item !== 'object') return null;
+  return String(item.provider_key ?? item.provider_name ?? item.type ?? '').trim() || null;
+}
+
+function socApprovalMergeKey(approval) {
+  return approval?.user_id ? String(approval.user_id) : null;
+}
+
+function auditTrailMergeKey(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  return [entry.action, entry.at, entry.by].map((part) => String(part ?? '')).join('|') || null;
+}
+
 function artifactFromRow(row) {
   const meta = asObject(row.metadata_json);
   const status = row.status === 'pending' ? 'pending_review' : row.status;
@@ -42,12 +80,21 @@ function artifactFromRow(row) {
     abort_criteria: meta.abort_criteria ?? null,
     retention_policy: meta.retention_policy ?? null,
     retained_artifact_metadata: meta.retained_artifact_metadata ?? null,
+    approved_limits: meta.approved_limits ?? null,
+    provider_specific_evidence: meta.provider_specific_evidence ?? null,
+    emergency_stop_path: meta.emergency_stop_path ?? null,
     uploader: meta.uploader ?? null,
     reference_uri_redacted: meta.reference_uri_redacted ?? row.reference_uri ?? 'metadata://redacted',
     created_at: toIso(row.created_at),
     reviewed_at: row.reviewed_at ? toIso(row.reviewed_at) : null,
     reviewed_by: row.reviewed_by ?? null,
     review_notes: meta.review_notes ?? null,
+    content_sha256: row.content_sha256 ?? meta.content_sha256 ?? null,
+    custody_id: row.custody_id ?? meta.custody_id ?? null,
+    custody_uri: row.custody_uri ?? meta.custody_uri ?? null,
+    content_type: row.content_type ?? meta.content_type ?? null,
+    filename_redacted: row.filename_redacted ?? meta.filename_redacted ?? null,
+    upload_envelope: row.upload_envelope ?? meta.upload_envelope ?? null,
   };
 }
 
@@ -67,9 +114,18 @@ function artifactToMetadata(artifact) {
     abort_criteria: artifact.abort_criteria,
     retention_policy: artifact.retention_policy,
     retained_artifact_metadata: artifact.retained_artifact_metadata,
+    approved_limits: artifact.approved_limits,
+    provider_specific_evidence: artifact.provider_specific_evidence,
+    emergency_stop_path: artifact.emergency_stop_path,
     uploader: artifact.uploader,
     reference_uri_redacted: artifact.reference_uri_redacted,
     review_notes: artifact.review_notes,
+    content_sha256: artifact.content_sha256,
+    custody_id: artifact.custody_id,
+    custody_uri: artifact.custody_uri,
+    content_type: artifact.content_type,
+    filename_redacted: artifact.filename_redacted,
+    upload_envelope: artifact.upload_envelope,
   };
 }
 
@@ -99,6 +155,100 @@ function mapRequestRow(row) {
     provider_context: asObject(row.provider_context_json),
   };
   return mergeRiskReviewOntoRequest(mapped, riskReview);
+}
+
+async function listAuthorizationArtifactsWithClient(client, ctx, requestId) {
+  const { rows } = await client.query(
+    `SELECT id, tenant_id, high_scale_request_id, type, reference_uri, status,
+            reviewed_by, reviewed_at, metadata_json, created_at,
+            content_sha256, custody_id, custody_uri, content_type, filename_redacted, upload_envelope
+     FROM authorization_artifacts
+     WHERE tenant_id = $1 AND high_scale_request_id = $2
+     ORDER BY created_at`,
+    [ctx.tenantId, requestId],
+  );
+  return rows.map(artifactFromRow);
+}
+
+async function listAuthorizationArtifactsForRequestsWithClient(client, ctx, requestIds) {
+  const ids = [...new Set(requestIds.filter(Boolean).map(String))];
+  if (!ids.length) return new Map();
+  const { rows } = await client.query(
+    `SELECT id, tenant_id, high_scale_request_id, type, reference_uri, status,
+            reviewed_by, reviewed_at, metadata_json, created_at,
+            content_sha256, custody_id, custody_uri, content_type, filename_redacted, upload_envelope
+     FROM authorization_artifacts
+     WHERE tenant_id = $1 AND high_scale_request_id = ANY($2::text[])
+     ORDER BY high_scale_request_id, created_at`,
+    [ctx.tenantId, ids],
+  );
+  const byRequestId = new Map();
+  for (const row of rows) {
+    const requestId = row.high_scale_request_id;
+    if (!byRequestId.has(requestId)) byRequestId.set(requestId, []);
+    byRequestId.get(requestId).push(artifactFromRow(row));
+  }
+  return byRequestId;
+}
+
+async function mapRequestRowWithAuthoritativeArtifacts(client, ctx, row) {
+  const mapped = mapRequestRow(row);
+  if (!mapped) return null;
+  const artifacts = await listAuthorizationArtifactsWithClient(client, ctx, mapped.id);
+  if (artifacts.length > 0) mapped.artifacts = artifacts;
+  return mapped;
+}
+
+async function mapRequestRowsWithAuthoritativeArtifacts(client, ctx, rows) {
+  const mapped = rows.map((row) => mapRequestRow(row)).filter(Boolean);
+  const artifactsByRequestId = await listAuthorizationArtifactsForRequestsWithClient(
+    client,
+    ctx,
+    mapped.map((request) => request.id),
+  );
+  for (const request of mapped) {
+    const artifacts = artifactsByRequestId.get(request.id);
+    if (artifacts?.length) request.artifacts = artifacts;
+  }
+  return mapped;
+}
+
+function buildRequestPackPersistence(lockedRow, patch = {}) {
+  return {
+    artifacts: mergeArrayByKey(lockedRow?.artifacts, patch.artifacts, artifactMergeKey),
+    provider_approval_checklist: mergeArrayByKey(
+      lockedRow?.provider_approval_checklist,
+      patch.provider_approval_checklist,
+      checklistMergeKey,
+    ),
+    risk_review_json: { ...asObject(lockedRow?.risk_review_json), ...asObject(patch.risk_review_json) },
+    adapter_json: patch.adapter !== undefined ? patch.adapter : asObject(lockedRow?.adapter_json),
+    updated_at: patch.updated_at ?? new Date().toISOString(),
+  };
+}
+
+async function updateRequestPackWithClient(client, ctx, requestId, lockedRow, patch) {
+  const pack = buildRequestPackPersistence(lockedRow, patch);
+  const { rows } = await client.query(
+    `UPDATE high_scale_requests
+     SET artifacts = $1::jsonb,
+         provider_approval_checklist = $2::jsonb,
+         risk_review_json = $3::jsonb,
+         adapter_json = $4::jsonb,
+         updated_at = $5::timestamptz
+     WHERE tenant_id = $6 AND id = $7
+     RETURNING ${HS_COLUMNS}`,
+    [
+      JSON.stringify(pack.artifacts),
+      JSON.stringify(pack.provider_approval_checklist),
+      JSON.stringify(pack.risk_review_json),
+      JSON.stringify(pack.adapter_json),
+      pack.updated_at,
+      ctx.tenantId,
+      requestId,
+    ],
+  );
+  return mapRequestRow(rows[0] ?? null);
 }
 
 function mapTelemetryRow(row) {
@@ -203,7 +353,7 @@ export function createHighScaleRepository(pool) {
            ORDER BY created_at DESC`,
           [ctx.tenantId],
         );
-        return rows.map(mapRequestRow);
+        return mapRequestRowsWithAuthoritativeArtifacts(client, ctx, rows);
       });
     },
 
@@ -215,7 +365,7 @@ export function createHighScaleRepository(pool) {
            WHERE tenant_id = $1 AND id = $2`,
           [ctx.tenantId, id],
         );
-        return mapRequestRow(rows[0] ?? null);
+        return mapRequestRowWithAuthoritativeArtifacts(client, ctx, rows[0] ?? null);
       });
     },
 
@@ -224,6 +374,20 @@ export function createHighScaleRepository(pool) {
         const sets = [];
         const params = [];
         let n = 1;
+        let lockedRow = null;
+
+        const lockRequestRow = async () => {
+          if (lockedRow) return lockedRow;
+          const existing = await client.query(
+            `SELECT artifacts, audit_trail, soc_approvals, provider_approval_checklist, risk_review_json, adapter_json
+             FROM high_scale_requests
+             WHERE tenant_id = $1 AND id = $2
+             FOR UPDATE`,
+            [ctx.tenantId, id],
+          );
+          lockedRow = existing.rows[0] ?? null;
+          return lockedRow;
+        };
 
         const assignJson = (col, val) => {
           sets.push(`${col} = $${n}::jsonb`);
@@ -236,16 +400,48 @@ export function createHighScaleRepository(pool) {
           params.push(patch.state);
           n += 1;
         }
-        if (patch.audit_trail !== undefined) assignJson('audit_trail', patch.audit_trail);
-        if (patch.artifacts !== undefined) assignJson('artifacts', patch.artifacts);
+        if (
+          patch.audit_trail !== undefined
+          || patch.soc_approvals !== undefined
+          || patch.artifacts !== undefined
+          || patch.provider_approval_checklist !== undefined
+          || patch.risk_review_json !== undefined
+          || patch.authorization_pack_status !== undefined
+        ) {
+          await lockRequestRow();
+        }
+        if (patch.audit_trail !== undefined) {
+          const auditTrail = lockedRow
+            ? mergeArrayByKey(lockedRow.audit_trail, patch.audit_trail, auditTrailMergeKey)
+            : patch.audit_trail;
+          assignJson('audit_trail', auditTrail);
+        }
+        if (patch.artifacts !== undefined) {
+          const artifacts = lockedRow
+            ? mergeArrayByKey(lockedRow.artifacts, patch.artifacts, artifactMergeKey)
+            : patch.artifacts;
+          assignJson('artifacts', artifacts);
+        }
         if (patch.scope_hash !== undefined) {
           sets.push(`scope_hash = $${n}`);
           params.push(patch.scope_hash);
           n += 1;
         }
-        if (patch.soc_approvals !== undefined) assignJson('soc_approvals', patch.soc_approvals);
+        if (patch.soc_approvals !== undefined) {
+          const approvals = lockedRow
+            ? mergeArrayByKey(lockedRow.soc_approvals, patch.soc_approvals, socApprovalMergeKey)
+            : patch.soc_approvals;
+          assignJson('soc_approvals', approvals);
+        }
         if (patch.provider_approval_checklist !== undefined) {
-          assignJson('provider_approval_checklist', patch.provider_approval_checklist);
+          const checklist = lockedRow
+            ? mergeArrayByKey(
+              lockedRow.provider_approval_checklist,
+              patch.provider_approval_checklist,
+              checklistMergeKey,
+            )
+            : patch.provider_approval_checklist;
+          assignJson('provider_approval_checklist', checklist);
         }
         if (patch.adapter !== undefined) assignJson('adapter_json', patch.adapter);
         if (patch.scheduled_window !== undefined) {
@@ -253,13 +449,11 @@ export function createHighScaleRepository(pool) {
           params.push(patch.scheduled_window ? JSON.stringify(patch.scheduled_window) : null);
           n += 1;
         }
-        if (patch.risk_review_json !== undefined) assignJson('risk_review_json', patch.risk_review_json);
+        if (patch.risk_review_json !== undefined) {
+          assignJson('risk_review_json', { ...asObject(lockedRow?.risk_review_json), ...patch.risk_review_json });
+        }
         if (patch.authorization_pack_status !== undefined) {
-          const existing = await client.query(
-            `SELECT risk_review_json FROM high_scale_requests WHERE tenant_id = $1 AND id = $2`,
-            [ctx.tenantId, id],
-          );
-          const risk = asObject(existing.rows[0]?.risk_review_json);
+          const risk = asObject(lockedRow?.risk_review_json);
           risk.authorization_pack_status = patch.authorization_pack_status;
           assignJson('risk_review_json', risk);
         }
@@ -288,7 +482,7 @@ export function createHighScaleRepository(pool) {
            WHERE tenant_id = $1 AND state = 'running'`,
           [ctx.tenantId],
         );
-        return rows.map(mapRequestRow);
+        return rows.map((row) => mapRequestRow(row));
       });
     },
 
@@ -298,11 +492,16 @@ export function createHighScaleRepository(pool) {
         const { rows } = await client.query(
           `INSERT INTO authorization_artifacts (
              id, tenant_id, high_scale_request_id, type, reference_uri, status,
-             reviewed_by, reviewed_at, metadata_json, created_at
+             reviewed_by, reviewed_at, metadata_json, created_at,
+             content_sha256, custody_id, custody_uri, content_type, filename_redacted, upload_envelope
            )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9::jsonb, $10::timestamptz)
+           VALUES (
+             $1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9::jsonb, $10::timestamptz,
+             $11, $12, $13, $14, $15, $16
+           )
            RETURNING id, tenant_id, high_scale_request_id, type, reference_uri, status,
-                     reviewed_by, reviewed_at, metadata_json, created_at`,
+                     reviewed_by, reviewed_at, metadata_json, created_at,
+                     content_sha256, custody_id, custody_uri, content_type, filename_redacted, upload_envelope`,
           [
             artifact.id,
             ctx.tenantId,
@@ -314,9 +513,64 @@ export function createHighScaleRepository(pool) {
             artifact.reviewed_at ?? null,
             JSON.stringify(artifactToMetadata(artifact)),
             artifact.created_at,
+            artifact.content_sha256 ?? null,
+            artifact.custody_id ?? null,
+            artifact.custody_uri ?? null,
+            artifact.content_type ?? null,
+            artifact.filename_redacted ?? null,
+            artifact.upload_envelope ?? null,
           ],
         );
         return artifactFromRow(rows[0]);
+      });
+    },
+
+    async insertAuthorizationArtifactAndUpdateRequest(ctx, requestId, artifact, requestPatch) {
+      const dbStatus = artifact.status === 'pending_review' ? 'pending' : artifact.status;
+      return withTenantContext(pool, ctx.tenantId, async (client) => {
+        const locked = await client.query(
+          `SELECT artifacts, provider_approval_checklist, risk_review_json, adapter_json
+           FROM high_scale_requests
+           WHERE tenant_id = $1 AND id = $2
+           FOR UPDATE`,
+          [ctx.tenantId, requestId],
+        );
+        const lockedRow = locked.rows[0] ?? null;
+        if (!lockedRow) return null;
+        const inserted = await client.query(
+          `INSERT INTO authorization_artifacts (
+             id, tenant_id, high_scale_request_id, type, reference_uri, status,
+             reviewed_by, reviewed_at, metadata_json, created_at,
+             content_sha256, custody_id, custody_uri, content_type, filename_redacted, upload_envelope
+           )
+           VALUES (
+             $1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9::jsonb, $10::timestamptz,
+             $11, $12, $13, $14, $15, $16
+           )
+           RETURNING id, tenant_id, high_scale_request_id, type, reference_uri, status,
+                     reviewed_by, reviewed_at, metadata_json, created_at,
+                     content_sha256, custody_id, custody_uri, content_type, filename_redacted, upload_envelope`,
+          [
+            artifact.id,
+            ctx.tenantId,
+            requestId,
+            artifact.type,
+            artifact.reference_uri_redacted ?? 'metadata://redacted',
+            dbStatus,
+            artifact.reviewed_by ?? null,
+            artifact.reviewed_at ?? null,
+            JSON.stringify(artifactToMetadata(artifact)),
+            artifact.created_at,
+            artifact.content_sha256 ?? null,
+            artifact.custody_id ?? null,
+            artifact.custody_uri ?? null,
+            artifact.content_type ?? null,
+            artifact.filename_redacted ?? null,
+            artifact.upload_envelope ?? null,
+          ],
+        );
+        const request = await updateRequestPackWithClient(client, ctx, requestId, lockedRow, requestPatch);
+        return { artifact: artifactFromRow(inserted.rows[0]), request };
       });
     },
 
@@ -324,9 +578,11 @@ export function createHighScaleRepository(pool) {
       return withTenantContext(pool, ctx.tenantId, async (client) => {
         const existing = await client.query(
           `SELECT id, tenant_id, high_scale_request_id, type, reference_uri, status,
-                  reviewed_by, reviewed_at, metadata_json, created_at
+                  reviewed_by, reviewed_at, metadata_json, created_at,
+                  content_sha256, custody_id, custody_uri, content_type, filename_redacted, upload_envelope
            FROM authorization_artifacts
-           WHERE tenant_id = $1 AND high_scale_request_id = $2 AND id = $3`,
+           WHERE tenant_id = $1 AND high_scale_request_id = $2 AND id = $3
+           FOR UPDATE`,
           [ctx.tenantId, requestId, artifactId],
         );
         if (!existing.rows[0]) return null;
@@ -338,7 +594,8 @@ export function createHighScaleRepository(pool) {
            SET status = $1, reviewed_by = $2, reviewed_at = $3::timestamptz, metadata_json = $4::jsonb
            WHERE tenant_id = $5 AND id = $6
            RETURNING id, tenant_id, high_scale_request_id, type, reference_uri, status,
-                     reviewed_by, reviewed_at, metadata_json, created_at`,
+                     reviewed_by, reviewed_at, metadata_json, created_at,
+                     content_sha256, custody_id, custody_uri, content_type, filename_redacted, upload_envelope`,
           [
             status,
             patch.reviewed_by ?? row.reviewed_by,
@@ -352,17 +609,104 @@ export function createHighScaleRepository(pool) {
       });
     },
 
+    async updateAuthorizationArtifactAndRequest(ctx, requestId, artifactId, artifactPatch, requestPatch) {
+      return withTenantContext(pool, ctx.tenantId, async (client) => {
+        const locked = await client.query(
+          `SELECT artifacts, provider_approval_checklist, risk_review_json, adapter_json
+           FROM high_scale_requests
+           WHERE tenant_id = $1 AND id = $2
+           FOR UPDATE`,
+          [ctx.tenantId, requestId],
+        );
+        const lockedRow = locked.rows[0] ?? null;
+        if (!lockedRow) return null;
+        const existing = await client.query(
+          `SELECT id, tenant_id, high_scale_request_id, type, reference_uri, status,
+                  reviewed_by, reviewed_at, metadata_json, created_at,
+                  content_sha256, custody_id, custody_uri, content_type, filename_redacted, upload_envelope
+           FROM authorization_artifacts
+           WHERE tenant_id = $1 AND high_scale_request_id = $2 AND id = $3
+           FOR UPDATE`,
+          [ctx.tenantId, requestId, artifactId],
+        );
+        if (!existing.rows[0]) return null;
+        const row = existing.rows[0];
+        const meta = { ...asObject(row.metadata_json), ...(artifactPatch.metadata ?? {}) };
+        const status = artifactPatch.status != null
+          ? (artifactPatch.status === 'pending_review' ? 'pending' : artifactPatch.status)
+          : row.status;
+        const updatedArtifact = await client.query(
+          `UPDATE authorization_artifacts
+           SET status = $1, reviewed_by = $2, reviewed_at = $3::timestamptz, metadata_json = $4::jsonb
+           WHERE tenant_id = $5 AND id = $6
+           RETURNING id, tenant_id, high_scale_request_id, type, reference_uri, status,
+                     reviewed_by, reviewed_at, metadata_json, created_at,
+                     content_sha256, custody_id, custody_uri, content_type, filename_redacted, upload_envelope`,
+          [
+            status,
+            artifactPatch.reviewed_by ?? row.reviewed_by,
+            artifactPatch.reviewed_at ?? row.reviewed_at,
+            JSON.stringify(meta),
+            ctx.tenantId,
+            artifactId,
+          ],
+        );
+        const request = await updateRequestPackWithClient(client, ctx, requestId, lockedRow, requestPatch);
+        return { artifact: artifactFromRow(updatedArtifact.rows[0]), request };
+      });
+    },
+
     async listAuthorizationArtifacts(ctx, requestId) {
       return withTenantContext(pool, ctx.tenantId, async (client) => {
+        return listAuthorizationArtifactsWithClient(client, ctx, requestId);
+      });
+    },
+
+    async getHighScaleReportSnapshot(ctx, requestId) {
+      return withTenantContext(pool, ctx.tenantId, async (client) => {
         const { rows } = await client.query(
-          `SELECT id, tenant_id, high_scale_request_id, type, reference_uri, status,
-                  reviewed_by, reviewed_at, metadata_json, created_at
-           FROM authorization_artifacts
+          `SELECT ${HS_COLUMNS}
+           FROM high_scale_requests
+           WHERE tenant_id = $1 AND id = $2
+           FOR UPDATE`,
+          [ctx.tenantId, requestId],
+        );
+        const request = await mapRequestRowWithAuthoritativeArtifacts(client, ctx, rows[0] ?? null);
+        if (!request) return null;
+        const reportRows = await client.query(
+          `SELECT id, tenant_id, high_scale_request_id, created_at, created_by, updated_at, updated_by,
+                  impact_summary, recommendations, customer_summary, residual_risk, next_steps,
+                  attachments_json, evidence_ids, derived_json, final_state
+           FROM soc_reports
+           WHERE tenant_id = $1 AND high_scale_request_id = $2`,
+          [ctx.tenantId, requestId],
+        );
+        const noteRows = await client.query(
+          `SELECT id, tenant_id, high_scale_request_id, body, created_by, created_at
+           FROM soc_notes
            WHERE tenant_id = $1 AND high_scale_request_id = $2
            ORDER BY created_at`,
           [ctx.tenantId, requestId],
         );
-        return rows.map(artifactFromRow);
+        const telemetryRows = await client.query(
+          `SELECT id, tenant_id, high_scale_request_id, category, live_status, observed_at,
+                  source, metrics_json, created_at, recorded_by
+           FROM high_scale_telemetry
+           WHERE tenant_id = $1 AND high_scale_request_id = $2
+           ORDER BY observed_at DESC`,
+          [ctx.tenantId, requestId],
+        );
+        const report = mapSocReportRow(reportRows.rows[0] ?? null);
+        const notes = noteRows.rows.map((row) => ({
+          id: row.id,
+          tenant_id: row.tenant_id,
+          high_scale_request_id: row.high_scale_request_id,
+          body: row.body,
+          author: row.created_by,
+          created_at: toIso(row.created_at),
+        }));
+        const telemetry = telemetryRows.rows.map(mapTelemetryRow);
+        return { request, report, notes, telemetry };
       });
     },
 
@@ -463,6 +807,14 @@ export function createHighScaleRepository(pool) {
 
     async upsertSocReport(ctx, requestId, report) {
       return withTenantContext(pool, ctx.tenantId, async (client) => {
+        const locked = await client.query(
+          `SELECT id
+           FROM high_scale_requests
+           WHERE tenant_id = $1 AND id = $2
+           FOR UPDATE`,
+          [ctx.tenantId, requestId],
+        );
+        if (!locked.rows[0]) return null;
         const derived = {
           timeline: report.timeline ?? [],
           artifacts: report.artifacts ?? [],
@@ -522,4 +874,4 @@ export function createHighScaleRepository(pool) {
   };
 }
 
-export { mapRequestRow, artifactFromRow, mapTelemetryRow, mapSocReportRow };
+export { mapRequestRow, artifactFromRow, artifactToMetadata, mapTelemetryRow, mapSocReportRow };

@@ -9,8 +9,20 @@ export const RAW_PACKET_FIELD_DENYLIST = new Set([
   'raw_packets',
   'packets',
   'packet_data',
+  'raw_payload',
   'payload',
+  'body',
+  'headers',
+  'request_body',
+  'request_headers',
+  'authorization',
+  'cookie',
+  'raw_log',
+  'log_line',
 ]);
+const RAW_PACKET_FIELD_COMPACT_DENYLIST = new Set(
+  [...RAW_PACKET_FIELD_DENYLIST].map((key) => key.replace(/_/g, '')),
+);
 
 export const ALLOWED_EXTERNAL_RESULTS = new Set(['blocked', 'connected', 'timeout', 'error']);
 
@@ -23,6 +35,14 @@ export const PROBE_EVENT_RESERVED_METADATA_KEYS = new Set([
 ]);
 
 function objectContainsRawPacketFields(value) {
+  const normalizeKey = (key) => String(key)
+    .trim()
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2')
+    .replace(/([a-z])([A-Z])/g, '$1_$2')
+    .replace(/[^a-zA-Z0-9]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .toLowerCase();
   const scan = (node) => {
     if (node == null) return false;
     if (Array.isArray(node)) {
@@ -33,7 +53,16 @@ function objectContainsRawPacketFields(value) {
     }
     if (typeof node !== 'object') return false;
     for (const key of Object.keys(node)) {
-      if (RAW_PACKET_FIELD_DENYLIST.has(key.toLowerCase())) return true;
+      const normalized = normalizeKey(key);
+      const compact = normalized.replace(/_/g, '');
+      if (
+        RAW_PACKET_FIELD_DENYLIST.has(normalized)
+        || RAW_PACKET_FIELD_COMPACT_DENYLIST.has(compact)
+        || normalized.startsWith('raw_')
+        || compact.startsWith('raw')
+      ) {
+        return true;
+      }
       if (scan(node[key])) return true;
     }
     return false;

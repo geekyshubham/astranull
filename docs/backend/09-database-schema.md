@@ -274,7 +274,7 @@ Expected input shape (`artifact_type: postgres_tenant_concurrency_evidence`, `sc
 | `tenant_count` | integer | ≥ 2 isolated tenants exercised under load. |
 | `concurrent_actors` | integer | ≥ 1 concurrent workers/sessions. |
 | `duration_seconds` | number | Wall-clock duration of the concurrency window (> 0). |
-| `route_families_exercised` | string[] | Must include every family in `REQUIRED_CONCURRENCY_ROUTE_FAMILIES` from `scripts/postgres-concurrency-evidence.mjs` (`catalog`, `auth`, `agents`, `testRuns`, `events`, `notifications`, `reports`, `secretVault`, `state`, `probeJobs`, `highScale`, `productionReleaseEvidence`, `retention`, `audit`). |
+| `route_families_exercised` | string[] | Must include every family in `REQUIRED_CONCURRENCY_ROUTE_FAMILIES` from `scripts/postgres-concurrency-evidence.mjs` (`catalog`, `auth`, `agents`, `agentUpdates`, `testRuns`, `events`, `notifications`, `reports`, `secretVault`, `state`, `probeJobs`, `highScale`, `wafPosture`, `wafDrift`, `wafOrchestrator`, `supplyChain`, `productionReleaseEvidence`, `retention`, `audit`). |
 | `isolation.cross_tenant_read_rejections` | integer | Count of rejected cross-tenant reads (metadata count only). |
 | `isolation.cross_tenant_write_rejections` | integer | Count of rejected cross-tenant writes. |
 | `isolation.cross_tenant_leaks` | integer | Must be `0`; any positive value fails validation. |

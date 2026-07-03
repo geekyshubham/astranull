@@ -36,13 +36,34 @@ describe('requireAgentAuth', () => {
     assert.equal(result.agent.id, 'agent_test');
   });
 
-  it('accepts legacy opaque agc_ credentials via route agent lookup', () => {
+  it('accepts legacy opaque agc_ credentials via route agent lookup in dev-json mode', () => {
     freshStore();
     const credential = generateAgentCredential();
     seedAgent({ credential });
     const result = requireAgentAuth(agentHeaders(credential), 'agent_test');
     assert.equal(result.error, undefined);
     assert.equal(result.agent.id, 'agent_test');
+  });
+
+  it('rejects legacy opaque agc_ credentials in production and postgres modes', () => {
+    freshStore();
+    const credential = generateAgentCredential();
+    seedAgent({ credential });
+    const previousNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    try {
+      const prodResult = requireAgentAuth(agentHeaders(credential), 'agent_test');
+      assert.equal(prodResult.status, 401);
+    } finally {
+      process.env.NODE_ENV = previousNodeEnv;
+    }
+
+    const postgresResult = requireAgentAuth(
+      agentHeaders(credential),
+      'agent_test',
+      { persistenceMode: 'postgres' },
+    );
+    assert.equal(postgresResult.status, 401);
   });
 
   it('does not audit nonexistent addressed credentials', () => {

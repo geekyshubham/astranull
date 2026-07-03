@@ -1,11 +1,11 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { buildProbeProfile } from '../contracts/checks.mjs';
+import { buildProbeProfile, WAF_SAFE_PROBE_METADATA_KEYS } from '../contracts/checks.mjs';
 import { generateNonce, hashNonce } from '../lib/crypto.mjs';
 
 const DEFAULT_MAX_REQUESTS = 1;
 const DEFAULT_TIMEOUT_CAP_MS = 5000;
 
-const BENIGN_PROBE_PROFILE_OVERRIDE_KEYS = new Set(['marker']);
+const BENIGN_PROBE_PROFILE_OVERRIDE_KEYS = new Set(['marker', ...WAF_SAFE_PROBE_METADATA_KEYS]);
 
 function safeEqualUtf8(a, b) {
   if (!a || !b) return false;
@@ -23,6 +23,14 @@ export function resolveJobProbeProfile(check, override) {
   if (typeof override !== 'object' || Array.isArray(override)) return base;
   const merged = { ...base };
   for (const key of BENIGN_PROBE_PROFILE_OVERRIDE_KEYS) {
+    if (key === 'nonce_hash_only') {
+      if (override.nonce_hash_only === true) merged.nonce_hash_only = true;
+      continue;
+    }
+    if (key === 'collect') {
+      if (Array.isArray(override.collect)) merged.collect = override.collect;
+      continue;
+    }
     if (override[key] != null) {
       merged[key] = String(override[key]).slice(0, 128);
     }

@@ -5,7 +5,7 @@ import { isHighScaleRoute, isPostgresUnwiredRoute } from '../../src/lib/postgres
 import { probeWorkerAuthHeaders } from '../../src/services/probeCoordinator.mjs';
 import { createServer } from '../../src/server.mjs';
 import { getStore, resetStoreForTests } from '../../src/store.mjs';
-import { demoHeaders, request } from '../helpers/http.mjs';
+import { demoHeaders, request, staffHeaders } from '../helpers/http.mjs';
 
 const PROBE_WORKER_SECRET = 'postgres-probe-worker-secret-32chars!!';
 
@@ -91,6 +91,124 @@ describe('createServer postgres mode — route wiring', () => {
     assert.equal(unwired.json.error, 'postgres_route_not_wired');
   });
 
+  it('wires public sign-up and internal admin routes through injected Postgres services', async () => {
+    const calls = [];
+    const internalManagement = {
+      async createSignupRequest(body) {
+        calls.push(['createSignupRequest', body.organization_name]);
+        return {
+          request: {
+            id: 'sgn_pg',
+            organization_name: body.organization_name,
+            state: 'submitted',
+            requested_plan: body.requested_plan,
+            region: body.region,
+            created_at: '2026-07-03T00:00:00.000Z',
+            updated_at: '2026-07-03T00:00:00.000Z',
+          },
+        };
+      },
+      async getSignupRequest(id) {
+        calls.push(['getSignupRequest', id]);
+        return {
+          id,
+          organization_name: 'Northwind Defense',
+          state: 'submitted',
+          requested_plan: 'professional',
+          region: 'us',
+          created_at: '2026-07-03T00:00:00.000Z',
+          updated_at: '2026-07-03T00:00:00.000Z',
+        };
+      },
+      sanitizeSignupForPublic(record) {
+        return {
+          id: record.id,
+          organization_name: record.organization_name,
+          state: record.state,
+          requested_plan: record.requested_plan,
+          region: record.region,
+          created_at: record.created_at,
+          updated_at: record.updated_at,
+        };
+      },
+      async listSignupRequests() {
+        calls.push(['listSignupRequests']);
+        return [{ id: 'sgn_pg', organization_name: 'Northwind Defense', state: 'submitted' }];
+      },
+      async approveSignupRequest() { return null; },
+      async rejectSignupRequest() { return null; },
+      async getInternalOverview() {
+        calls.push(['getInternalOverview']);
+        return { pending_signups: 1, blocked_tenants: 0, pending_approval_requests: 0, high_scale_reviews: 0, tenant_count: 0 };
+      },
+      async listTenants() { return []; },
+      async getTenantDetail() { return null; },
+      async patchTenant() { return null; },
+      async getTenantSubscription() { return null; },
+      async patchTenantSubscription() { return null; },
+      async upsertEntitlementGrant() { return {}; },
+      async resendOwnerInvite() { return null; },
+      async disableTenantUser() { return null; },
+      async listApprovalRequests() { return []; },
+      async decideApprovalRequest() { return null; },
+      async listInternalAudit() { return []; },
+    };
+    ({ server, baseUrl } = listenPostgresServer({ internalManagement, signupIntake: internalManagement }));
+
+    const created = await request(baseUrl, 'POST', '/v1/signup-requests', {
+      body: {
+        organization_name: 'Northwind Defense',
+        contact_email: 'security@northwind.example',
+        contact_name: 'Alex Morgan',
+        requested_plan: 'professional',
+        intended_use: 'Defensive DDoS readiness validation for declared production origins.',
+        region: 'us',
+      },
+    });
+    assert.equal(created.status, 201);
+    assert.equal(created.json.request.id, 'sgn_pg');
+
+    const overview = await request(baseUrl, 'GET', '/internal/admin/overview', {
+      headers: staffHeaders('internal_admin'),
+    });
+    assert.equal(overview.status, 200);
+    assert.equal(overview.json.pending_signups, 1);
+
+    const queue = await request(baseUrl, 'GET', '/internal/admin/signup-requests', {
+      headers: staffHeaders('internal_admin'),
+    });
+    assert.equal(queue.status, 200);
+    assert.equal(queue.json.items[0].id, 'sgn_pg');
+    assert.deepEqual(calls.map((c) => c[0]), [
+      'createSignupRequest',
+      'getInternalOverview',
+      'listSignupRequests',
+    ]);
+  });
+
+  it('fails closed for internal admin routes in Postgres mode when service is missing', async () => {
+    ({ server, baseUrl } = listenPostgresServer({}));
+    const res = await request(baseUrl, 'GET', '/internal/admin/signup-requests', {
+      headers: staffHeaders('internal_admin'),
+    });
+    assert.equal(res.status, 503);
+    assert.equal(res.json.error, 'postgres_internal_admin_not_wired');
+  });
+
+  it('denies customer principals on Postgres internal admin routes before service dispatch', async () => {
+    const internalManagement = {
+      async getInternalOverview() {
+        throw new Error('must_not_dispatch');
+      },
+    };
+    ({ server, baseUrl } = listenPostgresServer({ internalManagement }));
+    const res = await request(baseUrl, 'GET', '/internal/admin/overview', {
+      headers: demoHeaders('admin'),
+    });
+    assert.equal(res.status, 403);
+    assert.equal(res.json.error, 'staff_forbidden');
+  });
+
   it('lists high-scale requests via injected highScale service without dev store', async () => {
     let listCalls = 0;
     ({ server, baseUrl } = listenPostgresServer({
@@ -147,6 +265,64 @@ describe('createServer postgres mode — route wiring', () => {
     assert.equal(forbidden.status, 403);
     assert.equal(forbidden.json.permission, 'tenant:read');
     assert.equal(stateCalls, 0);
+  });
+
+  it('returns postgres_route_not_wired for GET /v1/placement/reviews when placement service is missing', async () => {
+    ({ server, baseUrl } = listenPostgresServer({
+      tenants: { getCurrentTenant: async () => ({ id: 'ten_demo' }) },
+    }));
+
+    const headers = demoHeaders('admin');
+    const unwired = await request(baseUrl, 'GET', '/v1/placement/reviews', { headers });
+    assert.equal(unwired.status, 503);
+    assert.equal(unwired.json.error, 'postgres_route_not_wired');
+  });
+
+  it('handles GET /v1/placement/reviews via injected placement.listPlacementReviews', async () => {
+    let placementCalls = 0;
+    const placementSvc = {
+      async listPlacementReviews(ctx, query) {
+        placementCalls += 1;
+        assert.equal(ctx.tenantId, 'ten_demo');
+        assert.equal(query.target_group_id, 'tg_1');
+        return {
+          target_group_id: 'tg_1',
+          computed_at: '2026-07-03T12:00:00.000Z',
+          summary: {
+            total_groups: 1,
+            proven: 0,
+            needs_baseline: 1,
+            missing_agent: 0,
+            misplaced_risk: 0,
+            unbound_online_agent_count: 0,
+            summary: 'Placement diagnostics: 0 proven, 1 need baseline, 0 missing agent, 0 misplaced risk (of 1 group(s)).',
+          },
+          reviews: [
+            {
+              target_group_id: 'tg_1',
+              target_group_name: 'Origin',
+              status: 'needs_baseline',
+              warnings: ['no_recent_observation'],
+              bound_agent_ids: ['ag_1'],
+              online_bound_agent_ids: ['ag_1'],
+              recent_observation_count: 0,
+            },
+          ],
+          unbound_online_agent_ids: [],
+        };
+      },
+    };
+    ({ server, baseUrl } = listenPostgresServer({
+      tenants: { getCurrentTenant: async () => ({ id: 'ten_demo' }) },
+      placement: placementSvc,
+    }));
+
+    const headers = demoHeaders('admin');
+    const res = await request(baseUrl, 'GET', '/v1/placement/reviews?target_group_id=tg_1', { headers });
+    assert.equal(res.status, 200);
+    assert.equal(res.json.target_group_id, 'tg_1');
+    assert.equal(res.json.reviews[0].status, 'needs_baseline');
+    assert.equal(placementCalls, 1);
   });
 
   it('returns postgres_route_not_wired for GET /v1/state when state service is missing', async () => {
@@ -525,6 +701,20 @@ describe('createServer postgres mode — route wiring', () => {
     });
     assert.equal(createRes.status, 503);
     assert.equal(createRes.json.error, 'postgres_route_not_wired');
+
+    const retryRes = await request(baseUrl, 'POST', '/v1/notifications/retries/process', {
+      headers,
+      body: { dry_run: true },
+    });
+    assert.equal(retryRes.status, 503);
+    assert.equal(retryRes.json.error, 'postgres_route_not_wired');
+
+    const redriveRes = await request(baseUrl, 'POST', '/v1/notifications/dlq/redrive', {
+      headers,
+      body: { dry_run: true },
+    });
+    assert.equal(redriveRes.status, 503);
+    assert.equal(redriveRes.json.error, 'postgres_route_not_wired');
   });
 
   it('denies viewer before notification route wiring check', async () => {
@@ -541,6 +731,8 @@ describe('createServer postgres mode — route wiring', () => {
   it('handles GET/POST /v1/notifications via injected notifications service without dev store', async () => {
     let listCalls = 0;
     let createCalls = 0;
+    let retryCalls = 0;
+    let redriveCalls = 0;
     const notifications = {
       async listNotifications(ctx) {
         listCalls += 1;
@@ -560,6 +752,20 @@ describe('createServer postgres mode — route wiring', () => {
           enabled: true,
           created_at: '2026-06-01T00:00:00.000Z',
         };
+      },
+      async processDueNotificationRetries(ctx, options) {
+        retryCalls += 1;
+        assert.equal(ctx.tenantId, 'ten_demo');
+        assert.equal(options.deliveryMode, 'metadata_only');
+        assert.equal(options.dryRun, false);
+        return { tenant_id: ctx.tenantId, dry_run: false, due_count: 0, processed: [] };
+      },
+      async redriveNotificationDlq(ctx, options) {
+        redriveCalls += 1;
+        assert.equal(ctx.tenantId, 'ten_demo');
+        assert.equal(options.forceMetadataOnly, true);
+        assert.equal(options.dryRun, false);
+        return { tenant_id: ctx.tenantId, dry_run: false, requeued_count: 0, processed: [] };
       },
     };
 
@@ -583,6 +789,24 @@ describe('createServer postgres mode — route wiring', () => {
     assert.equal(created.status, 201);
     assert.equal(created.json.id, 'nrule_new');
     assert.equal(createCalls, 1);
+    assert.equal(getStore().notificationRules.length, 1);
+
+    const retried = await request(baseUrl, 'POST', '/v1/notifications/retries/process', {
+      headers,
+      body: { dry_run: false },
+    });
+    assert.equal(retried.status, 200);
+    assert.equal(retried.json.due_count, 0);
+    assert.equal(retryCalls, 1);
+    assert.equal(getStore().notificationRules.length, 1);
+
+    const redriven = await request(baseUrl, 'POST', '/v1/notifications/dlq/redrive', {
+      headers,
+      body: { dry_run: false, force_metadata_only: false },
+    });
+    assert.equal(redriven.status, 200);
+    assert.equal(redriven.json.requeued_count, 0);
+    assert.equal(redriveCalls, 1);
     assert.equal(getStore().notificationRules.length, 1);
   });
 
@@ -867,6 +1091,28 @@ describe('createServer postgres mode — route wiring', () => {
     assert.equal(unwired.json.error, 'postgres_route_not_wired');
   });
 
+  it('returns postgres_route_not_wired for drift-scans when wafDrift service is missing', async () => {
+    ({ server, baseUrl } = listenPostgresServer(
+      {
+        tenants: { getCurrentTenant: async () => ({ id: 'ten_demo' }) },
+        wafPosture: { listWafAssets: async () => [] },
+      },
+      undefined,
+      {
+        featureFlags: { wafPostureEnabled: true, externalDiscoveryEnabled: false },
+      },
+    ));
+
+    const headers = demoHeaders('admin');
+    const runScan = await request(baseUrl, 'POST', '/v1/waf/drift-scans/run', { headers });
+    assert.equal(runScan.status, 503);
+    assert.equal(runScan.json.error, 'postgres_route_not_wired');
+
+    const latest = await request(baseUrl, 'GET', '/v1/waf/drift-scans/latest', { headers });
+    assert.equal(latest.status, 503);
+    assert.equal(latest.json.error, 'postgres_route_not_wired');
+  });
+
   it('handles GET /v1/waf/assets via injected wafPosture service without dev store', async () => {
     resetStoreForTests({ wafAssets: [{ id: 'waf_dev_only', tenant_id: 'ten_demo' }] });
     const calls = [];
@@ -921,7 +1167,12 @@ describe('createServer postgres mode — route wiring', () => {
       },
       undefined,
       {
-        featureFlags: { wafPostureEnabled: true, externalDiscoveryEnabled: false },
+        featureFlags: {
+          wafPostureEnabled: true,
+          externalDiscoveryEnabled: false,
+          connectorsEnabledDefault: true,
+          connectorsEnabledTenants: {},
+        },
       },
     ));
 
@@ -934,6 +1185,647 @@ describe('createServer postgres mode — route wiring', () => {
     assert.equal(calls[0].ctx.tenantId, 'ten_demo');
     assert.equal(getStore().wafConnectorSnapshots.length, 1);
     assert.equal(getStore().wafConnectorSnapshots[0].id, 'snap_dev_only');
+  });
+
+  const wafFeatureFlags = { wafPostureEnabled: true, externalDiscoveryEnabled: false };
+  const discoveryFeatureFlags = { wafPostureEnabled: false, externalDiscoveryEnabled: true };
+
+  it('handles GET /v1/waf/action-items via injected actionItems service without dev store', async () => {
+    resetStoreForTests({ wafActionItems: [{ id: 'ai_dev_only', tenant_id: 'ten_demo' }] });
+    const pgItems = [{ id: 'ai_pg_1', tenant_id: 'ten_demo', status: 'open' }];
+    let listCalls = 0;
+    ({ server, baseUrl } = listenPostgresServer(
+      {
+        tenants: { getCurrentTenant: async () => ({ id: 'ten_demo' }) },
+        wafPosture: { async listWafAssets() { return []; } },
+        actionItems: {
+          async listActionItems(ctx) {
+            listCalls += 1;
+            assert.equal(ctx.tenantId, 'ten_demo');
+            return pgItems;
+          },
+        },
+      },
+      undefined,
+      { featureFlags: wafFeatureFlags },
+    ));
+
+    const headers = demoHeaders('admin');
+    const listed = await request(baseUrl, 'GET', '/v1/waf/action-items', { headers });
+    assert.equal(listed.status, 200);
+    assert.deepEqual(listed.json.items, pgItems);
+    assert.equal(listCalls, 1);
+    assert.equal(getStore().wafActionItems.length, 1);
+    assert.equal(getStore().wafActionItems[0].id, 'ai_dev_only');
+  });
+
+  it('returns postgres_route_not_wired for action-items when actionItems is missing but wafPosture exists', async () => {
+    ({ server, baseUrl } = listenPostgresServer(
+      {
+        tenants: { getCurrentTenant: async () => ({ id: 'ten_demo' }) },
+        wafPosture: { async listWafAssets() { return []; } },
+      },
+      undefined,
+      { featureFlags: wafFeatureFlags },
+    ));
+
+    const headers = demoHeaders('admin');
+    const unwired = await request(baseUrl, 'GET', '/v1/waf/action-items', { headers });
+    assert.equal(unwired.status, 503);
+    assert.equal(unwired.json.error, 'postgres_route_not_wired');
+  });
+
+  it('returns postgres_route_not_wired for CVE pipeline when cvePipeline is missing but wafPosture exists', async () => {
+    ({ server, baseUrl } = listenPostgresServer(
+      {
+        tenants: { getCurrentTenant: async () => ({ id: 'ten_demo' }) },
+        wafPosture: { async listWafAssets() { return []; } },
+      },
+      undefined,
+      { featureFlags: wafFeatureFlags },
+    ));
+
+    const headers = demoHeaders('admin');
+    const unwired = await request(baseUrl, 'GET', '/v1/waf/cve-pipeline', { headers });
+    assert.equal(unwired.status, 503);
+    assert.equal(unwired.json.error, 'postgres_route_not_wired');
+  });
+
+  it('returns postgres_route_not_wired for supply-chain when supplyChainRisk is missing but wafPosture exists', async () => {
+    ({ server, baseUrl } = listenPostgresServer(
+      {
+        tenants: { getCurrentTenant: async () => ({ id: 'ten_demo' }) },
+        wafPosture: { async listWafAssets() { return []; } },
+      },
+      undefined,
+      { featureFlags: wafFeatureFlags },
+    ));
+
+    const headers = demoHeaders('admin');
+    const unwired = await request(baseUrl, 'GET', '/v1/waf/supply-chain/risks', { headers });
+    assert.equal(unwired.status, 503);
+    assert.equal(unwired.json.error, 'postgres_route_not_wired');
+  });
+
+  it('returns postgres_waf_orchestrator_unavailable when wafOrchestrator is missing', async () => {
+    ({ server, baseUrl } = listenPostgresServer(
+      {
+        tenants: { getCurrentTenant: async () => ({ id: 'ten_demo' }) },
+        wafPosture: { async listWafAssets() { return []; } },
+      },
+      undefined,
+      { featureFlags: wafFeatureFlags },
+    ));
+
+    const headers = demoHeaders('admin');
+    const unwired = await request(baseUrl, 'GET', '/v1/waf/validation-plans', { headers });
+    assert.equal(unwired.status, 503);
+    assert.equal(unwired.json.error, 'postgres_waf_orchestrator_unavailable');
+  });
+
+  it('exposes postgres WAF orchestrator service method surface on runtime wiring contract', async () => {
+    const { POSTGRES_WAF_ORCHESTRATOR_SERVICE_METHODS } = await import(
+      '../../src/persistence/postgres/wafOrchestratorServiceAdapters.mjs'
+    );
+    assert.deepEqual(POSTGRES_WAF_ORCHESTRATOR_SERVICE_METHODS, [
+      'listValidationPlans',
+      'createValidationPlan',
+      'getScheduledPlans',
+      'getRunnablePlans',
+      'cancelValidationPlan',
+      'approveBaseline',
+      'requestRetest',
+      'listRetests',
+      'executeValidationPlan',
+      'executeRetest',
+      'completeRetest',
+    ]);
+  });
+
+  it('handles GET /v1/waf/validation-plans via injected wafOrchestrator without dev store', async () => {
+    resetStoreForTests({ wafValidationPlans: [{ id: 'plan_dev_only', tenant_id: 'ten_demo' }] });
+    const pgPlans = [{ id: 'plan_pg_1', tenant_id: 'ten_demo', state: 'draft' }];
+    let listCalls = 0;
+    ({ server, baseUrl } = listenPostgresServer(
+      {
+        tenants: { getCurrentTenant: async () => ({ id: 'ten_demo' }) },
+        wafOrchestrator: {
+          async listValidationPlans(ctx) {
+            listCalls += 1;
+            assert.equal(ctx.tenantId, 'ten_demo');
+            return { plans: pgPlans };
+          },
+        },
+      },
+      undefined,
+      { featureFlags: wafFeatureFlags },
+    ));
+
+    const headers = demoHeaders('admin');
+    const res = await request(baseUrl, 'GET', '/v1/waf/validation-plans', { headers });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.json.items, pgPlans);
+    assert.equal(listCalls, 1);
+    assert.equal(getStore().wafValidationPlans.length, 1);
+    assert.equal(getStore().wafValidationPlans[0].id, 'plan_dev_only');
+  });
+
+  it('handles GET /v1/waf/validation-plans/scheduled via injected wafOrchestrator', async () => {
+    const scheduled = [{ id: 'plan_sched_1', tenant_id: 'ten_demo', state: 'scheduled' }];
+    let calls = 0;
+    ({ server, baseUrl } = listenPostgresServer(
+      {
+        tenants: { getCurrentTenant: async () => ({ id: 'ten_demo' }) },
+        wafOrchestrator: {
+          async getScheduledPlans(ctx) {
+            calls += 1;
+            assert.equal(ctx.tenantId, 'ten_demo');
+            return { plans: scheduled };
+          },
+        },
+      },
+      undefined,
+      { featureFlags: wafFeatureFlags },
+    ));
+
+    const headers = demoHeaders('admin');
+    const res = await request(baseUrl, 'GET', '/v1/waf/validation-plans/scheduled', { headers });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.json.items, scheduled);
+    assert.equal(calls, 1);
+  });
+
+  it('handles POST /v1/waf/validation-plans via injected wafOrchestrator', async () => {
+    const plan = { id: 'plan_new_1', tenant_id: 'ten_demo', state: 'draft' };
+    ({ server, baseUrl } = listenPostgresServer(
+      {
+        tenants: { getCurrentTenant: async () => ({ id: 'ten_demo' }) },
+        wafOrchestrator: {
+          async createValidationPlan(ctx, body) {
+            assert.equal(ctx.tenantId, 'ten_demo');
+            assert.equal(body.target_group_id, 'tg_1');
+            return { validation_plan: plan };
+          },
+        },
+      },
+      undefined,
+      { featureFlags: wafFeatureFlags },
+    ));
+
+    const headers = demoHeaders('admin');
+    const res = await request(baseUrl, 'POST', '/v1/waf/validation-plans', {
+      headers,
+      body: { target_group_id: 'tg_1', scenarios: ['marker'] },
+    });
+    assert.equal(res.status, 201);
+    assert.deepEqual(res.json.validation_plan, plan);
+  });
+
+  it('handles POST /v1/waf/validation-plans/:id/cancel via injected wafOrchestrator', async () => {
+    const cancelled = { id: 'plan_cancel_1', tenant_id: 'ten_demo', state: 'cancelled' };
+    ({ server, baseUrl } = listenPostgresServer(
+      {
+        tenants: { getCurrentTenant: async () => ({ id: 'ten_demo' }) },
+        wafOrchestrator: {
+          async cancelValidationPlan(ctx, planId) {
+            assert.equal(ctx.tenantId, 'ten_demo');
+            assert.equal(planId, 'plan_cancel_1');
+            return { validation_plan: cancelled };
+          },
+        },
+      },
+      undefined,
+      { featureFlags: wafFeatureFlags },
+    ));
+
+    const headers = demoHeaders('admin');
+    const res = await request(
+      baseUrl,
+      'POST',
+      '/v1/waf/validation-plans/plan_cancel_1/cancel',
+      { headers },
+    );
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.json.validation_plan, cancelled);
+  });
+
+  it('handles POST /v1/waf/baselines/:id/approve via injected wafOrchestrator', async () => {
+    const approval = { baseline_id: 'bl_1', approval_id: 'appr_1' };
+    ({ server, baseUrl } = listenPostgresServer(
+      {
+        tenants: { getCurrentTenant: async () => ({ id: 'ten_demo' }) },
+        wafOrchestrator: {
+          async approveBaseline(ctx, baselineId, body) {
+            assert.equal(ctx.tenantId, 'ten_demo');
+            assert.equal(baselineId, 'bl_1');
+            assert.equal(body.approver, 'usr_admin');
+            return approval;
+          },
+        },
+      },
+      undefined,
+      { featureFlags: wafFeatureFlags },
+    ));
+
+    const headers = demoHeaders('admin');
+    const res = await request(baseUrl, 'POST', '/v1/waf/baselines/bl_1/approve', {
+      headers,
+      body: { approver: 'usr_admin', approval_notes: 'reviewed' },
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.json, approval);
+  });
+
+  it('handles POST /v1/waf/drift-events/:id/retest via injected wafOrchestrator', async () => {
+    const retest = { id: 'rt_1', tenant_id: 'ten_demo', drift_event_id: 'drf_1', status: 'requested' };
+    ({ server, baseUrl } = listenPostgresServer(
+      {
+        tenants: { getCurrentTenant: async () => ({ id: 'ten_demo' }) },
+        wafOrchestrator: {
+          async requestRetest(ctx, driftEventId, body) {
+            assert.equal(ctx.tenantId, 'ten_demo');
+            assert.equal(driftEventId, 'drf_1');
+            assert.deepEqual(body.retest_plan, ['marker']);
+            return { retest_request: retest };
+          },
+        },
+      },
+      undefined,
+      { featureFlags: wafFeatureFlags },
+    ));
+
+    const headers = demoHeaders('admin');
+    const res = await request(baseUrl, 'POST', '/v1/waf/drift-events/drf_1/retest', {
+      headers,
+      body: { retest_plan: ['marker'], requested_by: 'usr_admin' },
+    });
+    assert.equal(res.status, 201);
+    assert.deepEqual(res.json.retest_request, retest);
+  });
+
+  it('handles POST /v1/waf/retests/:id/execute via injected wafOrchestrator', async () => {
+    const delegated = {
+      retest_request: {
+        id: 'rt_exec_1',
+        tenant_id: 'ten_demo',
+        status: 'delegated',
+      },
+      delegated_jobs: [
+        { test_run_id: 'run_delegate_1', probe_job_id: 'pjob_delegate_1', scenario_id: 'marker' },
+      ],
+    };
+    ({ server, baseUrl } = listenPostgresServer(
+      {
+        tenants: { getCurrentTenant: async () => ({ id: 'ten_demo' }) },
+        wafOrchestrator: {
+          async executeRetest(ctx, retestId, body, runtimeConfig) {
+            assert.equal(ctx.tenantId, 'ten_demo');
+            assert.equal(retestId, 'rt_exec_1');
+            assert.deepEqual(body.note, 'delegate safely');
+            assert.equal(typeof runtimeConfig, 'object');
+            assert.ok(runtimeConfig !== null);
+            return delegated;
+          },
+        },
+      },
+      undefined,
+      { featureFlags: wafFeatureFlags },
+    ));
+
+    const headers = demoHeaders('admin');
+    const res = await request(baseUrl, 'POST', '/v1/waf/retests/rt_exec_1/execute', {
+      headers,
+      body: { note: 'delegate safely' },
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.json, delegated);
+    assert.equal(res.json.retest_request.status, 'delegated');
+    assert.equal(res.json.delegated_jobs[0].test_run_id, 'run_delegate_1');
+    assert.equal(res.json.delegated_jobs[0].probe_job_id, 'pjob_delegate_1');
+  });
+
+  it('handles POST /v1/waf/retests/:id/complete via injected wafOrchestrator', async () => {
+    resetStoreForTests({ wafRetestRequests: [{ id: 'rt_dev_only', tenant_id: 'ten_demo' }] });
+    const completed = {
+      retest_request: {
+        id: 'rt_complete_1',
+        tenant_id: 'ten_demo',
+        status: 'completed',
+        verdict: 'resolved',
+      },
+      verdict: { verdict: 'resolved', reason: 'evidence_pass' },
+      delegated_jobs: [
+        { test_run_id: 'run_close_1', probe_job_id: 'pjob_close_1', scenario: 'marker' },
+      ],
+    };
+    let completeCalls = 0;
+    ({ server, baseUrl } = listenPostgresServer(
+      {
+        tenants: { getCurrentTenant: async () => ({ id: 'ten_demo' }) },
+        wafOrchestrator: {
+          async completeRetest(ctx, retestId) {
+            completeCalls += 1;
+            assert.equal(ctx.tenantId, 'ten_demo');
+            assert.equal(retestId, 'rt_complete_1');
+            return completed;
+          },
+        },
+      },
+      undefined,
+      { featureFlags: wafFeatureFlags },
+    ));
+
+    const viewerDenied = await request(baseUrl, 'POST', '/v1/waf/retests/rt_complete_1/complete', {
+      headers: demoHeaders('viewer'),
+    });
+    assert.equal(viewerDenied.status, 403);
+    assert.equal(viewerDenied.json.permission, 'waf:run');
+    assert.equal(completeCalls, 0);
+
+    const headers = demoHeaders('admin');
+    const res = await request(baseUrl, 'POST', '/v1/waf/retests/rt_complete_1/complete', { headers });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.json, completed);
+    assert.equal(completeCalls, 1);
+    assert.equal(getStore().wafRetestRequests.length, 1);
+    assert.equal(getStore().wafRetestRequests[0].id, 'rt_dev_only');
+  });
+
+  it('denies viewer before POST /v1/waf/validation-plans/:id/execute calls injected service', async () => {
+    let executeCalls = 0;
+    ({ server, baseUrl } = listenPostgresServer(
+      {
+        tenants: { getCurrentTenant: async () => ({ id: 'ten_demo' }) },
+        wafOrchestrator: {
+          async executeValidationPlan() {
+            executeCalls += 1;
+            return { validation_plan: { id: 'plan_never' } };
+          },
+        },
+      },
+      undefined,
+      { featureFlags: wafFeatureFlags },
+    ));
+
+    const forbidden = await request(
+      baseUrl,
+      'POST',
+      '/v1/waf/validation-plans/plan_exec_1/execute',
+      { headers: demoHeaders('viewer') },
+    );
+    assert.equal(forbidden.status, 403);
+    assert.equal(forbidden.json.permission, 'waf:run');
+    assert.equal(executeCalls, 0);
+  });
+
+  it('handles POST /v1/waf/validation-plans/:id/execute via injected wafOrchestrator without dev store', async () => {
+    resetStoreForTests({ wafValidationPlans: [{ id: 'plan_dev_only', tenant_id: 'ten_demo' }] });
+    const delegated = {
+      validation_plan: {
+        id: 'plan_exec_ok',
+        tenant_id: 'ten_demo',
+        state: 'running',
+      },
+      delegated_jobs: [
+        { test_run_id: 'run_vp_1', probe_job_id: 'pjob_vp_1', scenario_id: 'marker' },
+      ],
+      continuation_required: true,
+    };
+    let executeCalls = 0;
+    ({ server, baseUrl } = listenPostgresServer(
+      {
+        tenants: { getCurrentTenant: async () => ({ id: 'ten_demo' }) },
+        wafOrchestrator: {
+          async executeValidationPlan(ctx, planId, runtimeConfig) {
+            executeCalls += 1;
+            assert.equal(ctx.tenantId, 'ten_demo');
+            assert.equal(planId, 'plan_exec_ok');
+            assert.equal(runtimeConfig.persistenceMode, 'postgres');
+            return delegated;
+          },
+        },
+      },
+      undefined,
+      { featureFlags: wafFeatureFlags },
+    ));
+
+    const headers = demoHeaders('admin');
+    const res = await request(
+      baseUrl,
+      'POST',
+      '/v1/waf/validation-plans/plan_exec_ok/execute',
+      { headers },
+    );
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.json.validation_plan, delegated.validation_plan);
+    assert.equal(res.json.delegated_jobs[0].test_run_id, 'run_vp_1');
+    assert.equal(res.json.delegated_jobs[0].probe_job_id, 'pjob_vp_1');
+    assert.equal(res.json.continuation_required, true);
+    assert.equal(executeCalls, 1);
+    assert.equal(getStore().wafValidationPlans.length, 1);
+    assert.equal(getStore().wafValidationPlans[0].id, 'plan_dev_only');
+  });
+
+  it('returns injected wafOrchestrator executeValidationPlan lifecycle errors without dev store', async () => {
+    resetStoreForTests({ wafValidationPlans: [{ id: 'plan_dev_only', tenant_id: 'ten_demo' }] });
+    const lifecycleCases = [
+      { error: 'validation_plan_cancelled', status: 409 },
+      { error: 'waf_orchestrator_execution_in_progress', status: 409 },
+      { error: 'waf_orchestrator_execution_not_ready', status: 422 },
+    ];
+    for (const { error, status } of lifecycleCases) {
+      let executeCalls = 0;
+      ({ server, baseUrl } = listenPostgresServer(
+        {
+          tenants: { getCurrentTenant: async () => ({ id: 'ten_demo' }) },
+          wafOrchestrator: {
+            async executeValidationPlan(ctx, planId, runtimeConfig) {
+              executeCalls += 1;
+              assert.equal(ctx.tenantId, 'ten_demo');
+              assert.equal(planId, 'plan_exec_1');
+              assert.equal(runtimeConfig.persistenceMode, 'postgres');
+              return { error, status };
+            },
+          },
+        },
+        undefined,
+        { featureFlags: wafFeatureFlags },
+      ));
+
+      const headers = demoHeaders('admin');
+      const res = await request(
+        baseUrl,
+        'POST',
+        '/v1/waf/validation-plans/plan_exec_1/execute',
+        { headers },
+      );
+      assert.equal(res.status, status, `expected ${status} for ${error}`);
+      assert.equal(res.json.error, error);
+      assert.equal(executeCalls, 1);
+      assert.equal(getStore().wafValidationPlans.length, 1);
+      assert.equal(getStore().wafValidationPlans[0].id, 'plan_dev_only');
+      server?.close();
+      server = undefined;
+    }
+  });
+
+  it('returns postgres_route_not_wired for discovery when externalDiscovery is missing and feature is enabled', async () => {
+    ({ server, baseUrl } = listenPostgresServer(
+      { tenants: { getCurrentTenant: async () => ({ id: 'ten_demo' }) } },
+      undefined,
+      { featureFlags: discoveryFeatureFlags },
+    ));
+
+    const headers = demoHeaders('admin');
+    const unwired = await request(baseUrl, 'GET', '/v1/discovery/entities', { headers });
+    assert.equal(unwired.status, 503);
+    assert.equal(unwired.json.error, 'postgres_route_not_wired');
+  });
+
+  it('handles GET /v1/waf/cve-pipeline via injected cvePipeline service without dev store', async () => {
+    resetStoreForTests({ cvePipelineItems: [{ id: 'cve_dev_only', tenant_id: 'ten_demo' }] });
+    const pgItems = [{ id: 'cve_pg_1', tenant_id: 'ten_demo', stage: 'triage' }];
+    let listCalls = 0;
+    ({ server, baseUrl } = listenPostgresServer(
+      {
+        tenants: { getCurrentTenant: async () => ({ id: 'ten_demo' }) },
+        cvePipeline: {
+          async listCvePipelineItems(ctx) {
+            listCalls += 1;
+            assert.equal(ctx.tenantId, 'ten_demo');
+            return { items: pgItems };
+          },
+        },
+      },
+      undefined,
+      { featureFlags: wafFeatureFlags },
+    ));
+
+    const headers = demoHeaders('admin');
+    const res = await request(baseUrl, 'GET', '/v1/waf/cve-pipeline', { headers });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.json.items, pgItems);
+    assert.equal(listCalls, 1);
+    assert.equal(getStore().cvePipelineItems.length, 1);
+    assert.equal(getStore().cvePipelineItems[0].id, 'cve_dev_only');
+  });
+
+  it('handles GET /v1/waf/supply-chain/risks via injected supplyChainRisk service without dev store', async () => {
+    resetStoreForTests({ supplyChainRisks: [{ id: 'risk_dev_only', tenant_id: 'ten_demo' }] });
+    const pgRisks = [{ id: 'risk_pg_1', tenant_id: 'ten_demo', state: 'open' }];
+    let listCalls = 0;
+    ({ server, baseUrl } = listenPostgresServer(
+      {
+        tenants: { getCurrentTenant: async () => ({ id: 'ten_demo' }) },
+        supplyChainRisk: {
+          async listSupplyChainRisks(ctx) {
+            listCalls += 1;
+            assert.equal(ctx.tenantId, 'ten_demo');
+            return pgRisks;
+          },
+        },
+      },
+      undefined,
+      { featureFlags: wafFeatureFlags },
+    ));
+
+    const headers = demoHeaders('admin');
+    const res = await request(baseUrl, 'GET', '/v1/waf/supply-chain/risks', { headers });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.json.items, pgRisks);
+    assert.equal(listCalls, 1);
+    assert.equal(getStore().supplyChainRisks.length, 1);
+    assert.equal(getStore().supplyChainRisks[0].id, 'risk_dev_only');
+  });
+
+  it('handles GET /v1/waf/supply-chain/risks/:id via injected supplyChainRisk service without dev store', async () => {
+    resetStoreForTests({ supplyChainRisks: [{ id: 'risk_dev_only', tenant_id: 'ten_demo' }] });
+    const pgRisk = { id: 'risk_pg_1', tenant_id: 'ten_demo', phase: 'AP1_ticket_workflow' };
+    let getCalls = 0;
+    ({ server, baseUrl } = listenPostgresServer(
+      {
+        tenants: { getCurrentTenant: async () => ({ id: 'ten_demo' }) },
+        supplyChainRisk: {
+          async getSupplyChainRisk(ctx, id) {
+            getCalls += 1;
+            assert.equal(ctx.tenantId, 'ten_demo');
+            assert.equal(id, 'risk_pg_1');
+            return { risk: pgRisk };
+          },
+        },
+      },
+      undefined,
+      { featureFlags: wafFeatureFlags },
+    ));
+
+    const headers = demoHeaders('admin');
+    const res = await request(baseUrl, 'GET', '/v1/waf/supply-chain/risks/risk_pg_1', { headers });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.json.risk, pgRisk);
+    assert.equal(getCalls, 1);
+    assert.equal(getStore().supplyChainRisks.length, 1);
+    assert.equal(getStore().supplyChainRisks[0].id, 'risk_dev_only');
+  });
+
+  it('handles GET /v1/discovery/entities via injected externalDiscovery service without dev store', async () => {
+    resetStoreForTests({ discoveryEntities: [{ id: 'ent_dev_only', tenant_id: 'ten_demo' }] });
+    const pgEntities = [{ id: 'ent_pg_1', tenant_id: 'ten_demo', kind: 'hostname' }];
+    let listCalls = 0;
+    ({ server, baseUrl } = listenPostgresServer(
+      {
+        tenants: { getCurrentTenant: async () => ({ id: 'ten_demo' }) },
+        externalDiscovery: {
+          async listEntities(ctx) {
+            listCalls += 1;
+            assert.equal(ctx.tenantId, 'ten_demo');
+            return pgEntities;
+          },
+        },
+      },
+      undefined,
+      { featureFlags: discoveryFeatureFlags },
+    ));
+
+    const headers = demoHeaders('admin');
+    const res = await request(baseUrl, 'GET', '/v1/discovery/entities', { headers });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.json.items, pgEntities);
+    assert.equal(listCalls, 1);
+    assert.equal(getStore().discoveryEntities.length, 1);
+    assert.equal(getStore().discoveryEntities[0].id, 'ent_dev_only');
+  });
+
+  it('handles PATCH /v1/waf/action-items/:id via injected actionItems service without dev store', async () => {
+    resetStoreForTests({ wafActionItems: [{ id: 'ai_dev_only', tenant_id: 'ten_demo' }] });
+    const patched = { action_item: { id: 'ai_pg_1', tenant_id: 'ten_demo', status: 'closed' } };
+    let patchCalls = 0;
+    ({ server, baseUrl } = listenPostgresServer(
+      {
+        tenants: { getCurrentTenant: async () => ({ id: 'ten_demo' }) },
+        actionItems: {
+          async patchActionItemStatus(ctx, id, body) {
+            patchCalls += 1;
+            assert.equal(ctx.tenantId, 'ten_demo');
+            assert.equal(id, 'ai_pg_1');
+            assert.equal(body.status, 'closed');
+            return patched;
+          },
+        },
+      },
+      undefined,
+      { featureFlags: wafFeatureFlags },
+    ));
+
+    const headers = demoHeaders('admin');
+    const res = await request(baseUrl, 'PATCH', '/v1/waf/action-items/ai_pg_1', {
+      headers,
+      body: { status: 'closed' },
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.json, patched);
+    assert.equal(patchCalls, 1);
+    assert.equal(getStore().wafActionItems.length, 1);
+    assert.equal(getStore().wafActionItems[0].id, 'ai_dev_only');
   });
 });
 

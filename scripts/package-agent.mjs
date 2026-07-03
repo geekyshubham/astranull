@@ -50,6 +50,13 @@ export const DEBIAN_HOMEPAGE = 'https://astranull.invalid/';
 
 export const SIGNING_ALGORITHM = 'Ed25519';
 
+export const PACKAGE_SIGNING_SCHEMA_VERSION = 1;
+export const PACKAGE_SIGNING_ARTIFACT_TYPE = 'agent_package_signing';
+export const PACKAGE_SIGNING_FORMATS = Object.freeze(['tarball', 'deb', 'rpm', 'container']);
+
+export const DEFAULT_GPG_KEY_REFERENCE = 'gpg://astranull/agent-package-signing';
+export const DEFAULT_COSIGN_SIGNER_REFERENCE = 'cosign://astranull/agent-release-signer';
+
 const NATIVE_TAR_MTIME = 1704067200; // 2024-01-01T00:00:00Z — stable archive metadata
 
 /** Canonical JSON aligned with sorted keys for deterministic signatures. */
@@ -230,6 +237,111 @@ export function verifyManifestSignature(publicKeyDerBase64, manifest, signatureB
   const message = Buffer.from(stableStringify(signable), 'utf8');
   const signature = Buffer.from(signatureBase64, 'base64');
   return verify(null, message, publicKey, signature);
+}
+
+function artifactRecordFromFile(name, filePath) {
+  const data = fs.readFileSync(filePath);
+  return {
+    name,
+    sha256: sha256Buffer(data),
+    size: data.length,
+  };
+}
+
+/** Metadata-only GPG signing hook for native packages (no private keys or signatures). */
+export function buildGpgSigningHook(options = {}) {
+  const keyReference = options.gpgKeyReference ?? DEFAULT_GPG_KEY_REFERENCE;
+  return {
+    hook: 'metadata_only',
+    algorithm: 'gpg',
+    key_reference: keyReference,
+    fingerprint_sha256: sha256Buffer(Buffer.from(keyReference, 'utf8')),
+    signed: options.gpgSigned === true,
+    signature_uri: options.gpgSignatureUri ?? null,
+  };
+}
+
+/** Metadata-only cosign signing hook for container images (no private keys or signatures). */
+export function buildCosignSigningHook(options = {}) {
+  const signerReference = options.cosignSignerReference ?? DEFAULT_COSIGN_SIGNER_REFERENCE;
+  return {
+    hook: 'metadata_only',
+    algorithm: 'cosign',
+    signer_reference: signerReference,
+    signed: options.cosignSigned === true,
+    signature_uri: options.cosignSignatureUri ?? null,
+  };
+}
+
+export function buildTarballSigningArtifactEntry(manifest, options = {}) {
+  if (!manifest?.artifact) {
+    return null;
+  }
+  const entry = {
+    format: 'tarball',
+    name: manifest.artifact.name,
+    sha256: manifest.artifact.sha256,
+    size: manifest.artifact.size,
+    ed25519: {
+      algorithm: SIGNING_ALGORITHM,
+      signed: manifest.signing?.signed === true,
+      public_key_der_base64: manifest.signing?.public_key_der_base64 ?? null,
+      manifest_name: options.manifestName ?? null,
+      signature_name: options.signatureName ?? null,
+    },
+  };
+  return entry;
+}
+
+export function buildNativeSigningArtifactEntry(format, artifact, options = {}) {
+  if (!artifact?.name || !artifact?.sha256 || !Number.isInteger(artifact.size)) {
+    return null;
+  }
+  return {
+    format,
+    name: artifact.name,
+    sha256: artifact.sha256,
+    size: artifact.size,
+    gpg: buildGpgSigningHook(options),
+  };
+}
+
+export function buildContainerSigningArtifactEntry(options = {}) {
+  const image = options.containerImage ?? 'astranull-agent:local';
+  const digestSha256 = options.containerDigestSha256 ?? null;
+  return {
+    format: 'container',
+    image,
+    digest_sha256: digestSha256,
+    cosign: buildCosignSigningHook(options),
+  };
+}
+
+/**
+ * Build a metadata-only signing manifest covering tarball Ed25519 plus GPG/cosign hooks.
+ * Does not invoke gpg, cosign, or external signing tools.
+ */
+export function buildPackageSigningManifest(version, artifacts = {}, options = {}) {
+  const createdAt = options.createdAt ?? new Date().toISOString();
+  const entries = {};
+  if (artifacts.tarball) entries.tarball = artifacts.tarball;
+  if (artifacts.deb) entries.deb = artifacts.deb;
+  if (artifacts.rpm) entries.rpm = artifacts.rpm;
+  if (artifacts.container) entries.container = artifacts.container;
+
+  return {
+    schema_version: PACKAGE_SIGNING_SCHEMA_VERSION,
+    artifact_type: PACKAGE_SIGNING_ARTIFACT_TYPE,
+    package: PACKAGE_NAME,
+    version,
+    created_at: createdAt,
+    artifacts: entries,
+    caveats: [
+      'Metadata-only signing manifest: records artifact digests and trust-anchor references without private keys or live GPG/cosign signatures.',
+      'Tarball Ed25519 signatures are produced only when a release signing private key is configured at package build time.',
+      'Native deb/rpm and container hooks document expected GPG/cosign trust anchors for installer-side enforcement.',
+    ],
+  };
 }
 
 function octalField(num, len) {
@@ -735,6 +847,8 @@ export function buildAgentPackage(options = {}) {
   const manifestPath = path.join(outputDir, `${base}.manifest.json`);
   const sigPath = path.join(outputDir, `${base}.manifest.json.sig`);
 
+  const signingManifestPath = path.join(outputDir, `${base}.signing.json`);
+
   const result = {
     outputDir,
     formats,
@@ -744,6 +858,8 @@ export function buildAgentPackage(options = {}) {
     sigPath: null,
     manifest: null,
     signatureBase64: null,
+    signingManifestPath: null,
+    signingManifest: null,
     nativeStageDir: null,
     nativeMetadata: null,
     debPath: null,
@@ -862,6 +978,41 @@ export function buildAgentPackage(options = {}) {
     result.rpmPath = rpm.rpmPath;
   }
 
+  const signingArtifacts = {};
+  if (result.manifest) {
+    signingArtifacts.tarball = buildTarballSigningArtifactEntry(result.manifest, {
+      manifestName: path.basename(result.manifestPath),
+      signatureName: result.sigPath ? path.basename(result.sigPath) : null,
+    });
+  }
+  if (result.deb) {
+    signingArtifacts.deb = buildNativeSigningArtifactEntry(
+      'deb',
+      {
+        name: path.basename(result.debPath),
+        sha256: result.deb.sha256,
+        size: result.deb.size,
+      },
+      options,
+    );
+  }
+  if (result.rpmPath && fs.existsSync(result.rpmPath)) {
+    signingArtifacts.rpm = buildNativeSigningArtifactEntry(
+      'rpm',
+      artifactRecordFromFile(path.basename(result.rpmPath), result.rpmPath),
+      options,
+    );
+  }
+  signingArtifacts.container = buildContainerSigningArtifactEntry(options);
+
+  const signingManifest = buildPackageSigningManifest(version, signingArtifacts, {
+    createdAt,
+  });
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.writeFileSync(signingManifestPath, `${JSON.stringify(signingManifest, null, 2)}\n`, 'utf8');
+  result.signingManifestPath = signingManifestPath;
+  result.signingManifest = signingManifest;
+
   return result;
 }
 
@@ -870,6 +1021,10 @@ export function parseCliArgs(argv) {
   let version = readDefaultVersion();
   let formats = ['tarball'];
   let rpmSpecOnly = false;
+  let gpgKeyReference = DEFAULT_GPG_KEY_REFERENCE;
+  let cosignSignerReference = DEFAULT_COSIGN_SIGNER_REFERENCE;
+  let containerImage = 'astranull-agent:local';
+  let containerDigestSha256 = null;
   for (let i = 2; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--output-dir') {
@@ -877,6 +1032,18 @@ export function parseCliArgs(argv) {
       i += 1;
     } else if (arg === '--version') {
       version = argv[i + 1] ?? '';
+      i += 1;
+    } else if (arg === '--gpg-key-reference') {
+      gpgKeyReference = argv[i + 1] ?? '';
+      i += 1;
+    } else if (arg === '--cosign-signer-reference') {
+      cosignSignerReference = argv[i + 1] ?? '';
+      i += 1;
+    } else if (arg === '--container-image') {
+      containerImage = argv[i + 1] ?? '';
+      i += 1;
+    } else if (arg === '--container-digest-sha256') {
+      containerDigestSha256 = argv[i + 1] ?? '';
       i += 1;
     } else if (arg === '--format') {
       const fmt = argv[i + 1] ?? '';
@@ -896,6 +1063,10 @@ Options:
   --version <ver>         Package version (default package.json version)
   --format <fmt>          tarball|deb|rpm|all (comma-separated; default tarball)
   --rpm-spec-only         Generate RPM spec/BUILDROOT only (no rpmbuild)
+  --gpg-key-reference <ref>       GPG trust anchor reference for deb/rpm hooks
+  --cosign-signer-reference <ref> Cosign signer reference for container hook
+  --container-image <ref>         Container image reference for signing manifest hook
+  --container-digest-sha256 <hex> Optional image digest for container hook
 
 Environment:
   ASTRANULL_AGENT_SIGNING_PRIVATE_KEY  Optional base64 DER PKCS#8 Ed25519 private key
@@ -909,13 +1080,40 @@ Creates ${PACKAGE_NAME} Linux packages under the output directory.`);
   if (!outputDir || !version) {
     throw new Error('package-agent: --output-dir and --version require values');
   }
-  return { outputDir, version, formats: normalizePackageFormats(formats), rpmSpecOnly };
+  return {
+    outputDir,
+    version,
+    formats: normalizePackageFormats(formats),
+    rpmSpecOnly,
+    gpgKeyReference,
+    cosignSignerReference,
+    containerImage,
+    containerDigestSha256,
+  };
 }
 
 function main() {
   try {
-    const { outputDir, version, formats, rpmSpecOnly } = parseCliArgs(process.argv);
-    const result = buildAgentPackage({ outputDir, version, formats, rpmSpecOnly });
+    const {
+      outputDir,
+      version,
+      formats,
+      rpmSpecOnly,
+      gpgKeyReference,
+      cosignSignerReference,
+      containerImage,
+      containerDigestSha256,
+    } = parseCliArgs(process.argv);
+    const result = buildAgentPackage({
+      outputDir,
+      version,
+      formats,
+      rpmSpecOnly,
+      gpgKeyReference,
+      cosignSignerReference,
+      containerImage,
+      containerDigestSha256,
+    });
     console.log('package-agent: ok');
     console.log(`  output_dir: ${result.outputDir}`);
     console.log(`  formats: ${result.formats.join(',')}`);
@@ -936,6 +1134,9 @@ function main() {
     }
     if (result.rpmPath) {
       console.log(`  rpm: ${result.rpmPath}`);
+    }
+    if (result.signingManifestPath) {
+      console.log(`  signing_manifest: ${result.signingManifestPath}`);
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

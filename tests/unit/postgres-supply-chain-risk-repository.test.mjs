@@ -15,15 +15,21 @@ const SUPPLY_CHAIN_RISK_REPOSITORY_METHODS = [
   'findRiskByHostnameAndExposure',
   'insertRisk',
   'updateRiskState',
+  'updateRiskPhase',
 ];
 
 const POSTGRES_SUPPLY_CHAIN_RISK_SERVICE_METHODS = [
   'listSupplyChainRisks',
+  'getSupplyChainRisk',
   'createSupplyChainRisk',
   'patchRiskState',
   'createRemediationTicket',
   'assessDanglingCname',
+  'assessVendorDependency',
   'assessDanglingDependency',
+  'ingestSupplyChainSignals',
+  'getPhaseAuthorizations',
+  'submitPhaseAuthorization',
 ];
 
 function createRecordingPool(handler) {

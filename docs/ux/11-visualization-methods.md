@@ -54,7 +54,7 @@ Rows: target groups. Columns: vector families.
 | Score trend | Implemented | `renderScoreTrend` sparkline from test-run history and current score. |
 | Traffic path diagram | Implemented | `renderTrafficPath` on Test Runs (latest run). |
 | Truth table | Implemented | `renderTruthTable` correlates protected/bypassable/penetrated/misplaced outcomes; backend `misplaced_agent` normalizes to the misplaced row via `normalizeVerdictKey`. |
-| Verdict explanation ("Why this verdict?") | Implemented (Test Runs) | `renderVerdictExplanation` — external probe, internal agent, observation mode, placement confidence (`verdict.placement_confidence` when present), conclusion, remediation; reads `external_result` from event or `metadata.external_result`. **Production blockers:** browser/accessibility matrix, findings detail parity, staging mode-matrix signoff. |
+| Verdict explanation ("Why this verdict?") | Implemented (Test Runs) | `renderVerdictExplanation` — external probe, internal agent, observation mode, placement confidence (`verdict.placement_confidence` when present), conclusion, remediation; reads `external_result` from event or `metadata.external_result`. **Production blockers:** browser/accessibility matrix and staging mode-matrix signoff. |
 | Timeline | Implemented | `renderRunTimeline` visual rail plus existing list on Test Runs. |
 | SOC swimlane | Implemented | `renderSocSwimlane` on SOC Console (SOC/Owner role). |
 | Layered defense stack | Not in slice | Target group overview — production UX follow-up. |

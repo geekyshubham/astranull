@@ -46,6 +46,8 @@ function mapEnvironmentRow(row) {
   return mapped;
 }
 
+const ACTIVE_RUN_STATUSES = Object.freeze(['planned', 'running', 'collecting']);
+
 function mapTargetGroupRow(row) {
   if (!row) return null;
   const windows = row.safe_test_windows;
@@ -60,7 +62,35 @@ function mapTargetGroupRow(row) {
     safe_test_windows: Array.isArray(windows) ? windows : [],
     safety_policy: normalizeSafetyPolicy(row.safety_policy),
     created_at: toIso(row.created_at),
+    ...(row.archived_at ? { archived_at: toIso(row.archived_at) } : {}),
   };
+}
+
+async function hasActiveRunForGroup(client, tenantId, targetGroupId) {
+  const { rows } = await client.query(
+    `SELECT 1
+     FROM test_runs
+     WHERE tenant_id = $1
+       AND target_group_id = $2
+       AND status = ANY($3::text[])
+     LIMIT 1`,
+    [tenantId, targetGroupId, ACTIVE_RUN_STATUSES],
+  );
+  return rows.length > 0;
+}
+
+async function hasActiveRunForTarget(client, tenantId, targetGroupId, targetId) {
+  const { rows } = await client.query(
+    `SELECT 1
+     FROM test_runs
+     WHERE tenant_id = $1
+       AND target_group_id = $2
+       AND target_id = $3
+       AND status = ANY($4::text[])
+     LIMIT 1`,
+    [tenantId, targetGroupId, targetId, ACTIVE_RUN_STATUSES],
+  );
+  return rows.length > 0;
 }
 
 function mapTargetRow(row) {
@@ -249,9 +279,9 @@ export function createCoreCatalogRepository(pool) {
       return withTenantContext(pool, ctx.tenantId, async (client) => {
         const { rows } = await client.query(
           `SELECT id, tenant_id, environment_id, name, description, expected_behavior_default,
-                  timezone, safe_test_windows, safety_policy, created_at
+                  timezone, safe_test_windows, safety_policy, archived_at, created_at
            FROM target_groups
-           WHERE tenant_id = $1
+           WHERE tenant_id = $1 AND archived_at IS NULL
            ORDER BY created_at`,
           [ctx.tenantId],
         );
@@ -263,9 +293,9 @@ export function createCoreCatalogRepository(pool) {
       return withTenantContext(pool, ctx.tenantId, async (client) => {
         const { rows } = await client.query(
           `SELECT id, tenant_id, environment_id, name, description, expected_behavior_default,
-                  timezone, safe_test_windows, safety_policy, created_at
+                  timezone, safe_test_windows, safety_policy, archived_at, created_at
            FROM target_groups
-           WHERE id = $1 AND tenant_id = $2`,
+           WHERE id = $1 AND tenant_id = $2 AND archived_at IS NULL`,
           [id, ctx.tenantId],
         );
         const group = mapTargetGroupRow(rows[0] ?? null);
@@ -329,7 +359,7 @@ export function createCoreCatalogRepository(pool) {
         const groupResult = await client.query(
           `SELECT id, expected_behavior_default
            FROM target_groups
-           WHERE id = $1 AND tenant_id = $2`,
+           WHERE id = $1 AND tenant_id = $2 AND archived_at IS NULL`,
           [groupId, ctx.tenantId],
         );
         const group = groupResult.rows[0];
@@ -355,6 +385,179 @@ export function createCoreCatalogRepository(pool) {
           ],
         );
         return mapTargetRow(rows[0]);
+      });
+    },
+
+    async patchTargetGroup(ctx, id, body, options = {}) {
+      return withTenantContext(pool, ctx.tenantId, async (client) => {
+        const existing = await client.query(
+          `SELECT id, tenant_id, environment_id, name, description, expected_behavior_default,
+                  timezone, safe_test_windows, safety_policy, archived_at, created_at
+           FROM target_groups
+           WHERE id = $1 AND tenant_id = $2 AND archived_at IS NULL`,
+          [id, ctx.tenantId],
+        );
+        if (!existing.rows[0]) return null;
+
+        const current = existing.rows[0];
+        const sets = [];
+        const params = [];
+        let n = 1;
+
+        if (body.name !== undefined) {
+          sets.push(`name = $${n++}`);
+          params.push(String(body.name).trim() || current.name);
+        }
+        if (body.description !== undefined) {
+          sets.push(`description = $${n++}`);
+          params.push(String(body.description ?? ''));
+        }
+        if (body.environment_id !== undefined) {
+          sets.push(`environment_id = $${n++}`);
+          params.push(String(body.environment_id).trim());
+        }
+        if (body.expected_behavior_default !== undefined) {
+          sets.push(`expected_behavior_default = $${n++}`);
+          params.push(String(body.expected_behavior_default).trim());
+        }
+        if (body.timezone !== undefined) {
+          sets.push(`timezone = $${n++}`);
+          params.push(String(body.timezone).trim() || 'UTC');
+        }
+        if (Array.isArray(body.safe_test_windows)) {
+          sets.push(`safe_test_windows = $${n++}::jsonb`);
+          params.push(JSON.stringify(body.safe_test_windows));
+        }
+        if (body.safety_policy !== undefined) {
+          sets.push(`safety_policy = $${n++}::jsonb`);
+          params.push(JSON.stringify(normalizeSafetyPolicy(body.safety_policy)));
+        }
+
+        if (sets.length === 0) {
+          return mapTargetGroupRow(current);
+        }
+
+        params.push(id, ctx.tenantId);
+        const idParam = n++;
+        const tenantParam = n++;
+
+        const { rows } = await client.query(
+          `UPDATE target_groups
+           SET ${sets.join(', ')}
+           WHERE id = $${idParam} AND tenant_id = $${tenantParam} AND archived_at IS NULL
+           RETURNING id, tenant_id, environment_id, name, description, expected_behavior_default,
+                     timezone, safe_test_windows, safety_policy, archived_at, created_at`,
+          params,
+        );
+        return mapTargetGroupRow(rows[0] ?? null);
+      });
+    },
+
+    async archiveTargetGroup(ctx, id, options = {}) {
+      const now = options.now ?? new Date().toISOString();
+      return withTenantContext(pool, ctx.tenantId, async (client) => {
+        const existing = await client.query(
+          `SELECT id
+           FROM target_groups
+           WHERE id = $1 AND tenant_id = $2 AND archived_at IS NULL`,
+          [id, ctx.tenantId],
+        );
+        if (!existing.rows[0]) return null;
+        if (await hasActiveRunForGroup(client, ctx.tenantId, id)) {
+          return { error: 'target_group_active_run', status: 409 };
+        }
+
+        await client.query(
+          `UPDATE target_groups
+           SET archived_at = $3::timestamptz
+           WHERE id = $1 AND tenant_id = $2 AND archived_at IS NULL`,
+          [id, ctx.tenantId, now],
+        );
+        return { archived: true, id };
+      });
+    },
+
+    async patchTarget(ctx, groupId, targetId, body, options = {}) {
+      return withTenantContext(pool, ctx.tenantId, async (client) => {
+        const groupResult = await client.query(
+          `SELECT id
+           FROM target_groups
+           WHERE id = $1 AND tenant_id = $2 AND archived_at IS NULL`,
+          [groupId, ctx.tenantId],
+        );
+        if (!groupResult.rows[0]) return null;
+
+        const existing = await client.query(
+          `SELECT id, tenant_id, target_group_id, kind, value, expected_behavior, metadata_json, created_at
+           FROM targets
+           WHERE id = $1 AND tenant_id = $2 AND target_group_id = $3`,
+          [targetId, ctx.tenantId, groupId],
+        );
+        if (!existing.rows[0]) return null;
+
+        const current = existing.rows[0];
+        const sets = [];
+        const params = [];
+        let n = 1;
+
+        if (body.value !== undefined) {
+          sets.push(`value = $${n++}`);
+          params.push(String(body.value).trim());
+        }
+        if (body.kind !== undefined) {
+          sets.push(`kind = $${n++}`);
+          params.push(String(body.kind).trim() || current.kind);
+        }
+        if (body.expected_behavior !== undefined) {
+          sets.push(`expected_behavior = $${n++}`);
+          params.push(String(body.expected_behavior).trim());
+        }
+        if (body.metadata !== undefined && typeof body.metadata === 'object' && !Array.isArray(body.metadata)) {
+          sets.push(`metadata_json = $${n++}::jsonb`);
+          params.push(JSON.stringify(body.metadata));
+        }
+
+        if (sets.length === 0) {
+          return mapTargetRow(current);
+        }
+
+        params.push(targetId, ctx.tenantId, groupId);
+        const idParam = n++;
+        const tenantParam = n++;
+        const groupParam = n++;
+
+        const { rows } = await client.query(
+          `UPDATE targets
+           SET ${sets.join(', ')}
+           WHERE id = $${idParam} AND tenant_id = $${tenantParam} AND target_group_id = $${groupParam}
+           RETURNING id, tenant_id, target_group_id, kind, value, expected_behavior, metadata_json, created_at`,
+          params,
+        );
+        return mapTargetRow(rows[0] ?? null);
+      });
+    },
+
+    async deleteTarget(ctx, groupId, targetId) {
+      return withTenantContext(pool, ctx.tenantId, async (client) => {
+        const groupResult = await client.query(
+          `SELECT id
+           FROM target_groups
+           WHERE id = $1 AND tenant_id = $2 AND archived_at IS NULL`,
+          [groupId, ctx.tenantId],
+        );
+        if (!groupResult.rows[0]) return null;
+        if (await hasActiveRunForTarget(client, ctx.tenantId, groupId, targetId)) {
+          return { error: 'target_active_run', status: 409 };
+        }
+
+        const { rows } = await client.query(
+          `DELETE FROM targets
+           WHERE id = $1 AND tenant_id = $2 AND target_group_id = $3
+           RETURNING id`,
+          [targetId, ctx.tenantId, groupId],
+        );
+        if (!rows[0]) return null;
+        return { deleted: true, id: targetId };
       });
     },
   };

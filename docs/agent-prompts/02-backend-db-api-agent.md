@@ -5,8 +5,12 @@ Read:
 1. `docs/backend/11-waf-posture-architecture.md`
 2. `docs/backend/12-waf-posture-data-model.md`
 3. `docs/backend/13-waf-posture-api-contract.md`
-4. Existing `docs/backend/09-database-schema.md`
-5. Existing `docs/api.md`
+4. `docs/backend/14-waf-risk-coverage-analytics.md`
+5. `docs/backend/15-waf-product-catalog-pipeline.md`
+6. `docs/backend/16-waf-analytics-schema-extensions.md`
+7. `docs/product/12-waf-compliance-audit-evidence.md`
+8. Existing `docs/backend/09-database-schema.md`
+9. Existing `docs/api.md`
 
 Your task:
 

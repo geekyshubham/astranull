@@ -143,9 +143,20 @@ Each product catalog entry should contain:
 | Customer has allowlisted probes | Detect normal app response and warn that allowlisting invalidates validation. |
 | Bot challenge blocks AstraNull | Mark inconclusive unless expected policy says challenge counts as pass. |
 
+## Catalog breadth target
+
+| Phase | Target |
+|---|---|
+| R1 seed | 15 major vendor/product families (table above). |
+| R3 expansion | 50+ catalog entries via additional signatures and connector templates. |
+| Ongoing | Quarterly catalog version with regression tests. |
+
+Unknown vendors must still produce `waf_present` or `cdn_detected` with explicit confidence limits.
+
 ## Done criteria
 
 - Product catalog is versioned and testable.
+- Catalog breadth milestones are tracked in the WAF backlog.
 - Fingerprinting stores only metadata.
 - Detection supports multiple candidates and confidence, not just binary WAF yes/no.
 - UI explains why product was detected.

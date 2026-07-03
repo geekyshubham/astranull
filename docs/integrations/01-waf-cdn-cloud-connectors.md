@@ -105,12 +105,83 @@ Important: implementation agents must verify exact provider API endpoints and pe
 | C4 | Fortinet/F5/Barracuda/Palo Alto generic adapters. |
 | C5 | Wiz/Prisma/Microsoft CSPM enrichment. |
 
+## Provider worker slice (C1)
+
+Read-only provider workers live under `src/lib/connectorProviders/`:
+
+| Module | Provider | Behavior |
+|---|---|---|
+| `index.mjs` | registry | Maps `cloudflare` and `aws_waf` to read-only poll adapters. |
+| `cloudflare.mjs` | Cloudflare | Bearer token from vault `secret_id`; fetches zone and ruleset summaries via HTTPS. No raw policy bodies stored. |
+| `awsWaf.mjs` | AWS WAFv2 | SigV4-signed JSON API calls via `fetch` (no AWS SDK). Normalizes WebACL mode/rule counts only. |
+| `pollWorker.mjs` | orchestration | Bounded retry/backoff, health mapping, fail-closed credential handling. |
+
+### Poll paths
+
+| Path | When | Result |
+|---|---|---|
+| Manual ingest | `POST /v1/connectors/:id/poll` with `snapshots[]` | Always supported; no vault or outbound calls required. |
+| Outbound provider poll | Connector has `secret_id`, `config.read_only=true`, provider is `cloudflare` or `aws_waf`, and request omits `snapshots[]` | Decrypt vault secret, poll provider, persist metadata snapshots, update connector health. |
+| Scheduled outbound poll | `npm run connector:poll:runner` (externally scheduled CLI; not a daemon) | Polls all enabled outbound-eligible connectors for scoped tenant(s) with bounded concurrency, retry/backoff, and metadata-only health updates. |
+| Fail closed | Outbound poll requested but vault key/secret unavailable | `503 connector_poll_failed`; connector health set to `error`. Manual ingest still works on the next request. |
+
+### Scheduled connector poll runner (operator CLI)
+
+`scripts/connector-poll-runner.mjs` / `npm run connector:poll:runner` is the production scheduling surface for outbound read-only connector polls. It is **not** started with the API server — wire it to cron, a Kubernetes CronJob, CI, or an on-call runbook.
+
+| Requirement | Rule |
+|---|---|
+| Feature flag | `ASTRANULL_WAF_POSTURE_ENABLED=1` |
+| Vault key | `ASTRANULL_SECRET_ENCRYPTION_KEY` when connectors use `secret_id` |
+| Eligible connectors | `status` not `disabled`, `config.read_only=true`, provider supports outbound poll (`cloudflare`, `aws_waf`), and `secret_id` present |
+| Concurrency | `--concurrency` or `ASTRANULL_CONNECTOR_POLL_CONCURRENCY` (default `4`, max `32`) |
+| Retry/backoff | `ASTRANULL_CONNECTOR_POLL_MAX_ATTEMPTS` (default `3`) via provider poll worker |
+| Output | Optional `--out` metadata-only JSON summary (`connector_poll_runtime_run`); no secrets, tokens, raw config, or database URLs |
+
+Developer validation (dev-json store):
+
+```bash
+ASTRANULL_WAF_POSTURE_ENABLED=1 \
+ASTRANULL_SECRET_ENCRYPTION_KEY='<base64-32-byte-key>' \
+npm run connector:poll:runner -- --tenant-id ten_demo
+```
+
+Dry run (eligible connector scope only; no outbound calls):
+
+```bash
+ASTRANULL_WAF_POSTURE_ENABLED=1 \
+npm run connector:poll:runner -- --all-tenants --dry-run --out ./connector-poll-scope.json
+```
+
+Postgres mode is selected automatically when `ASTRANULL_DATABASE_URL` is set and requires `runtime.services.wafPosture.pollConnector()`. `--tenant-id` and `--tenant-ids-file` are mutually exclusive; omit both (or pass `--all-tenants`) to poll every tenant with eligible outbound connectors.
+
+### Required secret vault shapes (plaintext, encrypted at rest)
+
+| Provider | `purpose` | Plaintext shape |
+|---|---|---|
+| Cloudflare | `connector` | API token string or `{"api_token":"..."}` |
+| AWS WAF | `connector` | `{"access_key_id":"...","secret_access_key":"...","region":"us-east-1"}` |
+
+Never store plaintext tokens in connector `config`; use `secret_id` only.
+
+### Connector health from provider polls
+
+| Status | Meaning |
+|---|---|
+| `active` | Outbound poll succeeded with normalized snapshots. |
+| `degraded` | Partial metadata, for example ruleset permission gaps. |
+| `error` | Poll failed after bounded retries or credentials missing. |
+| `rate_limited` | Provider returned 429; retry on next scheduled poll. |
+| `revoked` | Provider rejected credentials (401/403). |
+| `permission_insufficient` | Credentials valid but missing required read scope. |
+
 ## Done criteria
 
 - Each connector declares required scopes, data pulled, retention, and redaction behavior.
 - Connector poll creates normalized snapshots and health status.
 - Connector failures create setup findings, not posture false positives.
 - No connector is mandatory for safe WAF validation.
+- Cloudflare and AWS WAF read-only provider workers normalize metadata summaries and config hashes without storing raw policy bodies.
 
 
 ## Other publicly referenced enterprise/cloud integrations

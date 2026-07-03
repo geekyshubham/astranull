@@ -1,0 +1,15 @@
+{
+  "issuer_suffix": "/staging-oidc",
+  "audience": "astranull-hosted-staging",
+  "kid": "hosted-staging-rsa-1",
+  "public_jwk": {
+    "kty": "RSA",
+    "n": "1UENnx9uBPoE90O3iuKHxCZiGf6a85UY_DkodYzHzADQmid12KCtiIRa1Iy_K4z3ybWvP6k7L21FllHqUh2JIFUWQLDaMEptnYwv-w1pmi4DXnl9CXDm0P8M-_hf3D-cBsip_4y3GCwGlQzkjKEK5uQuKzq1WBTk0pAxg12kpffv9LousfVMBBqSF5joThmCht05CPRaZEnG8rLfwNk9-haoy6ROtlDWhYnpcDpNkAvMV6CuuknTwMAXpQBwsgpLppas7LhK9aNSnOnEf1S-vLgaOVHdf2kFHjJleY-LaZ0UffEjI1Ebhu_mUDr8MYFwEduGny1HPeQVa4lHs6-ITQ",
+    "e": "AQAB",
+    "kid": "hosted-staging-rsa-1",
+    "alg": "RS256",
+    "use": "sig"
+  },
+  "private_key_pem": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDVQQ2fH24E+gT3\nQ7eK4ofEJmIZ/przlRj8OSh1jMfMANCaJ3XYoK2IhFrUjL8rjPfJta8/qTsvbUWW\nUepSHYkgVRZAsNowSm2djC/7DWmaLgNeeX0JcObQ/wz7+F/cP5wGyKn/jLcYLAaV\nDOSMoQrm5C4rOrVYFOTSkDGDXaSl9+/0ui6x9UwEGpIXmOhOGYKG3TkI9FpkScby\nst/A2T36FqjLpE62UNaFielwOk2QC8xXoK66SdPAwBelAHCyCkumlqzsuEr1o1Kc\n6cR/VL68uBo5Ud1/aQUeMmV5j4tpnRR98SMjURuG7+ZQOvwxgXAR24afLUc95BVr\niUezr4hNAgMBAAECggEAA2F/pMkrxlpsX7ssGsCSpHJzVbQqorf3aHBDivGLbVmJ\n9RexD5kkhyiKBBqjIT6f4wvFVn4JWSwjUUnFLD4ZoXCX5LipDODxMfE6BYHl7bLT\nDNliORcYIbIZc5kxc91yTM07nLiPYou4Iv7MVMps0NJHRRouK9JQ+mGc11dRt+vZ\n7ybbzYSHn+VWJm5nw6DLT7LCcPMDX1cRXQyvmYPGaJjEVoUmJUl5D6cs/hkRwGjR\nEMNeaYsAxYOhhXtp16moqdadbqCxr+erspONCbG7wYIdwk5v0V48TM+HDjzVq35V\nmTgvIwbQS6Thjpyrz9gaZ2QMq0AtAMGtNovO4v2MRQKBgQD30aNa0EGfphKgb3cD\nVxljDh69DirQ6/5HPjvKwfGUIKxKIqx5Vganl/XYMDYMbtTkuwNkK31JD9JCYLow\nrOdgP4RO5/Ba2EOLx4kr+uIQc/OY8FVrqfgBbcQ7AwSuzQV7gIwnpyxLbiJFQ2Ma\nji3y+EhvkYzdqEJfET7KWydO9wKBgQDcS01KjJ12jJvEYMnifiGloh7J6S56Wl+H\nj36PZwkxBrVJ5HmEc9lAJPU7j9T8BbmfB6/5RUWwQvCI25MLRg9f0q0ItSpqq3QU\nI6sZz+ZfoESP9uPGZNPmHGRX21fhtH20M+Z/AXQSQ2KlXRxGCdh6g6hD0of1Du9V\nOEiog4sd2wKBgQC+2Fz6xMKk1domX3DBy8OrOuaFJXHnrrYF23FkdfM65eaIuScl\n0hAR5L7ZHFejP38IHtU/wRYcu+hqYd9BOQZ+YqvbsFazPzTVYnbKvcx2azU/pGXE\nIgLx5rxlza8/hnggYiCNMPq1pD0UJg8eFjxgjsAJ24cl9DwYxkkawRQGhQKBgFyF\nj+fAmR3CPmXDFOd4fB85sN6yfd/LdxXTUZ9e8gBSRe/L8rGLinIjU4/5f8V9jhFZ\nxDHYQ0WdR7LjLaXtfeWL8TqYBEGa0vzmYiVMKQB+qm0gj1ey30BlKkuwBv/3s1fs\n+GDdNme5P4QeUBKmbfI+u3wIvytQY3qSUgncfaBDAoGAU6qhaebNW+90neeztcLY\nDMgWgfWrdEPqG2UexzeYuvCB/fKDFuIr7NqwzKLY4OaJInQFIw5uUKAdS2VkDued\nRAiWKob44kK2GcarAZ/ZS1tFs8ooTTDrKnPZv7ob1uRcuEkq6di4JhYrxNNf8Qbp\nTgwxMivbdZJGhQvjoYqRkWo=\n-----END PRIVATE KEY-----\n",
+  "note": "STAGING-ONLY fixture IdP — not for customer secrets or production tenant data"
+}

@@ -3,6 +3,7 @@ export const ENTITY_TYPES = Object.freeze([
   'subsidiary',
   'acquisition',
   'brand',
+  'region',
   'region_business_unit',
   'vendor_managed_property',
 ]);
@@ -392,4 +393,80 @@ export function assertCandidateTestable(candidate) {
     );
     throw err;
   }
+}
+
+export const CONFIDENCE_HISTOGRAM_BUCKETS = Object.freeze([
+  '0.0-0.2',
+  '0.2-0.4',
+  '0.4-0.6',
+  '0.6-0.8',
+  '0.8-1.0',
+]);
+
+export function confidenceHistogramBucket(confidence) {
+  const n = Number(confidence);
+  if (!Number.isFinite(n) || n < 0) {
+    return CONFIDENCE_HISTOGRAM_BUCKETS[0];
+  }
+  if (n >= 1) {
+    return CONFIDENCE_HISTOGRAM_BUCKETS[CONFIDENCE_HISTOGRAM_BUCKETS.length - 1];
+  }
+  const idx = Math.min(
+    CONFIDENCE_HISTOGRAM_BUCKETS.length - 1,
+    Math.floor(n * CONFIDENCE_HISTOGRAM_BUCKETS.length),
+  );
+  return CONFIDENCE_HISTOGRAM_BUCKETS[idx];
+}
+
+function emptySourceTypeCounts() {
+  return Object.fromEntries(SOURCE_TYPES.map((sourceType) => [sourceType, 0]));
+}
+
+function emptyConfidenceHistogram() {
+  return Object.fromEntries(CONFIDENCE_HISTOGRAM_BUCKETS.map((bucket) => [bucket, 0]));
+}
+
+function emptyApprovalStateCounts() {
+  return Object.fromEntries(APPROVAL_STATUSES.map((status) => [status, 0]));
+}
+
+/**
+ * Build metadata-only discovery report aggregates. Never includes hostnames,
+ * source_ref, evidence_summary, or raw CT/DNS payloads.
+ */
+export function buildDiscoveryReportSummary(candidates, options = {}) {
+  const generated_at =
+    typeof options.generated_at === 'string' && options.generated_at.trim()
+      ? options.generated_at.trim()
+      : new Date().toISOString();
+  const candidate_sources = emptySourceTypeCounts();
+  const confidence_histogram = emptyConfidenceHistogram();
+  const approval_states = emptyApprovalStateCounts();
+  let total_candidates = 0;
+
+  for (const candidate of candidates ?? []) {
+    if (!candidate || typeof candidate !== 'object') continue;
+    total_candidates += 1;
+
+    const sourceType = String(candidate.source_type ?? '').trim();
+    if (sourceType && Object.prototype.hasOwnProperty.call(candidate_sources, sourceType)) {
+      candidate_sources[sourceType] += 1;
+    }
+
+    const bucket = confidenceHistogramBucket(candidate.confidence);
+    confidence_histogram[bucket] += 1;
+
+    const approvalStatus = String(candidate.approval_status ?? 'not_requested').trim();
+    if (Object.prototype.hasOwnProperty.call(approval_states, approvalStatus)) {
+      approval_states[approvalStatus] += 1;
+    }
+  }
+
+  return {
+    generated_at,
+    total_candidates,
+    candidate_sources,
+    confidence_histogram,
+    approval_states,
+  };
 }

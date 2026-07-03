@@ -1,0 +1,59 @@
+# Local staging simulator: Postgres + migrated schema + control-plane API/UI.
+# Usage: npm run staging:local:up
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: astranull-postgres-local
+    environment:
+      POSTGRES_USER: astranull
+      POSTGRES_PASSWORD: astranull_local_dev
+      POSTGRES_DB: astranull
+    ports:
+      - "${ASTRANULL_LOCAL_PG_PORT:-54329}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U astranull -d astranull"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+      start_period: 5s
+    volumes:
+      - astranull_pg_local:/var/lib/postgresql/data
+      - ./db/docker:/docker-entrypoint-initdb.d:ro
+
+  migrate:
+    build:
+      context: .
+      dockerfile: ops/docker/Dockerfile.tooling
+    container_name: astranull-migrate-local
+    command: ["node", "scripts/local-staging-migrate.mjs"]
+    environment:
+      ASTRANULL_ADMIN_DATABASE_URL: postgresql://astranull:astranull_local_dev@postgres:5432/astranull
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  control-plane:
+    build:
+      context: .
+      dockerfile: ops/docker/Dockerfile.control-plane
+    container_name: astranull-control-plane-local
+    env_file:
+      - ops/docker/local-staging.env
+    environment:
+      ASTRANULL_DATABASE_URL: postgresql://astranull_app:astranull_app_local_dev@postgres:5432/astranull
+      ASTRANULL_PG_HOST: postgres
+    ports:
+      - "${ASTRANULL_LOCAL_STAGING_PORT:-3000}:3000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+volumes:
+  astranull_pg_local:

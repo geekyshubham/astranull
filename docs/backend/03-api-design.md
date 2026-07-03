@@ -8,8 +8,19 @@
 - High-scale execution APIs are internal/SOC-only.
 - External customer APIs cannot start SOC-gated scenarios.
 - Every list endpoint supports pagination and filtering.
+- Public sign-up APIs accept only minimal account-request metadata and never provision privileged access directly.
+- Internal management APIs are staff-only and must not accept customer tenant roles as authorization.
 
 ## Core endpoints
+
+### Public entry and sign-up
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/` | Public landing page. |
+| GET | `/login` | Redirect to configured identity provider. |
+| GET | `/signup` | Public sign-up intake page. |
+| POST | `/v1/signup-requests` | Submit account request metadata for staff review or provisioning. |
 
 ### Target groups
 
@@ -71,6 +82,25 @@
 | POST | `/internal/soc/high-scale/{id}/start` | SOC-only start after gates. |
 | POST | `/internal/soc/high-scale/{id}/stop` | SOC-only kill switch. |
 | POST | `/internal/soc/high-scale/{id}/close` | SOC-only closure. |
+
+### Internal management
+
+All routes in this group require a staff principal from the staff identity provider. Customer principals, including customer `owner` and `admin`, must receive `403` even when they know the route.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/internal/admin/signup-requests` | Staff queue for account requests. |
+| POST | `/internal/admin/signup-requests/{id}/approve` | Approve request and optionally provision tenant. |
+| POST | `/internal/admin/signup-requests/{id}/reject` | Reject request with staff reason and customer-safe reason. |
+| GET | `/internal/admin/tenants` | Search customer tenants. |
+| GET | `/internal/admin/tenants/{tenantId}` | Tenant operations detail. |
+| PATCH | `/internal/admin/tenants/{tenantId}` | Update lifecycle, metadata, support owner, or status. |
+| GET | `/internal/admin/tenants/{tenantId}/subscription` | Read subscription and entitlement state. |
+| PATCH | `/internal/admin/tenants/{tenantId}/subscription` | Update plan, billing status metadata, and effective dates. |
+| POST | `/internal/admin/tenants/{tenantId}/entitlements` | Grant, update, or revoke feature entitlements. |
+| GET | `/internal/admin/approval-requests` | Unified staff approval queue. |
+| POST | `/internal/admin/approval-requests/{id}/decision` | Approve/reject with reason and evidence refs. |
+| GET | `/internal/admin/audit-log` | Search staff/internal audit events. |
 
 ## API key generation flow
 

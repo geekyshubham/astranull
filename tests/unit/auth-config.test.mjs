@@ -42,6 +42,8 @@ describe('runtime auth config', () => {
     assert.deepEqual(cfg.featureFlags, {
       wafPostureEnabled: false,
       externalDiscoveryEnabled: false,
+      connectorsEnabledDefault: false,
+      connectorsEnabledTenants: {},
     });
   });
 
@@ -225,6 +227,9 @@ describe('runtime auth config', () => {
       mfaValues: ['mfa', 'otp', 'webauthn', 'fido', 'fido2', 'phishing_resistant'],
       jwksCacheTtlMs: 300_000,
       jwksFetchTimeoutMs: 5000,
+      rolePrefix: null,
+      roleMap: {},
+      requireExplicitRoleMap: false,
     });
 
     process.env.ASTRANULL_OIDC_JWKS_CACHE_TTL_MS = '120000';
@@ -258,6 +263,7 @@ describe('runtime auth config', () => {
     process.env.ASTRANULL_PROBE_WORKER_SECRET = TEST_PROBE_SECRET;
 
     const cfg = loadRuntimeConfig();
+    assert.equal(cfg.oidc.requireExplicitRoleMap, true);
     assert.equal(cfg.oidc.requireMfa, true);
     assert.equal(cfg.oidc.mfaClaim, 'amr');
     assert.deepEqual(cfg.oidc.mfaValues, [
@@ -276,6 +282,24 @@ describe('runtime auth config', () => {
     assert.equal(override.oidc.requireMfa, false);
     assert.equal(override.oidc.mfaClaim, 'acr');
     assert.deepEqual(override.oidc.mfaValues, ['urn:mfa', 'phishing_resistant']);
+  });
+
+  it('parses optional OIDC role prefix and role map env values', () => {
+    process.env.NODE_ENV = 'test';
+    baseOidcEnv();
+    process.env.ASTRANULL_OIDC_JWKS_URL = 'https://idp.example/jwks';
+    process.env.ASTRANULL_OIDC_ROLE_PREFIX = 'astranull-';
+    process.env.ASTRANULL_OIDC_ROLE_MAP = 'Corp-Admin:admin, corp-viewer : viewer ';
+
+    const cfg = loadRuntimeConfig();
+    assert.equal(cfg.oidc.rolePrefix, 'astranull-');
+    assert.deepEqual(cfg.oidc.roleMap, {
+      'corp-admin': 'admin',
+      'corp-viewer': 'viewer',
+    });
+
+    process.env.ASTRANULL_OIDC_ROLE_MAP = 'bad-entry';
+    assert.throws(() => loadRuntimeConfig(), /ASTRANULL_OIDC_ROLE_MAP/);
   });
 
   it('rejects malformed OIDC MFA policy env values', () => {

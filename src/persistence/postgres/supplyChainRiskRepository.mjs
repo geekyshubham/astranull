@@ -28,6 +28,9 @@ function buildAssessmentMetadata(risk = {}) {
     ...existing,
     ...(risk.risk_id ? { risk_id: risk.risk_id } : {}),
     ...(risk.phase ? { phase: risk.phase } : {}),
+    ...(Array.isArray(risk.phase_authorizations)
+      ? { phase_authorizations: risk.phase_authorizations }
+      : {}),
   };
 }
 
@@ -45,6 +48,9 @@ export function mapSupplyChainRiskRow(row) {
     severity: row.severity ?? 'medium',
     state: row.state ?? 'suspected',
     phase: assessment.phase ?? 'AP0_detect_only',
+    phase_authorizations: Array.isArray(assessment.phase_authorizations)
+      ? assessment.phase_authorizations
+      : [],
     owner_hint: row.owner_hint ?? '',
     remediation_steps: row.remediation_steps ?? [],
     assessment_metadata_json: assessment,
@@ -154,6 +160,45 @@ export function createSupplyChainRiskRepository(pool) {
             extras.owner_hint ?? null,
             extras.remediation_steps ?? null,
             extras.updated_at ?? new Date().toISOString(),
+          ],
+        );
+        return mapSupplyChainRiskRow(rows[0] ?? null);
+      });
+    },
+
+    async updateRiskPhase(ctx, id, update = {}) {
+      const tenantId = ctx.tenantId;
+      return withTenantContext(pool, tenantId, async (client) => {
+        const existing = await client.query(
+          `SELECT ${SUPPLY_CHAIN_RISK_COLUMNS}
+           FROM supply_chain_risks
+           WHERE tenant_id = $1 AND id = $2`,
+          [tenantId, id],
+        );
+        const current = mapSupplyChainRiskRow(existing.rows[0] ?? null);
+        if (!current) return null;
+
+        const assessmentMetadata = buildAssessmentMetadata({
+          ...current,
+          phase: update.phase ?? current.phase,
+          phase_authorizations: update.phase_authorizations ?? current.phase_authorizations,
+        });
+
+        const { rows } = await client.query(
+          `UPDATE supply_chain_risks
+           SET state = COALESCE($3, state),
+               owner_hint = COALESCE($4, owner_hint),
+               assessment_metadata_json = $5::jsonb,
+               updated_at = $6::timestamptz
+           WHERE tenant_id = $1 AND id = $2
+           RETURNING ${SUPPLY_CHAIN_RISK_COLUMNS}`,
+          [
+            tenantId,
+            id,
+            update.state ?? null,
+            update.owner_hint ?? null,
+            JSON.stringify(assessmentMetadata),
+            update.updated_at ?? new Date().toISOString(),
           ],
         );
         return mapSupplyChainRiskRow(rows[0] ?? null);

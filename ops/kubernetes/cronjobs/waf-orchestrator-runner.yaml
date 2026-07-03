@@ -1,0 +1,65 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: astranull-waf-orchestrator-runner
+  labels:
+    app.kubernetes.io/name: astranull
+    app.kubernetes.io/component: waf-orchestrator-runner
+spec:
+  schedule: "*/15 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: astranull
+            app.kubernetes.io/component: waf-orchestrator-runner
+        spec:
+          restartPolicy: Never
+          serviceAccountName: astranull-worker
+          containers:
+            - name: runner
+              image: ghcr.io/astranull/astranull-worker:latest
+              imagePullPolicy: IfNotPresent
+              command: ["node", "scripts/waf-orchestrator-runner.mjs"]
+              args:
+                - "--tenant-ids-file"
+                - "/config/tenant-ids.json"
+                - "--out"
+                - "/tmp/waf-orchestrator-summary.json"
+              envFrom:
+                - secretRef:
+                    name: astranull-worker-env
+              env:
+                - name: ASTRANULL_PROBE_MODE
+                  value: signed-worker
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  cpu: 500m
+                  memory: 512Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+                runAsUser: 10001
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+                - name: tenant-scope
+                  mountPath: /config
+                  readOnly: true
+          volumes:
+            - name: tmp
+              emptyDir: {}
+            - name: tenant-scope
+              configMap:
+                name: astranull-worker-tenant-ids

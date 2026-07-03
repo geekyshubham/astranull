@@ -1,20 +1,66 @@
 import {
   assertNoRawWafEvidence,
   classifyWafPosture,
+  deriveControlBypassStatus,
+  formatControlBypassUxLabel,
+  mapReasonCodesToControlBypassClasses,
+  normalizeScenarioIntakeInput,
   normalizeWafAssetInput,
   normalizeWafEvidenceSummary,
   normalizeWafValidationRequest,
   WAF_EXPECTED_ACTIONS,
   WAF_SCENARIO_FAMILIES,
+  WAF_SCENARIO_INTAKE_STAGES,
 } from '../../contracts/wafPosture.mjs';
+import {
+  listWafProductCatalogEntries,
+  summarizeWafProductCatalog,
+} from '../../lib/wafProductCatalog.mjs';
+import {
+  buildProviderPollFailure,
+  executeConnectorProviderPoll,
+  shouldAttemptOutboundConnectorPoll,
+} from '../../lib/connectorProviders/pollWorker.mjs';
+import { supportsOutboundProviderPoll } from '../../lib/connectorProviders/index.mjs';
+import {
+  booleanFieldExplicit,
+  deriveWafSignalsFromBoundEvents,
+} from '../../lib/wafBoundRunCorrelation.mjs';
+import {
+  buildCorroborationFromValidationEvidence,
+  buildWafEvidenceCorroboration,
+  protectedFinalizeEvidenceRequired,
+  stripClientAssertedAgentEvidence,
+} from '../../lib/wafProtectedEvidence.mjs';
 import { newId } from '../../lib/ids.mjs';
 import { redactObject } from '../../lib/redact.mjs';
+import { buildSecretAad, decryptSecret, loadSecretEncryptionKey } from '../../lib/secrets.mjs';
+import {
+  buildWafReportPayload,
+  prepareWafReportExport,
+  WAF_REPORT_DRIFT_LIMIT,
+  WAF_REPORT_KINDS,
+  WAF_REPORT_VALIDATION_LIMIT,
+} from '../../lib/wafReports.mjs';
 import {
   formatConnectorForApi,
   formatConnectorSnapshotForApi,
   formatDriftEventForApi,
   formatPostureSnapshotForApi,
 } from './wafPostureRepository.mjs';
+import {
+  buildCoverageSummary,
+  buildCriticalityRollup,
+  buildEntityRollup,
+  buildGeographyRollup,
+  buildRiskRoadmap,
+  buildVendorBreakdown,
+  buildVendorConsolidation,
+} from '../../services/wafCoverageService.mjs';
+import {
+  computeAssetRiskAssessment,
+  enrichSnapshotWithRisk,
+} from '../../services/wafRiskService.mjs';
 
 export const WAF_POSTURE_REPOSITORY_METHODS = Object.freeze([
   'listWafAssets',
@@ -23,6 +69,11 @@ export const WAF_POSTURE_REPOSITORY_METHODS = Object.freeze([
   'updateWafAsset',
   'listCurrentPostureSnapshots',
   'getCurrentPostureSnapshot',
+  'listPostureSnapshotsSince',
+  'listLatestValidationSummariesByAsset',
+  'listTenantCveAssetMatches',
+  'listWafFindingIdsByAsset',
+  'listWafActionItemIdsByAsset',
   'listWafValidationRuns',
   'createWafValidationRun',
   'getWafValidationRun',
@@ -46,6 +97,15 @@ export const POSTGRES_WAF_POSTURE_SERVICE_METHODS = Object.freeze([
   'getWafAsset',
   'patchWafAsset',
   'getWafCoverage',
+  'getWafCoverageVendors',
+  'getWafCoverageEntities',
+  'getWafCoverageGeography',
+  'getWafCoverageCriticality',
+  'getWafRiskRoadmap',
+  'getWafVendorConsolidation',
+  'listWafProducts',
+  'listScenarioIntakes',
+  'submitScenarioIntake',
   'createWafValidation',
   'listWafValidations',
   'getWafValidation',
@@ -58,7 +118,37 @@ export const POSTGRES_WAF_POSTURE_SERVICE_METHODS = Object.freeze([
   'pollConnector',
   'listConnectorSnapshots',
   'disableConnector',
+  'exportWafReport',
 ]);
+
+function formatPostgresScenarioIntake(record) {
+  return {
+    id: record.id,
+    pattern_title: record.pattern_title,
+    advisory_refs: record.advisory_refs ?? [],
+    proposed_scenario_family: record.proposed_scenario_family ?? null,
+    risk_class: record.risk_class,
+    intake_stage: record.intake_stage,
+    notes: record.notes ?? null,
+    threat_summary: record.threat_summary ?? null,
+    created_at: record.created_at,
+    updated_at: record.updated_at,
+  };
+}
+
+function buildPostgresAssetEffectiveness(reasonCodes = []) {
+  const codes = Array.isArray(reasonCodes) ? reasonCodes : [];
+  const control_bypass_status = deriveControlBypassStatus({ reason_codes: codes });
+  return {
+    scenario_pass_rate: null,
+    control_bypass_status,
+    control_bypass_label: formatControlBypassUxLabel(control_bypass_status),
+    control_bypass_classes: mapReasonCodesToControlBypassClasses(codes).map((bypassClass) => ({
+      id: bypassClass.id,
+      label: bypassClass.label,
+    })),
+  };
+}
 
 const WAF_DRIFT_EVENT_STATUSES = new Set([
   'open',
@@ -114,6 +204,42 @@ const WAF_CONNECTOR_SLICE_CAPABILITIES = Object.freeze([
   'metadata_snapshot_ingest',
   'read_only_config',
 ]);
+
+
+
+const WAF_POSTURE_VALIDATION_EVIDENCE_METHODS = Object.freeze([
+  'getTestRun',
+  'listRunEvents',
+]);
+
+const WAF_BOUND_RUN_EVENTS_LIMIT = 1000;
+
+function connectorProviderCapabilities(provider, connector = null) {
+  return {
+    provider,
+    read_only_metadata: true,
+    outbound_polling: supportsOutboundProviderPoll(provider) && Boolean(connector?.secret_id),
+    snapshot_kinds: provider === 'webhook'
+      ? ['waf_policy']
+      : ['waf_policy', 'cdn_property', 'dns_zone'],
+  };
+}
+
+function connectorPollHealthUpdates(health, now) {
+  if (health?.status === 'active' || health?.status === 'degraded') {
+    return {
+      status: health.status,
+      last_success_at: now,
+      last_error_at: null,
+      updated_at: now,
+    };
+  }
+  return {
+    status: health?.status ?? 'error',
+    last_error_at: now,
+    updated_at: now,
+  };
+}
 
 function normalizeConnectorFieldKey(key) {
   return String(key)
@@ -279,6 +405,54 @@ function assertWafPostureRepositories(repositories) {
   if (!audit || typeof audit.appendAuditEvent !== 'function') {
     throw new Error('Postgres WAF posture service adapter requires audit.appendAuditEvent().');
   }
+  if (typeof audit.getLastAuditEntry !== 'function') {
+    throw new Error('Postgres WAF posture service adapter requires audit.getLastAuditEntry().');
+  }
+
+  const validationEvidence = repositories?.validationEvidence;
+  if (!validationEvidence || typeof validationEvidence !== 'object') {
+    throw new Error('Postgres WAF posture service adapter requires repositories.validationEvidence.');
+  }
+  for (const method of WAF_POSTURE_VALIDATION_EVIDENCE_METHODS) {
+    if (typeof validationEvidence[method] !== 'function') {
+      throw new Error(
+        `Postgres WAF posture service adapter requires validationEvidence.${method}().`,
+      );
+    }
+  }
+}
+
+async function deriveWafSignalsFromBoundRun(validationEvidence, ctx, testRunId) {
+  const [probes, agents] = await Promise.all([
+    validationEvidence.listRunEvents(ctx, testRunId, {
+      signalType: 'probe_result',
+      limit: WAF_BOUND_RUN_EVENTS_LIMIT,
+    }),
+    validationEvidence.listRunEvents(ctx, testRunId, {
+      signalType: 'agent_observation',
+      limit: WAF_BOUND_RUN_EVENTS_LIMIT,
+    }),
+  ]);
+  return deriveWafSignalsFromBoundEvents({ probes, agents });
+}
+
+async function validateWafTestRunBinding(validationEvidence, ctx, testRunId, asset) {
+  const testRun = await validationEvidence.getTestRun(ctx, testRunId);
+  if (!testRun) {
+    return {
+      error: 'test_run_not_found',
+      status: 404,
+      message: 'test_run_id not found for tenant.',
+    };
+  }
+  if (testRun.target_group_id !== asset.target_group_id) {
+    return {
+      error: 'invalid_request',
+      status: 400,
+      message: 'test_run_id target group does not match WAF asset target group.',
+    };
+  }
+  return { testRun };
 }
 
 function contractError(err, fallbackStatus = 400) {
@@ -296,29 +470,6 @@ function parseBooleanField(body, snake, camel, fallback = false) {
   if (value === '1' || value === 1 || value === 'true') return true;
   if (value === '0' || value === 0 || value === 'false') return false;
   return fallback;
-}
-
-function scenarioSupportsProtectedClaim(normalizedScenarios) {
-  return normalizedScenarios.some(
-    (scenario) =>
-      scenario.passed === true
-      && scenario.evidence_summary_json
-      && Object.keys(scenario.evidence_summary_json).length > 0,
-  );
-}
-
-function manualProtectedEvidenceRequired({
-  validationPassed,
-  usedBoundRunDerivation,
-  normalizedScenarios,
-}) {
-  if (!validationPassed) return null;
-  if (usedBoundRunDerivation) return null;
-  if (scenarioSupportsProtectedClaim(normalizedScenarios)) return null;
-  return {
-    error: 'waf_validation_evidence_required',
-    status: 400,
-  };
 }
 
 function normalizeScenarioResultInput(entry) {
@@ -554,13 +705,94 @@ function enrichAssetWithPostureStatus(asset, snapshotByAssetId) {
   return { ...asset, status: snap.status };
 }
 
+function resolveWindowDays(options = {}) {
+  const raw = options.window_days ?? options.windowDays ?? 90;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 90;
+  return Math.min(Math.max(Math.trunc(parsed), 1), 365);
+}
+
+async function gatherPostgresWafAnalyticsContext(ctx, wafRepo, coreCatalog, options = {}) {
+  const windowDays = resolveWindowDays(options);
+  const since = new Date();
+  since.setUTCDate(since.getUTCDate() - windowDays);
+  const [
+    assets,
+    snapshots,
+    historicalSnapshots,
+    targetGroups,
+    environments,
+    validationSummaryByAsset,
+    cveMatchesByAsset,
+    findingsByAsset,
+    actionItemsByAsset,
+    connectors,
+    driftEvents,
+  ] = await Promise.all([
+    wafRepo.listWafAssets(ctx),
+    wafRepo.listCurrentPostureSnapshots(ctx),
+    wafRepo.listPostureSnapshotsSince(ctx, since.toISOString()),
+    coreCatalog.listTargetGroups(ctx),
+    coreCatalog.listEnvironments(ctx),
+    wafRepo.listLatestValidationSummariesByAsset(ctx),
+    wafRepo.listTenantCveAssetMatches(ctx),
+    wafRepo.listWafFindingIdsByAsset(ctx),
+    wafRepo.listWafActionItemIdsByAsset(ctx),
+    wafRepo.listConnectors(ctx),
+    wafRepo.listWafDriftEvents(ctx),
+  ]);
+  const currentSnapshotsByAsset = new Map(snapshots.map((snapshot) => [snapshot.waf_asset_id, snapshot]));
+  return {
+    assets,
+    currentSnapshotsByAsset,
+    historicalSnapshots,
+    targetGroups,
+    environments,
+    entities: [],
+    validationSummaryByAsset,
+    cveMatchesByAsset,
+    findingsByAsset,
+    actionItemsByAsset,
+    connectors,
+    driftEvents,
+    windowDays,
+  };
+}
+
+function buildPostgresRiskAssessment(asset, snapshot, summary, targetGroups, cveMatchesByAsset, computedAt) {
+  const targetGroup = targetGroups.find((group) => group.id === asset.target_group_id) ?? null;
+  return computeAssetRiskAssessment({
+    asset,
+    snapshot,
+    validationSummary: summary,
+    cveMatches: cveMatchesByAsset.get(asset.id) ?? [],
+    targetGroup,
+    computedAt,
+  });
+}
+
 export function createPostgresWafPostureServices(repositories, options = {}) {
   assertWafPostureRepositories(repositories);
   const wafRepo = repositories.wafPosture;
   const coreCatalog = repositories.coreCatalog;
   const auditRepo = repositories.audit;
+  const validationEvidence = repositories.validationEvidence;
+  const secretVaultRepo = repositories.secretVault;
   const nowFn = options.now ?? (() => new Date());
   const newIdFn = options.newId ?? newId;
+  const encryptionKey = options.encryptionKey
+    ?? loadSecretEncryptionKey(options.env ?? process.env);
+
+  async function postgresConnectorSecretResolver(ctx, secretId) {
+    if (!secretVaultRepo || typeof secretVaultRepo.getEncryptedSecretById !== 'function') {
+      return { error: 'encryption_not_configured' };
+    }
+    if (!encryptionKey) return { error: 'encryption_not_configured' };
+    const record = await secretVaultRepo.getEncryptedSecretById(ctx, secretId);
+    if (!record) return { error: 'secret_not_found' };
+    const plaintext = decryptSecret(record.envelope, encryptionKey, buildSecretAad(record));
+    return { plaintext };
+  }
 
   return {
     async listWafAssets(ctx) {
@@ -623,9 +855,11 @@ export function createPostgresWafPostureServices(repositories, options = {}) {
       const asset = await wafRepo.getWafAsset(ctx, id);
       if (!asset) return null;
       const current = await wafRepo.getCurrentPostureSnapshot(ctx, id);
+      const reasonCodes = current?.reason_codes ?? [];
       return {
         asset: enrichAssetWithPostureStatus(asset, current ? new Map([[id, current]]) : new Map()),
         ...(current ? { current_posture: formatPostureSnapshotForApi(current) } : {}),
+        effectiveness: buildPostgresAssetEffectiveness(reasonCodes),
       };
     },
 
@@ -715,36 +949,95 @@ export function createPostgresWafPostureServices(repositories, options = {}) {
       }
     },
 
-    async getWafCoverage(ctx) {
-      const assets = await wafRepo.listWafAssets(ctx);
-      const snapshots = await wafRepo.listCurrentPostureSnapshots(ctx);
-      const byAsset = new Map(snapshots.map((s) => [s.waf_asset_id, s]));
-      const counts = {
-        protected: 0,
-        underprotected: 0,
-        unprotected: 0,
-        unknown: 0,
-        excluded: 0,
-      };
-      for (const asset of assets) {
-        const snap = byAsset.get(asset.id);
-        const status = snap?.status ?? 'unknown';
-        if (Object.prototype.hasOwnProperty.call(counts, status)) {
-          counts[status] += 1;
-        } else {
-          counts.unknown += 1;
-        }
-      }
-      const total_assets = assets.length;
-      const percentages = {};
-      for (const key of Object.keys(counts)) {
-        percentages[key] = total_assets === 0 ? 0 : Math.round((counts[key] / total_assets) * 10000) / 100;
-      }
-      return {
-        total_assets,
-        ...counts,
-        percentages,
-      };
+    async getWafCoverage(ctx, options = {}) {
+      const context = await gatherPostgresWafAnalyticsContext(ctx, wafRepo, coreCatalog, options);
+      return buildCoverageSummary({
+        assets: context.assets,
+        currentSnapshotsByAsset: context.currentSnapshotsByAsset,
+        historicalSnapshots: context.historicalSnapshots,
+        windowDays: context.windowDays,
+      });
+    },
+
+    async getWafCoverageVendors(ctx) {
+      const context = await gatherPostgresWafAnalyticsContext(ctx, wafRepo, coreCatalog);
+      return buildVendorBreakdown({
+        assets: context.assets,
+        currentSnapshotsByAsset: context.currentSnapshotsByAsset,
+      });
+    },
+
+    async getWafCoverageEntities(ctx, options = {}) {
+      const context = await gatherPostgresWafAnalyticsContext(ctx, wafRepo, coreCatalog, options);
+      return buildEntityRollup({
+        assets: context.assets,
+        currentSnapshotsByAsset: context.currentSnapshotsByAsset,
+        entities: context.entities,
+        targetGroups: context.targetGroups,
+        entityTypeFilter: options.entity_type ?? options.entityType ?? null,
+      });
+    },
+
+    async getWafCoverageGeography(ctx, options = {}) {
+      const context = await gatherPostgresWafAnalyticsContext(ctx, wafRepo, coreCatalog, options);
+      return buildGeographyRollup({
+        assets: context.assets,
+        currentSnapshotsByAsset: context.currentSnapshotsByAsset,
+        targetGroups: context.targetGroups,
+        environments: context.environments,
+        entities: context.entities,
+        regionCodeFilter: options.region_code ?? options.regionCode ?? null,
+      });
+    },
+
+    async getWafCoverageCriticality(ctx, options = {}) {
+      const context = await gatherPostgresWafAnalyticsContext(ctx, wafRepo, coreCatalog, options);
+      return buildCriticalityRollup({
+        assets: context.assets,
+        currentSnapshotsByAsset: context.currentSnapshotsByAsset,
+        criticalityFilter: options.business_criticality ?? options.criticality ?? null,
+      });
+    },
+
+    async getWafRiskRoadmap(ctx, options = {}) {
+      const context = await gatherPostgresWafAnalyticsContext(ctx, wafRepo, coreCatalog, options);
+      return buildRiskRoadmap({
+        assets: context.assets,
+        currentSnapshotsByAsset: context.currentSnapshotsByAsset,
+        validationSummaryByAsset: context.validationSummaryByAsset,
+        cveMatchesByAsset: context.cveMatchesByAsset,
+        targetGroups: context.targetGroups,
+        entities: context.entities,
+        findingsByAsset: context.findingsByAsset,
+        actionItemsByAsset: context.actionItemsByAsset,
+        filters: {
+          entity_id: options.entity_id ?? options.entityId ?? null,
+          region_code: options.region_code ?? options.regionCode ?? null,
+          vendor: options.vendor ?? null,
+          min_score:
+            options.min_score != null
+              ? Number(options.min_score)
+              : options.minScore != null
+                ? Number(options.minScore)
+                : null,
+          limit_per_tier:
+            options.limit_per_tier != null
+              ? Number(options.limit_per_tier)
+              : options.limitPerTier != null
+                ? Number(options.limitPerTier)
+                : 50,
+        },
+      });
+    },
+
+    async getWafVendorConsolidation(ctx) {
+      const context = await gatherPostgresWafAnalyticsContext(ctx, wafRepo, coreCatalog);
+      return buildVendorConsolidation({
+        assets: context.assets,
+        currentSnapshotsByAsset: context.currentSnapshotsByAsset,
+        connectors: context.connectors,
+        driftEvents: context.driftEvents,
+      });
     },
 
     async createWafValidation(ctx, body) {
@@ -773,6 +1066,8 @@ export function createPostgresWafPostureServices(repositories, options = {}) {
         const testRunId =
           typeof body.test_run_id === 'string' ? body.test_run_id.trim() : '';
         if (testRunId) {
+          const binding = await validateWafTestRunBinding(validationEvidence, ctx, testRunId, asset);
+          if (binding.error) return binding;
           run.test_run_id = testRunId;
         }
         const persisted = await wafRepo.createWafValidationRun(ctx, run);
@@ -816,24 +1111,84 @@ export function createPostgresWafPostureServices(repositories, options = {}) {
       try {
         assertNoRawWafEvidence(body);
         const scenarioInputs = Array.isArray(body.scenario_results) ? body.scenario_results : [];
-        const normalizedScenarios = scenarioInputs.map((entry) => normalizeScenarioResultInput(entry));
+        const hasExplicitScenarios = scenarioInputs.length > 0;
+        let normalizedScenarios = hasExplicitScenarios
+          ? scenarioInputs.map((entry) => {
+            const normalized = normalizeScenarioResultInput(entry);
+            return {
+              ...normalized,
+              evidence_summary_json: normalizeWafEvidenceSummary(
+                stripClientAssertedAgentEvidence(normalized.evidence_summary_json),
+              ),
+            };
+          })
+          : [];
 
-        const wafDetected = parseBooleanField(body, 'waf_detected', 'wafDetected', false);
-        const validationPassed = parseBooleanField(body, 'validation_passed', 'validationPassed', false);
-        const evidenceGate = manualProtectedEvidenceRequired({
-          validationPassed,
-          usedBoundRunDerivation: false,
-          normalizedScenarios,
-        });
-        if (evidenceGate) return evidenceGate;
-        const validationFailed = parseBooleanField(body, 'validation_failed', 'validationFailed', false);
-        const originBypassConfirmed = parseBooleanField(
+        let wafDetected = parseBooleanField(body, 'waf_detected', 'wafDetected', false);
+        let validationPassed = parseBooleanField(body, 'validation_passed', 'validationPassed', false);
+        let validationFailed = parseBooleanField(body, 'validation_failed', 'validationFailed', false);
+        let originBypassConfirmed = parseBooleanField(
           body,
           'origin_bypass_confirmed',
           'originBypassConfirmed',
           false,
         );
+        let sourceExternal = Boolean(body.source_external);
+        let sourceAgent = Boolean(body.source_agent);
         const connectorMode = body.connector_mode ?? body.connectorMode ?? null;
+
+        const usedBoundRunDerivation = Boolean(run.test_run_id && !hasExplicitScenarios);
+        let corroboration;
+        if (usedBoundRunDerivation) {
+          const [probes, agents] = await Promise.all([
+            validationEvidence.listRunEvents(ctx, run.test_run_id, {
+              signalType: 'probe_result',
+              limit: WAF_BOUND_RUN_EVENTS_LIMIT,
+            }),
+            validationEvidence.listRunEvents(ctx, run.test_run_id, {
+              signalType: 'agent_observation',
+              limit: WAF_BOUND_RUN_EVENTS_LIMIT,
+            }),
+          ]);
+          corroboration = buildWafEvidenceCorroboration({ probes, agents });
+          const derived = deriveWafSignalsFromBoundEvents({ probes, agents });
+          normalizedScenarios = derived.scenarioResults.map((entry) =>
+            normalizeScenarioResultInput(entry),
+          );
+          if (!booleanFieldExplicit(body, 'waf_detected', 'wafDetected')) {
+            wafDetected = derived.wafDetected;
+          }
+          if (!booleanFieldExplicit(body, 'validation_passed', 'validationPassed')) {
+            validationPassed = derived.validationPassed;
+          }
+          if (!booleanFieldExplicit(body, 'validation_failed', 'validationFailed')) {
+            validationFailed = derived.validationFailed;
+          }
+          if (!booleanFieldExplicit(body, 'origin_bypass_confirmed', 'originBypassConfirmed')) {
+            originBypassConfirmed = derived.originBypassConfirmed;
+          }
+          if (body.source_external === undefined && body.sourceExternal === undefined) {
+            sourceExternal = derived.source_external;
+          }
+          if (body.source_agent === undefined && body.sourceAgent === undefined) {
+            sourceAgent = derived.source_agent;
+          }
+        }
+
+        if (!corroboration) {
+          corroboration = await buildCorroborationFromValidationEvidence(
+            validationEvidence,
+            ctx,
+            run.test_run_id ?? null,
+            normalizedScenarios,
+          );
+        }
+        const evidenceGate = protectedFinalizeEvidenceRequired({
+          validationPassed,
+          normalizedScenarios,
+          corroboration,
+        });
+        if (evidenceGate) return evidenceGate;
 
         const asset = await wafRepo.getWafAsset(ctx, run.waf_asset_id);
         if (!asset) return { error: 'waf_asset_not_found', status: 404 };
@@ -850,23 +1205,48 @@ export function createPostgresWafPostureServices(repositories, options = {}) {
 
         const now = nowFn().toISOString();
         const snapshotId = newIdFn('id');
-        const snapshot = {
-          id: snapshotId,
-          status: classification.status,
+        const targetGroups = await coreCatalog.listTargetGroups(ctx);
+        const cveMatchesByAsset = await wafRepo.listTenantCveAssetMatches(ctx);
+        const summary = {
+          waf_detected: wafDetected,
+          validation_passed: validationPassed,
+          validation_failed: validationFailed,
+          origin_bypass_confirmed: originBypassConfirmed,
+          posture_status: classification.status,
           reason_codes: classification.reason_codes,
-          detected_vendor: typeof body.detected_vendor === 'string' ? body.detected_vendor.trim() : null,
-          detected_product: typeof body.detected_product === 'string' ? body.detected_product.trim() : null,
-          coverage_required: asset.expected_waf_required !== false,
-          risk_score: 0,
-          confidence: Number(body.confidence ?? 0) || 0,
-          source_mix_json: {
-            validation: true,
-            external: Boolean(body.source_external),
-            agent: Boolean(body.source_agent),
-            connector: Boolean(body.source_connector),
-          },
-          created_at: now,
         };
+        const snapshot = enrichSnapshotWithRisk(
+          {
+            id: snapshotId,
+            status: classification.status,
+            reason_codes: classification.reason_codes,
+            detected_vendor: typeof body.detected_vendor === 'string' ? body.detected_vendor.trim() : null,
+            detected_product: typeof body.detected_product === 'string' ? body.detected_product.trim() : null,
+            coverage_required: asset.expected_waf_required !== false,
+            risk_score: 0,
+            confidence: Number(body.confidence ?? 0) || 0,
+            source_mix_json: {
+              validation: true,
+              external: sourceExternal,
+              agent: sourceAgent,
+              connector: Boolean(body.source_connector),
+            },
+            created_at: now,
+          },
+          buildPostgresRiskAssessment(
+            asset,
+            {
+              status: classification.status,
+              reason_codes: classification.reason_codes,
+              waf_asset_id: asset.id,
+              created_at: now,
+            },
+            summary,
+            targetGroups,
+            cveMatchesByAsset,
+            now,
+          ),
+        );
 
         const scenarios = normalizedScenarios.map((scenario) => ({
           id: newIdFn('id'),
@@ -884,14 +1264,7 @@ export function createPostgresWafPostureServices(repositories, options = {}) {
             run_updates: {
               status: 'finalized',
               finalized_at: now,
-              summary_json: {
-                waf_detected: wafDetected,
-                validation_passed: validationPassed,
-                validation_failed: validationFailed,
-                origin_bypass_confirmed: originBypassConfirmed,
-                posture_status: classification.status,
-                reason_codes: classification.reason_codes,
-              },
+              summary_json: summary,
             },
           });
 
@@ -1124,7 +1497,7 @@ export function createPostgresWafPostureServices(repositories, options = {}) {
         });
         return {
           status: 'active',
-          capabilities: [...WAF_CONNECTOR_SLICE_CAPABILITIES],
+          capabilities: connectorProviderCapabilities(connector.provider, connector),
           connector: formatConnectorForApi(updated),
         };
       }
@@ -1153,7 +1526,7 @@ export function createPostgresWafPostureServices(repositories, options = {}) {
       };
     },
 
-    async pollConnector(ctx, id, body = {}) {
+    async pollConnector(ctx, id, body = {}, pollOptions = {}) {
       const connector = await wafRepo.getConnector(ctx, id);
       if (!connector) {
         return { error: 'connector_not_found', status: 404 };
@@ -1162,27 +1535,106 @@ export function createPostgresWafPostureServices(repositories, options = {}) {
         assertNoRawWafEvidence(body);
         const snapshotInputs = Array.isArray(body.snapshots) ? body.snapshots : [];
         const now = nowFn().toISOString();
-        const records = snapshotInputs.map((entry) => {
-          const normalized = normalizeConnectorSnapshotInput(entry, connector.provider);
-          return {
-            id: newIdFn('id'),
-            connector_id: id,
-            provider: normalized.provider,
-            snapshot_kind: normalized.snapshot_kind,
-            resource_ref_hash: normalized.resource_ref_hash,
-            display_ref: normalized.display_ref,
-            summary_json: normalized.summary_json,
-            config_hash: normalized.config_hash,
-            observed_at: normalized.observed_at ?? now,
-            created_at: now,
-          };
-        });
-        const snapshots = await wafRepo.createConnectorSnapshots(ctx, records);
-        await wafRepo.updateConnectorStatus(ctx, id, {
-          last_success_at: now,
-          updated_at: now,
-        });
+        const secretResolver = pollOptions.secretResolver ?? postgresConnectorSecretResolver;
+        const fetchFn = pollOptions.fetchFn ?? fetch;
+        const prefetchedMetadata = pollOptions.prefetchedMetadata ?? body.prefetched_metadata ?? null;
+
+        let outboundHealth = null;
+        let outboundAttempts = null;
+        let outboundSnapshots = [];
+
+        if (shouldAttemptOutboundConnectorPoll(connector, body)) {
+          try {
+            const outbound = await executeConnectorProviderPoll({
+              connector,
+              secretResolver,
+              ctx,
+              fetchFn,
+              prefetchedMetadata,
+              now,
+              maxAttempts: pollOptions.maxAttempts,
+            });
+            outboundSnapshots = outbound.snapshots ?? [];
+            outboundHealth = outbound.health ?? null;
+            outboundAttempts = outbound.health?.attempts ?? null;
+          } catch (err) {
+            const failure = buildProviderPollFailure(connector, err, err?.attempts ?? null);
+            await wafRepo.updateConnectorStatus(ctx, id, connectorPollHealthUpdates(failure.health, now));
+            await auditRepo.appendAuditEvent({
+              tenant_id: ctx.tenantId,
+              actor_user_id: ctx.userId,
+              actor_role: ctx.role,
+              action: 'connector.poll.failed',
+              resource_type: 'waf_connector',
+              resource_id: id,
+              metadata: redactObject({
+                provider: connector.provider,
+                health_status: failure.health.status,
+                health_code: failure.health.health_code,
+                attempts: failure.health.attempts,
+              }),
+            });
+            return {
+              error: 'connector_poll_failed',
+              status: failure.health.status === 'rate_limited' ? 429 : 503,
+              message: 'Outbound connector poll failed; manual metadata snapshots remain supported.',
+              health: failure.health,
+            };
+          }
+        }
+
+        const records = [
+          ...snapshotInputs.map((entry) => {
+            const normalized = normalizeConnectorSnapshotInput(entry, connector.provider);
+            return {
+              id: newIdFn('id'),
+              connector_id: id,
+              provider: normalized.provider,
+              snapshot_kind: normalized.snapshot_kind,
+              resource_ref_hash: normalized.resource_ref_hash,
+              display_ref: normalized.display_ref,
+              summary_json: normalized.summary_json,
+              config_hash: normalized.config_hash,
+              observed_at: normalized.observed_at ?? now,
+              created_at: now,
+            };
+          }),
+          ...outboundSnapshots.map((entry) => {
+            const normalized = normalizeConnectorSnapshotInput(entry, connector.provider);
+            return {
+              id: newIdFn('id'),
+              connector_id: id,
+              provider: normalized.provider,
+              snapshot_kind: normalized.snapshot_kind,
+              resource_ref_hash: normalized.resource_ref_hash,
+              display_ref: normalized.display_ref,
+              summary_json: normalized.summary_json,
+              config_hash: normalized.config_hash,
+              observed_at: normalized.observed_at ?? now,
+              created_at: now,
+            };
+          }),
+        ];
+
+        const snapshots = records.length > 0
+          ? await wafRepo.createConnectorSnapshots(ctx, records)
+          : [];
+
+        if (outboundHealth) {
+          await wafRepo.updateConnectorStatus(ctx, id, connectorPollHealthUpdates(outboundHealth, now));
+        } else if (snapshots.length > 0) {
+          await wafRepo.updateConnectorStatus(ctx, id, {
+            status: connector.status === 'disabled' ? 'disabled' : 'active',
+            last_success_at: now,
+            last_error_at: null,
+            updated_at: now,
+          });
+        }
+
         const pollJobId = newIdFn('poll');
+        const pollStatus = outboundHealth
+          ? (snapshots.length > 0 ? 'completed' : 'completed_empty')
+          : 'completed';
         await auditRepo.appendAuditEvent({
           tenant_id: ctx.tenantId,
           actor_user_id: ctx.userId,
@@ -1193,6 +1645,8 @@ export function createPostgresWafPostureServices(repositories, options = {}) {
           metadata: redactObject({
             provider: connector.provider,
             snapshot_count: snapshots.length,
+            outbound: Boolean(outboundHealth),
+            ...(outboundHealth ? { health_status: outboundHealth.status } : {}),
           }),
         });
         return {
@@ -1200,9 +1654,10 @@ export function createPostgresWafPostureServices(repositories, options = {}) {
           poll_job: {
             id: pollJobId,
             connector_id: id,
-            status: 'completed',
+            status: pollStatus,
             snapshot_count: snapshots.length,
             completed_at: now,
+            ...(outboundHealth ? { health: outboundHealth, attempts: outboundAttempts } : {}),
           },
           snapshots: snapshots.map((item) => formatConnectorSnapshotForApi(item)),
         };
@@ -1244,6 +1699,228 @@ export function createPostgresWafPostureServices(repositories, options = {}) {
         return { connector: formatConnectorForApi(updated) };
       } catch (err) {
         return contractError(err);
+      }
+    },
+
+    async exportWafReport(ctx, kind, format = 'json') {
+      const normalizedKind = String(kind ?? '').trim().toLowerCase();
+      if (!WAF_REPORT_KINDS.has(normalizedKind)) {
+        return { error: 'waf_report_kind_invalid', status: 400 };
+      }
+
+      const needsComplianceAudit = normalizedKind === 'compliance_audit';
+      const needsBoardRoadmapBrief = normalizedKind === 'board_roadmap_brief';
+      const needsCoverage =
+        normalizedKind === 'executive_coverage' || needsComplianceAudit || needsBoardRoadmapBrief;
+      const needsValidations = normalizedKind === 'technical_evidence' || needsComplianceAudit;
+      const needsDrift =
+        normalizedKind === 'drift_audit'
+        || normalizedKind === 'executive_coverage'
+        || needsComplianceAudit;
+      const needsConnectors = normalizedKind === 'connector_health' || needsComplianceAudit;
+      const needsAnalytics = needsBoardRoadmapBrief;
+
+      const assets = needsCoverage ? await wafRepo.listWafAssets(ctx) : [];
+      const snapshots = needsCoverage ? await wafRepo.listCurrentPostureSnapshots(ctx) : [];
+      const snapshotsByAssetId = new Map(
+        snapshots.map((snapshot) => [snapshot.waf_asset_id, formatPostureSnapshotForApi(snapshot)]),
+      );
+      const allValidations = needsValidations ? await wafRepo.listWafValidationRuns(ctx) : [];
+      const validations = needsValidations
+        ? allValidations.slice(0, WAF_REPORT_VALIDATION_LIMIT)
+        : [];
+      const validationRunsTruncation = needsValidations
+        ? {
+            truncated: allValidations.length > validations.length,
+            limit: WAF_REPORT_VALIDATION_LIMIT,
+            total_available: allValidations.length,
+            included_count: validations.length,
+          }
+        : null;
+      const scenarioResultsByRunId = new Map();
+      for (const run of validations) {
+        const scenarioResults = await wafRepo.listWafScenarioResultsForRun(ctx, run.id);
+        scenarioResultsByRunId.set(run.id, scenarioResults);
+      }
+      const allDriftEvents = needsDrift
+        ? await wafRepo.listWafDriftEvents(ctx)
+        : [];
+      const driftEvents = needsDrift
+        ? allDriftEvents
+          .slice(0, WAF_REPORT_DRIFT_LIMIT)
+          .map((event) => formatDriftEventForApi(event))
+        : [];
+      const driftEventsTruncation = needsDrift
+        ? {
+            truncated: allDriftEvents.length > driftEvents.length,
+            limit: WAF_REPORT_DRIFT_LIMIT,
+            total_available: allDriftEvents.length,
+            included_count: driftEvents.length,
+          }
+        : null;
+      const connectors = needsConnectors
+        ? (await wafRepo.listConnectors(ctx)).map((connector) => formatConnectorForApi(connector))
+        : [];
+
+      const counts = {
+        protected: 0,
+        underprotected: 0,
+        unprotected: 0,
+        unknown: 0,
+        excluded: 0,
+      };
+      for (const asset of assets) {
+        const snap = snapshotsByAssetId.get(asset.id);
+        const status = snap?.status ?? 'unknown';
+        if (Object.prototype.hasOwnProperty.call(counts, status)) {
+          counts[status] += 1;
+        } else {
+          counts.unknown += 1;
+        }
+      }
+      const total_assets = assets.length;
+      const percentages = {};
+      for (const key of Object.keys(counts)) {
+        percentages[key] = total_assets === 0 ? 0 : Math.round((counts[key] / total_assets) * 10000) / 100;
+      }
+      let coverage = { total_assets, ...counts, percentages };
+      let riskRoadmap = null;
+      let vendorBreakdown = null;
+      let geographyRollup = null;
+      let coverageTrend = [];
+
+      if (needsAnalytics) {
+        const analyticsContext = await gatherPostgresWafAnalyticsContext(ctx, wafRepo, coreCatalog);
+        coverage = buildCoverageSummary({
+          assets: analyticsContext.assets,
+          currentSnapshotsByAsset: analyticsContext.currentSnapshotsByAsset,
+          historicalSnapshots: analyticsContext.historicalSnapshots,
+          windowDays: analyticsContext.windowDays,
+        });
+        coverageTrend = coverage.trend ?? [];
+        riskRoadmap = buildRiskRoadmap({
+          assets: analyticsContext.assets,
+          currentSnapshotsByAsset: analyticsContext.currentSnapshotsByAsset,
+          validationSummaryByAsset: analyticsContext.validationSummaryByAsset,
+          cveMatchesByAsset: analyticsContext.cveMatchesByAsset,
+          targetGroups: analyticsContext.targetGroups,
+          entities: analyticsContext.entities,
+          findingsByAsset: analyticsContext.findingsByAsset,
+          actionItemsByAsset: analyticsContext.actionItemsByAsset,
+          filters: { limit_per_tier: 50 },
+        });
+        vendorBreakdown = buildVendorBreakdown({
+          assets: analyticsContext.assets,
+          currentSnapshotsByAsset: analyticsContext.currentSnapshotsByAsset,
+        });
+        geographyRollup = buildGeographyRollup({
+          assets: analyticsContext.assets,
+          currentSnapshotsByAsset: analyticsContext.currentSnapshotsByAsset,
+          targetGroups: analyticsContext.targetGroups,
+          environments: analyticsContext.environments,
+          entities: analyticsContext.entities,
+        });
+      }
+
+      const payload = buildWafReportPayload(normalizedKind, {
+        tenantId: ctx.tenantId,
+        coverage,
+        coverageTrend,
+        assets,
+        snapshotsByAssetId,
+        validations,
+        validationRunsTruncation,
+        scenarioResultsByRunId,
+        driftEvents,
+        driftEventsTruncation,
+        connectors,
+        exceptions: [],
+        cveItems: [],
+        cveMatches: [],
+        riskRoadmap,
+        vendorBreakdown,
+        geographyRollup,
+      });
+
+      if (typeof auditRepo.withTenantAuditLock !== 'function') {
+        throw new Error('Postgres WAF posture service adapter requires audit.withTenantAuditLock().');
+      }
+
+      return auditRepo.withTenantAuditLock(ctx.tenantId, async ({ client, prior }) => {
+        const priorHash = prior?.entry_hash ?? null;
+        const exported = prepareWafReportExport(ctx, normalizedKind, format, payload, {
+          previousAuditHash: priorHash,
+          previousTenantAuditHash: priorHash,
+        });
+        if (exported.error) return exported;
+
+        await auditRepo.appendAuditEvent({
+          tenant_id: ctx.tenantId,
+          actor_user_id: ctx.userId,
+          actor_role: ctx.role,
+          action: 'waf.report.exported',
+          resource_type: 'waf_report',
+          resource_id: normalizedKind,
+          metadata: redactObject({
+            format: exported.custody?.format ?? format,
+            content_sha256: exported.custody?.content_sha256 ?? null,
+            custody_schema_version: exported.custody?.schema_version ?? null,
+            report_kind: normalizedKind,
+          }),
+        }, { client });
+
+        return exported;
+      });
+    },
+
+    async listWafProducts() {
+      const products = listWafProductCatalogEntries();
+      return {
+        items: products,
+        summary: summarizeWafProductCatalog(products),
+      };
+    },
+
+    async listScenarioIntakes(ctx) {
+      const items = (await wafRepo.listWafScenarioIntakes(ctx))
+        .map(formatPostgresScenarioIntake);
+      return { items };
+    },
+
+    async submitScenarioIntake(ctx, body = {}) {
+      try {
+        assertNoRawWafEvidence(body);
+        const normalized = normalizeScenarioIntakeInput(body);
+        const now = nowFn().toISOString();
+        const id = newId('wafintake');
+        const record = await wafRepo.insertWafScenarioIntake(ctx, {
+          id,
+          ...normalized,
+          intake_stage: WAF_SCENARIO_INTAKE_STAGES[0],
+          created_at: now,
+          updated_at: now,
+        });
+        await auditRepo.appendAuditEvent({
+          tenant_id: ctx.tenantId,
+          actor_user_id: ctx.userId,
+          actor_role: ctx.role,
+          action: 'waf.scenario_intake.submitted',
+          resource_type: 'waf_scenario_intake',
+          resource_id: id,
+          metadata: redactObject({
+            pattern_title: record.pattern_title,
+            advisory_refs: record.advisory_refs,
+            proposed_scenario_family: record.proposed_scenario_family ?? null,
+            risk_class: record.risk_class,
+          }),
+        });
+        return { intake: formatPostgresScenarioIntake(record), status: 'accepted' };
+      } catch (err) {
+        return {
+          error: err.code ?? 'invalid_request',
+          status: 400,
+          message: err.message,
+        };
       }
     },
   };

@@ -5,9 +5,16 @@ import {
   scoreRiskSeverity,
   canTransitionRiskState,
   RISK_PHASES,
+  TICKET_WORKFLOW_PHASE,
+  shouldAdvanceToTicketWorkflowPhase,
 } from '../../contracts/supplyChainRisk.mjs';
+import {
+  normalizePhaseAuthorization,
+  validatePhaseAuthorizationGate,
+} from '../../contracts/supplyChainPhaseAuthorization.mjs';
 import { newId } from '../../lib/ids.mjs';
 import { redactObject } from '../../lib/redact.mjs';
+import { parseSupplyChainSourceRecords } from '../../lib/supplyChainSources.mjs';
 import { createAuditRepository } from './auditRepository.mjs';
 import { createSupplyChainRiskRepository } from './supplyChainRiskRepository.mjs';
 
@@ -67,6 +74,7 @@ function formatRisk(record) {
     phase: record.phase,
     owner_hint: record.owner_hint ?? '',
     remediation_steps: record.remediation_steps ?? [],
+    phase_authorizations: record.phase_authorizations ?? [],
     created_at: record.created_at,
     ...(record.updated_at ? { updated_at: record.updated_at } : {}),
   };
@@ -89,8 +97,17 @@ function defaultDependencyRemediation(hostname, scriptHost) {
   ];
 }
 
+function defaultVendorDependencyRemediation(hostname, scriptHost) {
+  const host = scriptHost || 'third-party vendor';
+  return [
+    `Review vendor-managed dependencies from ${host} on ${hostname}.`,
+    'Confirm ownership and approval for third-party service inclusions.',
+    'Retest dependency graph metadata after remediation.',
+  ];
+}
+
 function buildRetestLink(risk) {
-  return `/v1/supply-chain/risks/${risk.id}/retest`;
+  return `/v1/waf/supply-chain/risks?risk_id=${encodeURIComponent(risk.id)}`;
 }
 
 /**
@@ -112,6 +129,17 @@ export function createPostgresSupplyChainRiskServices(pool, options = {}) {
       if (gate) return gate;
       const items = await riskRepo.listRisks(ctx);
       return items.map((entry) => formatRisk(entry));
+    },
+
+    async getSupplyChainRisk(ctx, id) {
+      const gate = wafFeatureGate();
+      if (gate) return gate;
+
+      const record = await riskRepo.getRisk(ctx, id);
+      if (!record) {
+        return { error: 'supply_chain_risk_not_found', status: 404 };
+      }
+      return { risk: formatRisk(record) };
     },
 
     async createSupplyChainRisk(ctx, body = {}) {
@@ -250,11 +278,17 @@ export function createPostgresSupplyChainRiskServices(pool, options = {}) {
           owner_hint: typeof body.owner_hint === 'string' && body.owner_hint.trim()
             ? body.owner_hint.trim()
             : (risk.owner_hint ?? ''),
-          phase: RISK_PHASES[1],
+          phase: TICKET_WORKFLOW_PHASE,
           created_at: nowFn().toISOString(),
         };
 
         validateRiskItem(ticket);
+        if (shouldAdvanceToTicketWorkflowPhase(risk.phase)) {
+          await riskRepo.updateRiskPhase(ctx, risk.id, {
+            phase: TICKET_WORKFLOW_PHASE,
+            updated_at: ticket.created_at,
+          });
+        }
         await auditRepo.appendAuditEvent({
           tenant_id: ctx.tenantId,
           actor_user_id: ctx.userId,
@@ -353,6 +387,92 @@ export function createPostgresSupplyChainRiskServices(pool, options = {}) {
       }
     },
 
+    async assessVendorDependency(ctx, body = {}) {
+      const gate = wafFeatureGate();
+      if (gate) return gate;
+      try {
+        rejectProhibitedAcquisition(body);
+        validateRiskItem(body);
+
+        const hostname = typeof body.hostname === 'string' ? body.hostname.trim() : '';
+        if (!hostname) {
+          return { error: 'invalid_request', status: 400, message: 'hostname is required.' };
+        }
+
+        const scriptHost = typeof body.script_host === 'string' ? body.script_host.trim() : '';
+        const dependencyUrlHash = typeof body.dependency_url_hash === 'string'
+          ? body.dependency_url_hash.trim()
+          : '';
+        const statusCode = body.status_code !== undefined ? Number(body.status_code) : null;
+        const contentType = typeof body.content_type === 'string' ? body.content_type.trim() : '';
+        const connectorConfirmation = body.connector_confirmation === true;
+
+        const evidence_summary = {
+          ...(scriptHost ? { script_host: scriptHost } : {}),
+          ...(dependencyUrlHash ? { dependency_url_hash: dependencyUrlHash } : {}),
+          ...(Number.isFinite(statusCode) ? { status_code: statusCode } : {}),
+          ...(contentType ? { content_type: contentType } : {}),
+          ...(connectorConfirmation ? { connector_confirmation: true } : {}),
+          data_source: 'customer_imports',
+          ...(typeof body.page_type === 'string' && body.page_type.trim()
+            ? { page_type: body.page_type.trim() }
+            : {}),
+          ...(body.claimable_provider_signature === true ? { claimable_provider_signature: true } : {}),
+        };
+
+        let baseConfidence = 0.45;
+        if (statusCode === 404 || statusCode === 410) baseConfidence = 0.7;
+        if (dependencyUrlHash) baseConfidence = Math.min(1, baseConfidence + 0.1);
+        if (connectorConfirmation) baseConfidence = Math.min(1, baseConfidence + 0.15);
+
+        const scored = scoreRiskSeverity({
+          exposure_type: 'vendor_dependency_risk',
+          hostname,
+          evidence_summary,
+          confidence: body.confidence ?? baseConfidence,
+          state: 'suspected',
+          severity: 'medium',
+          remediation_steps: defaultVendorDependencyRemediation(hostname, scriptHost),
+          owner_hint: typeof body.owner_hint === 'string' ? body.owner_hint : '',
+          risk_id: 'pending',
+        });
+
+        if (scored.confidence < CONFIDENCE_THRESHOLD) {
+          return {
+            assessed: true,
+            created: false,
+            reason: 'below_confidence_threshold',
+            scoring: scored,
+          };
+        }
+
+        const result = await this.createSupplyChainRisk(ctx, {
+          exposure_type: 'vendor_dependency_risk',
+          hostname,
+          evidence_summary: {
+            ...evidence_summary,
+            confidence: scored.confidence,
+          },
+          confidence: scored.confidence,
+          severity: scored.severity,
+          state: scored.state,
+          owner_hint: typeof body.owner_hint === 'string' ? body.owner_hint : '',
+          remediation_steps: defaultVendorDependencyRemediation(hostname, scriptHost),
+          phase: DEFAULT_PHASE,
+        });
+        if (result.error) return result;
+        return {
+          assessed: true,
+          created: !result.deduplicated,
+          deduplicated: Boolean(result.deduplicated),
+          risk: result.risk,
+          scoring: scored,
+        };
+      } catch (err) {
+        return contractError(err);
+      }
+    },
+
     async assessDanglingDependency(ctx, body = {}) {
       const gate = wafFeatureGate();
       if (gate) return gate;
@@ -430,6 +550,158 @@ export function createPostgresSupplyChainRiskServices(pool, options = {}) {
           deduplicated: Boolean(result.deduplicated),
           risk: result.risk,
           scoring: scored,
+        };
+      } catch (err) {
+        return contractError(err);
+      }
+    },
+
+    async getPhaseAuthorizations(ctx, riskId) {
+      const gate = wafFeatureGate();
+      if (gate) return gate;
+
+      const record = await riskRepo.getRisk(ctx, riskId);
+      if (!record) {
+        return { error: 'supply_chain_risk_not_found', status: 404 };
+      }
+
+      return {
+        risk_id: record.id,
+        phase: record.phase,
+        phase_authorizations: record.phase_authorizations ?? [],
+      };
+    },
+
+    async submitPhaseAuthorization(ctx, riskId, body = {}) {
+      const gate = wafFeatureGate();
+      if (gate) return gate;
+      try {
+        rejectProhibitedAcquisition(body);
+        validateRiskItem(body);
+
+        const record = await riskRepo.getRisk(ctx, riskId);
+        if (!record) {
+          return { error: 'supply_chain_risk_not_found', status: 404 };
+        }
+
+        const targetPhase = typeof body.target_phase === 'string' ? body.target_phase.trim() : '';
+        const { target_phase: _ignored, authorization: nestedAuthorization, ...authorizationFields } = body;
+        const { target_phase: normalizedPhase, authorization } = normalizePhaseAuthorization(
+          targetPhase,
+          nestedAuthorization ?? authorizationFields,
+        );
+        validatePhaseAuthorizationGate({
+          currentPhase: record.phase,
+          targetPhase: normalizedPhase,
+          riskState: record.state,
+        });
+
+        const now = nowFn().toISOString();
+        const entry = {
+          id: newIdFn('id'),
+          target_phase: normalizedPhase,
+          authorization,
+          approved_by_user_id: ctx.userId,
+          approved_by_role: ctx.role,
+          approved_at: now,
+        };
+        const phaseAuthorizations = [...(record.phase_authorizations ?? []), entry];
+        const updated = await riskRepo.updateRiskPhase(ctx, riskId, {
+          phase: normalizedPhase,
+          phase_authorizations: phaseAuthorizations,
+          state: normalizedPhase === 'AP2_manual_custody' ? 'customer_custody' : record.state,
+          owner_hint: normalizedPhase === 'AP2_manual_custody'
+            ? (authorization.manual_workflow_owner || record.owner_hint)
+            : record.owner_hint,
+          updated_at: now,
+        });
+        if (!updated) {
+          return { error: 'supply_chain_risk_not_found', status: 404 };
+        }
+
+        await auditRepo.appendAuditEvent({
+          tenant_id: ctx.tenantId,
+          actor_user_id: ctx.userId,
+          actor_role: ctx.role,
+          action: 'supply_chain.phase_authorized',
+          resource_type: 'supply_chain_risk',
+          resource_id: record.id,
+          metadata: redactObject({
+            target_phase: normalizedPhase,
+            hostname: record.hostname,
+            exposure_type: record.exposure_type,
+            custody_ids: authorization.custody_ids,
+          }),
+        });
+
+        return {
+          risk: formatRisk(updated),
+          authorization: entry,
+        };
+      } catch (err) {
+        return contractError(err);
+      }
+    },
+
+    async ingestSupplyChainSignals(ctx, source, records) {
+      const gate = wafFeatureGate();
+      if (gate) return gate;
+      try {
+        const parsedRecords = parseSupplyChainSourceRecords(source, records);
+        let assessed = 0;
+        let created = 0;
+        let deduplicated = 0;
+        let skippedBelowThreshold = 0;
+        const results = [];
+
+        for (const parsed of parsedRecords) {
+          const assessment = parsed.source === 'dangling_cname'
+            ? await this.assessDanglingCname(ctx, parsed.assess_body)
+            : await this.assessVendorDependency(ctx, parsed.assess_body);
+          if (assessment.error) return assessment;
+
+          assessed += 1;
+          if (assessment.created) created += 1;
+          if (assessment.deduplicated) deduplicated += 1;
+          if (assessment.reason === 'below_confidence_threshold') skippedBelowThreshold += 1;
+
+          results.push({
+            source_ref: parsed.source_ref,
+            hostname: parsed.hostname,
+            exposure_type: parsed.exposure_type,
+            assessed: assessment.assessed,
+            created: assessment.created,
+            deduplicated: Boolean(assessment.deduplicated),
+            ...(assessment.reason ? { reason: assessment.reason } : {}),
+            ...(assessment.risk ? { risk: assessment.risk } : {}),
+          });
+        }
+
+        await auditRepo.appendAuditEvent({
+          tenant_id: ctx.tenantId,
+          actor_user_id: ctx.userId,
+          actor_role: ctx.role,
+          action: 'supply_chain.source_ingested',
+          resource_type: 'supply_chain_source_batch',
+          resource_id: String(source),
+          metadata: redactObject({
+            source,
+            record_count: parsedRecords.length,
+            assessed_count: assessed,
+            created_count: created,
+            deduplicated_count: deduplicated,
+            skipped_below_threshold_count: skippedBelowThreshold,
+          }),
+        });
+
+        return {
+          source,
+          ingested: parsedRecords.length,
+          assessed,
+          created,
+          deduplicated,
+          skipped_below_threshold: skippedBelowThreshold,
+          results,
         };
       } catch (err) {
         return contractError(err);

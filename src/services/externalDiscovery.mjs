@@ -2,14 +2,18 @@ import { createHash } from 'node:crypto';
 import { audit } from '../audit.mjs';
 import { loadRuntimeConfig } from '../config.mjs';
 import {
+  buildDiscoveryReportSummary,
   canTransition,
   createCandidate as normalizeCandidate,
   createEntity as normalizeEntity,
   isDeclaredOnlyDiscoveryMode,
   validateCandidate,
 } from '../contracts/externalDiscovery.mjs';
+import { parsePassiveDiscoveryRecords } from '../lib/discoverySources.mjs';
 import { newId } from '../lib/ids.mjs';
 import { getStore, persistStore } from '../store.mjs';
+import { addTarget } from './targetGroups.mjs';
+import { createWafAsset } from './wafPosture.mjs';
 
 const INBOX_STATES = new Set(['candidate', 'needs_review']);
 const APPROVABLE_STATES = new Set(['candidate', 'needs_review']);
@@ -92,6 +96,7 @@ function formatCandidate(record) {
     evidence_summary: record.evidence_summary ?? {},
     ...(record.entity_id ? { entity_id: record.entity_id } : {}),
     ...(record.scope_hash ? { scope_hash: record.scope_hash } : {}),
+    ...(record.approved_target_id ? { approved_target_id: record.approved_target_id } : {}),
     ...(record.rejection_reason ? { rejection_reason: record.rejection_reason } : {}),
     created_at: record.created_at,
     ...(record.updated_at ? { updated_at: record.updated_at } : {}),
@@ -103,6 +108,22 @@ function findCandidate(ctx, id) {
   return (
     getStore().discoveryCandidates.find(
       (c) => c.id === id && c.tenant_id === ctx.tenantId,
+    ) ?? null
+  );
+}
+
+function parseImportBoolean(value, fallback = true) {
+  if (value === undefined || value === null) return fallback;
+  if (typeof value === 'boolean') return value;
+  if (value === '1' || value === 1 || value === 'true') return true;
+  if (value === '0' || value === 0 || value === 'false') return false;
+  return fallback;
+}
+
+function findTargetGroup(ctx, targetGroupId) {
+  return (
+    getStore().targetGroups.find(
+      (g) => g.id === targetGroupId && g.tenant_id === ctx.tenantId,
     ) ?? null
   );
 }
@@ -183,6 +204,96 @@ export function listCandidates(ctx) {
   return getStore()
     .discoveryCandidates.filter((c) => c.tenant_id === ctx.tenantId)
     .map((c) => formatCandidate(c));
+}
+
+export function ingestDiscoveryCandidates(ctx, source, records) {
+  const disabled = guardDiscoveryEnabled();
+  if (disabled) return disabled;
+  ensureStoreShape();
+  try {
+    const parsedRecords = parsePassiveDiscoveryRecords(source, records);
+    const now = new Date().toISOString();
+    const beforeTargets = getStore().targets?.length ?? 0;
+    const beforeGroups = getStore().targetGroups?.length ?? 0;
+    let created = 0;
+    let updated = 0;
+    const candidates = [];
+
+    for (const parsed of parsedRecords) {
+      const existing = findCandidateByHostname(ctx, parsed.hostname);
+      if (existing) {
+        existing.last_seen_at = parsed.last_seen_at;
+        existing.confidence = Math.max(existing.confidence ?? 0, parsed.confidence);
+        existing.evidence_summary = {
+          ...(existing.evidence_summary ?? {}),
+          ...parsed.evidence_summary,
+          last_observed_at: parsed.last_seen_at,
+        };
+        existing.updated_at = now;
+        updated += 1;
+        candidates.push(formatCandidate(existing));
+        continue;
+      }
+
+      const id = newId('id');
+      const record = {
+        id,
+        tenant_id: ctx.tenantId,
+        candidate_id: newId('id'),
+        hostname: parsed.hostname,
+        source_type: parsed.source_type,
+        source_ref: parsed.source_ref,
+        confidence: parsed.confidence,
+        ownership_status: parsed.ownership_status,
+        approval_status: parsed.approval_status,
+        first_seen_at: parsed.first_seen_at,
+        last_seen_at: parsed.last_seen_at,
+        evidence_summary: parsed.evidence_summary,
+        state: parsed.state,
+        created_at: now,
+        updated_at: now,
+      };
+      getStore().discoveryCandidates.push(record);
+      created += 1;
+      candidates.push(formatCandidate(record));
+    }
+
+    audit({
+      tenant_id: ctx.tenantId,
+      actor_user_id: ctx.userId,
+      actor_role: ctx.role,
+      action: 'discovery.source_ingested',
+      resource_type: 'discovery_source_batch',
+      resource_id: String(source),
+      metadata: {
+        source,
+        record_count: parsedRecords.length,
+        created_count: created,
+        updated_count: updated,
+      },
+    });
+    persistStore();
+
+    const afterTargets = getStore().targets?.length ?? 0;
+    const afterGroups = getStore().targetGroups?.length ?? 0;
+    if (afterTargets !== beforeTargets || afterGroups !== beforeGroups) {
+      return {
+        error: 'discovery_ingest_target_mutation_forbidden',
+        status: 500,
+        message: 'Passive discovery ingest must not create targets automatically.',
+      };
+    }
+
+    return {
+      source,
+      ingested: parsedRecords.length,
+      created,
+      updated,
+      candidates,
+    };
+  } catch (err) {
+    return contractError(err);
+  }
 }
 
 export function createCandidate(ctx, body) {
@@ -415,8 +526,149 @@ export function getDiscoveryInbox(ctx) {
   return { items, count: items.length };
 }
 
+export function getDiscoveryReportSummary(ctx) {
+  const disabled = guardDiscoveryEnabled();
+  if (disabled) return disabled;
+  ensureStoreShape();
+  const candidates = getStore().discoveryCandidates.filter(
+    (c) => c.tenant_id === ctx.tenantId,
+  );
+  return {
+    summary: buildDiscoveryReportSummary(candidates),
+  };
+}
+
+export function importCandidateToTargetGroup(ctx, id, body = {}) {
+  const disabled = guardDiscoveryEnabled();
+  if (disabled) return disabled;
+  ensureStoreShape();
+
+  const candidate = findCandidate(ctx, id);
+  if (!candidate) {
+    return { error: 'discovery_candidate_not_found', status: 404 };
+  }
+  if (candidate.approved_target_id || candidate.evidence_summary?.imported_target_group_id) {
+    return {
+      error: 'discovery_candidate_already_imported',
+      status: 409,
+      message: 'Candidate has already been imported to a declared target.',
+    };
+  }
+  if (!canImportCandidateToTargetGroup(candidate)) {
+    return {
+      error: 'discovery_candidate_not_approved',
+      status: 403,
+      message: 'Candidate must be approved before import into a target group.',
+    };
+  }
+
+  const targetGroupId =
+    typeof body.target_group_id === 'string' ? body.target_group_id.trim() : '';
+  if (!targetGroupId) {
+    return {
+      error: 'invalid_request',
+      status: 400,
+      message: 'target_group_id is required.',
+    };
+  }
+
+  const targetGroup = findTargetGroup(ctx, targetGroupId);
+  if (!targetGroup) {
+    return {
+      error: 'target_group_not_found',
+      status: 404,
+      message: 'Target group not found for tenant.',
+    };
+  }
+
+  const environmentId =
+    typeof body.environment_id === 'string' && body.environment_id.trim()
+      ? body.environment_id.trim()
+      : null;
+  if (environmentId && targetGroup.environment_id !== environmentId) {
+    return {
+      error: 'invalid_request',
+      status: 400,
+      message: 'environment_id does not match target group environment.',
+    };
+  }
+
+  const hostname = normalizeHostname(candidate.hostname);
+  if (!hostname) {
+    return {
+      error: 'invalid_request',
+      status: 400,
+      message: 'Candidate hostname is required for import.',
+    };
+  }
+
+  const target = addTarget(ctx, targetGroupId, {
+    kind: 'fqdn',
+    value: hostname,
+  });
+  if (!target) {
+    return {
+      error: 'target_group_not_found',
+      status: 404,
+      message: 'Target group not found for tenant.',
+    };
+  }
+
+  let wafAsset = null;
+  const createWafAssetRequested = parseImportBoolean(body.create_waf_asset, true);
+  if (createWafAssetRequested) {
+    const wafResult = createWafAsset(ctx, {
+      target_group_id: targetGroupId,
+      target_id: target.id,
+      hostname,
+      expected_waf_required: true,
+    });
+    if (wafResult.error) {
+      return wafResult;
+    }
+    wafAsset = wafResult.asset;
+  }
+
+  const now = new Date().toISOString();
+  candidate.approved_target_id = target.id;
+  candidate.approval_status = 'approved';
+  candidate.state = 'approved_target';
+  candidate.evidence_summary = {
+    ...(candidate.evidence_summary ?? {}),
+    imported_at: now,
+    imported_target_group_id: targetGroupId,
+    ...(environmentId ? { imported_environment_id: environmentId } : {}),
+  };
+  candidate.updated_at = now;
+
+  audit({
+    tenant_id: ctx.tenantId,
+    actor_user_id: ctx.userId,
+    actor_role: ctx.role,
+    action: 'discovery.candidate_imported',
+    resource_type: 'discovery_candidate',
+    resource_id: candidate.id,
+    metadata: {
+      hostname: candidate.hostname,
+      target_group_id: targetGroupId,
+      target_id: target.id,
+      ...(environmentId ? { environment_id: environmentId } : {}),
+      ...(wafAsset ? { waf_asset_id: wafAsset.id } : {}),
+      source_type: candidate.source_type,
+      source_ref: candidate.source_ref,
+    },
+  });
+  persistStore();
+
+  return {
+    candidate: formatCandidate(candidate),
+    target,
+    ...(wafAsset ? { waf_asset: wafAsset } : {}),
+  };
+}
+
 export function canImportCandidateToTargetGroup(candidate) {
-  return candidate?.state === 'approved_target';
+  return candidate?.state === 'approved_target' && !candidate?.approved_target_id;
 }
 
 export function declaredOnlyModeActive(ctx, body = {}) {

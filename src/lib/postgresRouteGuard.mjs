@@ -70,6 +70,9 @@ export function isHighScaleRoute(path, method) {
     return true;
   }
   if (method === 'GET' && /^\/internal\/soc\/high-scale\/[^/]+\/adapter-status$/.test(path)) return true;
+  if (method === 'POST' && /^\/internal\/soc\/high-scale\/[^/]+\/telemetry\/ingest$/.test(path)) {
+    return true;
+  }
   if (/^\/internal\/soc\/high-scale\/[^/]+\/telemetry$/.test(path) && (method === 'GET' || method === 'POST')) {
     return true;
   }
@@ -104,6 +107,9 @@ export function requiredHighScaleServiceMethods(path, method) {
   if (method === 'GET' && /^\/internal\/soc\/high-scale\/[^/]+\/adapter-status$/.test(path)) {
     return ['getAdapterStatus'];
   }
+  if (method === 'POST' && /^\/internal\/soc\/high-scale\/[^/]+\/telemetry\/ingest$/.test(path)) {
+    return ['ingestGovernedAdapterTelemetry'];
+  }
   if (/^\/internal\/soc\/high-scale\/[^/]+\/telemetry$/.test(path) && method === 'POST') {
     return ['recordHighScaleTelemetry'];
   }
@@ -125,6 +131,20 @@ export function requiredHighScaleServiceMethods(path, method) {
     }
   }
   if (method === 'POST' && path === '/internal/soc/kill-switch') return ['setKillSwitch'];
+  return [];
+}
+
+export function isPlacementRoute(path, method) {
+  return method === 'GET' && path === '/v1/placement/reviews';
+}
+
+/**
+ * @param {string} path
+ * @param {string} method
+ * @returns {readonly string[]}
+ */
+export function requiredPlacementServiceMethods(path, method) {
+  if (isPlacementRoute(path, method)) return ['listPlacementReviews'];
   return [];
 }
 

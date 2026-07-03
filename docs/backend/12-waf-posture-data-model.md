@@ -19,7 +19,7 @@ Optional entity discovery graph.
 |---|---|---|
 | `id` | uuid | PK. |
 | `tenant_id` | uuid | RLS. |
-| `entity_type` | text | parent, subsidiary, acquisition, brand, business_unit, vendor_managed. |
+| `entity_type` | text | parent, subsidiary, acquisition, brand, business_unit, region, vendor_managed. |
 | `name` | text | Redacted-safe display name. |
 | `parent_entity_id` | uuid nullable | Self FK. |
 | `confidence` | numeric | 0-1. |
@@ -66,6 +66,10 @@ Approved web posture assets. Usually backed by existing `targets`.
 | `traffic_tier` | text | low, medium, high, unknown. |
 | `compliance_tags` | text[] | pci, hipaa, gdpr, etc. |
 | `owner_hint` | text nullable | Routing. |
+| `region_code` | text nullable | Declared ISO country or cloud region (planned; see [Analytics Schema Extensions](16-waf-analytics-schema-extensions.md)). |
+| `geography_label` | text nullable | Declared geography label such as EMEA or APAC (planned). |
+| `entity_id` | text nullable | Link to `entity_nodes` when discovery enabled (planned). |
+| `owasp_exposure_tags` | text[] | Declared OWASP exposure classes (planned). |
 | `created_at` / `updated_at` | timestamptz | Standard. |
 
 ### `waf_products`
@@ -123,7 +127,7 @@ Safe scenario family results. No raw payloads.
 | `id` | uuid | PK. |
 | `tenant_id` | uuid | RLS. |
 | `waf_validation_run_id` | uuid | FK. |
-| `scenario_family` | text | marker, sqli_marker, xss_marker, rce_marker, path_traversal_marker, rate_limit_marker, origin_bypass. |
+| `scenario_family` | text | marker, sqli_marker, xss_marker, rce_marker, path_traversal_marker, rate_limit_marker, origin_bypass, block_page_expectation. |
 | `test_material_type` | text | customer_marker, vendor_safe_test, metadata_only, manual_review. |
 | `expected_action` | text | block, challenge, rate_limit, allow, no_observe. |
 | `observed_action` | text | blocked, challenged, allowed, timed_out, observed_at_agent, inconclusive. |
@@ -145,10 +149,18 @@ Current and historical status.
 | `detected_vendor` / `detected_product` | text nullable | From latest fingerprint. |
 | `coverage_required` | boolean | Policy. |
 | `risk_score` | integer | 0-100. |
+| `priority_band` | text nullable | tier_1, tier_2, tier_3, tier_4 (planned). |
+| `risk_factors_json` | jsonb | Factor-level score evidence (planned). |
+| `scenario_pass_rate` | numeric nullable | Lookback pass rate at snapshot time (planned). |
+| `control_bypass_status` | text nullable | none, suspected, confirmed (planned). |
 | `confidence` | numeric | 0-1. |
 | `source_mix_json` | jsonb | external, agent, connector, cve, import. |
 | `created_at` | timestamptz | Snapshot time. |
 | `is_current` | boolean | Partial unique per asset. |
+
+### `waf_coverage_daily_rollups`
+
+Planned tenant trend buckets. See [Analytics Schema Extensions](16-waf-analytics-schema-extensions.md).
 
 ### `waf_baselines`
 
@@ -267,6 +279,28 @@ Human-approved mitigation guidance.
 | `ticket_id` | uuid nullable | Sync link. |
 | `created_at` / `updated_at` | timestamptz | Standard. |
 
+### `waf_action_items`
+
+Grouped remediation work items for WAF posture findings and related workflows.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid/text | PK. |
+| `tenant_id` | uuid/text | RLS. |
+| `category` | text | waf_coverage, waf_drift, origin_bypass, cve_mitigation, connector_setup, etc. |
+| `title` | text | Short remediation title. |
+| `asset_display` | text nullable | Redacted-safe asset label. |
+| `waf_asset_id` | uuid/text nullable | FK to `waf_assets`; used for dedupe when present. |
+| `owner` | text nullable | Routing hint. |
+| `severity` | text | critical/high/medium/low. |
+| `evidence_json` | jsonb | Metadata-only evidence summary. |
+| `recommended_solution` | text nullable | Vendor-aware guidance. |
+| `retest_url` | text nullable | API/link for retest or review. |
+| `status` | text | open, ticketed, remediation_started, retest_pending, resolved, accepted_risk. |
+| `primary_reason` | text nullable | Dedupe key with `waf_asset_id`. |
+| `cve_pipeline_item_id` | uuid/text nullable | Optional CVE pipeline link. |
+| `created_at` / `updated_at` | timestamptz | Standard. |
+
 ## Indexes
 
 | Index | Purpose |
@@ -277,6 +311,7 @@ Human-approved mitigation guidance.
 | `(tenant_id, connector_id, provider, observed_at)` on snapshots | Connector history. |
 | `(tenant_id, cve_id)` on CVE items | CVE lookup. |
 | `(tenant_id, cve_pipeline_item_id, waf_asset_id)` unique on matches | Deduping. |
+| `(tenant_id, waf_asset_id, primary_reason)` unique on `waf_action_items` | Action-item dedupe per tenant/asset/reason (`uniq_waf_action_items_dedupe`; migration `0010`). |
 | `(tenant_id, approval_status, confidence)` on candidates | Discovery inbox. |
 | `(tenant_id, target_group_id, canonical_url)` on WAF assets | Asset lookup. |
 

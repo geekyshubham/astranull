@@ -141,7 +141,7 @@ describe('signed probe coordinator', () => {
   it('rejects tampered worker signature', async () => {
     const headers = probeWorkerAuthHeaders(
       'worker-a',
-      { method: 'GET', path: '/internal/probe/jobs' },
+      { method: 'GET', path: '/internal/probe/jobs', tenantId: 'ten_demo' },
       WORKER_SECRET,
     );
     headers['x-probe-signature'] = 'tampered';
@@ -153,7 +153,13 @@ describe('signed probe coordinator', () => {
     const runtime = runtimeSignedWorker();
     const staleTs = String(Math.floor(Date.now() / 1000) - 301);
     const signature = signProbeWorkerRequest(
-      { method: 'GET', path: '/internal/probe/jobs', timestamp: staleTs, bodyText: '' },
+      {
+        method: 'GET',
+        path: '/internal/probe/jobs',
+        timestamp: staleTs,
+        bodyText: '',
+        tenantId: 'ten_demo',
+      },
       WORKER_SECRET,
     );
     const auth = authenticateProbeWorker(
@@ -161,6 +167,7 @@ describe('signed probe coordinator', () => {
         'x-probe-worker-id': 'worker-a',
         'x-probe-timestamp': staleTs,
         'x-probe-signature': signature,
+        'x-probe-tenant-id': 'ten_demo',
       },
       'GET',
       '/internal/probe/jobs',
@@ -176,16 +183,45 @@ describe('signed probe coordinator', () => {
         'x-probe-worker-id': 'worker-a',
         'x-probe-timestamp': staleTs,
         'x-probe-signature': signature,
+        'x-probe-tenant-id': 'ten_demo',
       },
     });
     assert.equal(res.status, 401);
+  });
+
+  it('rejects signed-worker probe requests without x-probe-tenant-id', async () => {
+    const runtime = runtimeSignedWorker();
+    const signature = signProbeWorkerRequest(
+      { method: 'GET', path: '/internal/probe/jobs', timestamp: String(Math.floor(Date.now() / 1000)), bodyText: '' },
+      WORKER_SECRET,
+    );
+    const auth = authenticateProbeWorker(
+      {
+        'x-probe-worker-id': 'worker-a',
+        'x-probe-timestamp': String(Math.floor(Date.now() / 1000)),
+        'x-probe-signature': signature,
+      },
+      'GET',
+      '/internal/probe/jobs',
+      '',
+      runtime,
+    );
+    assert.equal(auth.ok, false);
+    assert.equal(auth.status, 401);
+    assert.match(auth.body.message, /x-probe-tenant-id/);
   });
 
   it('rejects future probe worker timestamp beyond skew window', async () => {
     const runtime = runtimeSignedWorker();
     const futureTs = String(Math.floor(Date.now() / 1000) + 301);
     const signature = signProbeWorkerRequest(
-      { method: 'GET', path: '/internal/probe/jobs', timestamp: futureTs, bodyText: '' },
+      {
+        method: 'GET',
+        path: '/internal/probe/jobs',
+        timestamp: futureTs,
+        bodyText: '',
+        tenantId: 'ten_demo',
+      },
       WORKER_SECRET,
     );
     const auth = authenticateProbeWorker(
@@ -193,6 +229,7 @@ describe('signed probe coordinator', () => {
         'x-probe-worker-id': 'worker-a',
         'x-probe-timestamp': futureTs,
         'x-probe-signature': signature,
+        'x-probe-tenant-id': 'ten_demo',
       },
       'GET',
       '/internal/probe/jobs',
@@ -208,6 +245,7 @@ describe('signed probe coordinator', () => {
         'x-probe-worker-id': 'worker-a',
         'x-probe-timestamp': futureTs,
         'x-probe-signature': signature,
+        'x-probe-tenant-id': 'ten_demo',
       },
     });
     assert.equal(res.status, 401);
@@ -230,7 +268,7 @@ describe('signed probe coordinator', () => {
 
     const listHeaders = probeWorkerAuthHeaders(
       'worker-a',
-      { method: 'GET', path: '/internal/probe/jobs' },
+      { method: 'GET', path: '/internal/probe/jobs', tenantId: 'ten_demo' },
       WORKER_SECRET,
     );
     const listed = await request(baseUrl, 'GET', '/internal/probe/jobs', { headers: listHeaders });
@@ -248,7 +286,7 @@ describe('signed probe coordinator', () => {
     const resultPath = `/internal/probe/jobs/${started.probe_job.id}/result`;
     const resultHeaders = probeWorkerAuthHeaders(
       'worker-a',
-      { method: 'POST', path: resultPath, bodyText: JSON.stringify(body) },
+      { method: 'POST', path: resultPath, bodyText: JSON.stringify(body), tenantId: 'ten_demo' },
       WORKER_SECRET,
     );
     const ingested = await request(baseUrl, 'POST', resultPath, { headers: resultHeaders, body });
@@ -288,7 +326,7 @@ describe('signed probe coordinator', () => {
     const resultPath = `/internal/probe/jobs/${job.id}/result`;
     const resultHeaders = probeWorkerAuthHeaders(
       'worker-b',
-      { method: 'POST', path: resultPath, bodyText: JSON.stringify(body) },
+      { method: 'POST', path: resultPath, bodyText: JSON.stringify(body), tenantId: 'ten_demo' },
       WORKER_SECRET,
     );
     const res = await request(baseUrl, 'POST', resultPath, { headers: resultHeaders, body });
@@ -330,6 +368,32 @@ describe('signed probe coordinator', () => {
       getStore().events.some((e) => e.test_run_id === started.run.id && e.signal_type === 'probe_result'),
       false,
     );
+  });
+
+  it('rejects compact raw payload aliases in probe metadata', () => {
+    freshStore();
+    seedAgent();
+    const started = startTestRun(
+      ctx,
+      {
+        check_id: 'origin.direct_bypass.safe',
+        target_group_id: 'tg_1',
+        target_id: 'tgt_1',
+      },
+      runtimeSignedWorker(),
+    );
+    const job = getStore().probeJobs[0];
+    const out = ingestProbeResult(
+      { workerId: 'worker-a' },
+      job.id,
+      probeResultBody(job, 'blocked', {
+        metadata: { sample: { rawpayload: 'deadbeef', requestHeaders: { authorization: 'secret' } } },
+      }),
+      runtimeSignedWorker(),
+    );
+    assert.equal(out.status, 400);
+    assert.equal(out.error, 'raw_packet_rejected');
+    assert.equal(job.status, 'pending');
   });
 
   it('rejects invalid external_result on pending job without claiming lease', () => {
@@ -379,7 +443,7 @@ describe('signed probe coordinator', () => {
     const resultPath = `/internal/probe/jobs/${job.id}/result`;
     const resultHeaders = probeWorkerAuthHeaders(
       'worker-b',
-      { method: 'POST', path: resultPath, bodyText: JSON.stringify(body) },
+      { method: 'POST', path: resultPath, bodyText: JSON.stringify(body), tenantId: 'ten_demo' },
       WORKER_SECRET,
     );
     const res = await request(baseUrl, 'POST', resultPath, { headers: resultHeaders, body });
@@ -811,17 +875,25 @@ describe('signed probe coordinator', () => {
         check_id: 'waf.marker_rule.safe',
         target_group_id: 'tg_1',
         target_id: 'tgt_1',
+        probe_profile: {
+          scenario_family: 'marker',
+          expected_action: 'block',
+          collect: ['status_code', 'waf_product_hint'],
+        },
       },
       runtimeSignedWorker(),
     );
     const job = getStore().probeJobs.find((j) => j.test_run_id === started.run.id);
     const check = getCheckById('waf.marker_rule.safe');
-    assert.deepEqual(job.probe_profile, check.probe_profile);
     assert.equal(job.probe_profile.scenario_family, 'marker');
+    assert.equal(job.probe_profile.expected_action, 'block');
+    assert.deepEqual(job.probe_profile.collect, ['status_code', 'waf_product_hint']);
+    assert.equal(job.probe_profile.kind, check.probe_profile.kind);
+    const signedProfile = { ...job.probe_profile };
     assert.equal(verifyProbeJobSignature(job, WORKER_SECRET), true);
     job.probe_profile = { ...job.probe_profile, max_requests: 99 };
     assert.equal(verifyProbeJobSignature(job, WORKER_SECRET), false);
-    job.probe_profile = check.probe_profile;
+    job.probe_profile = signedProfile;
     job.probe_profile = { ...job.probe_profile, expected_action: 'allow_expected' };
     assert.equal(verifyProbeJobSignature(job, WORKER_SECRET), false);
   });

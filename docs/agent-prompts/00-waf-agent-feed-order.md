@@ -14,18 +14,24 @@ Important design rule: AstraNull remains no-access-first. The existing customer-
 | 4 | `docs/backend/11-waf-posture-architecture.md` | Backend, platform | Services, jobs, queues, state machines. |
 | 5 | `docs/backend/12-waf-posture-data-model.md` | Backend, DB | Tables, indexes, migrations, retention. |
 | 6 | `docs/backend/13-waf-posture-api-contract.md` | Backend, frontend, integrators | Endpoint contract and RBAC. |
-| 7 | `docs/detection/13-waf-fingerprinting-coverage.md` | Detection, probe | WAF/CDN detection, coverage classification, evidence. |
-| 8 | `docs/detection/14-waf-effectiveness-drift.md` | Detection, probe, agent | Blocking validation, monitor-only detection, drift logic. |
-| 9 | `docs/detection/15-live-exposure-defense-cve-pipeline.md` | Detection, backend, product | CVE pipeline, matching, WAF mitigation generation. |
-| 10 | `docs/integrations/01-waf-cdn-cloud-connectors.md` | Connector agent | Cloudflare/Akamai/AWS/Azure/GCP/etc. connector scope. |
-| 11 | `docs/integrations/02-remediation-siem-soar-connectors.md` | Connector, workflow | Jira, ServiceNow, Splunk, Sentinel, XSOAR, Slack, API. |
-| 12 | `docs/agent/08-waf-agent-probe-updates.md` | Agent, probe | Probe worker and customer agent changes. |
-| 13 | `docs/ux/13-waf-posture-ux.md` | Frontend | Pages, tables, filters, detail panels. |
-| 14 | `docs/flows/07-waf-posture-workflows.md` | Product, QA | End-to-end flows and acceptance criteria. |
-| 15 | `docs/progress-waf-posture-backlog.md` | Program manager, all agents | Epic breakdown, milestones, release gates. |
-| 16 | `docs/product/11-active-protection-and-digital-supply-chain.md` | Product, detection, security | Optional dangling asset and dependency protection design. |
-| 17 | `docs/agent-prompts/*.md` | Implementation agents | Copy-paste task prompts. |
-| 18 | `docs/sources/exposure-management-research-map.md` | All agents | Research basis and capability references. |
+| 7 | `docs/backend/14-waf-risk-coverage-analytics.md` | Backend, product, frontend | Risk scoring, coverage rollups, deployment roadmap, vendor advisory. |
+| 8 | `docs/detection/13-waf-fingerprinting-coverage.md` | Detection, probe | WAF/CDN detection, coverage classification, evidence. |
+| 9 | `docs/detection/14-waf-effectiveness-drift.md` | Detection, probe, agent | Blocking validation, monitor-only detection, drift logic. |
+| 10 | `docs/detection/15-live-exposure-defense-cve-pipeline.md` | Detection, backend, product | CVE pipeline, matching, WAF mitigation generation. |
+| 11 | `docs/detection/16-waf-scenario-cadence.md` | Detection, security, product | Control bypass framing, scenario cadence, per-asset effectiveness. |
+| 12 | `docs/detection/17-multi-vendor-cve-mitigation-playbook.md` | Product, backend, workflow | Grouped CVE playbooks across vendors. |
+| 13 | `docs/backend/15-waf-product-catalog-pipeline.md` | Detection, backend | Catalog seed, version, regression fixtures. |
+| 14 | `docs/backend/16-waf-analytics-schema-extensions.md` | Backend, DB | Analytics migration spec. |
+| 15 | `docs/integrations/01-waf-cdn-cloud-connectors.md` | Connector agent | Cloudflare/Akamai/AWS/Azure/GCP/etc. connector scope. |
+| 16 | `docs/integrations/02-remediation-siem-soar-connectors.md` | Connector, workflow | Jira, ServiceNow, Splunk, Sentinel, XSOAR, Slack, API. |
+| 17 | `docs/agent/08-waf-agent-probe-updates.md` | Agent, probe | Probe worker and customer agent changes. |
+| 18 | `docs/ux/13-waf-posture-ux.md` | Frontend | Pages, tables, filters, detail panels. |
+| 19 | `docs/flows/07-waf-posture-workflows.md` | Product, QA | End-to-end flows and acceptance criteria. |
+| 20 | `docs/product/12-waf-compliance-audit-evidence.md` | Product, backend, QA | Compliance audit and board roadmap reports. |
+| 21 | `docs/progress-waf-posture-backlog.md` | Program manager, all agents | Epic breakdown, milestones, release gates. |
+| 22 | `docs/product/11-active-protection-and-digital-supply-chain.md` | Product, detection, security | Optional dangling asset and dependency protection design. |
+| 23 | `docs/agent-prompts/*.md` | Implementation agents | Copy-paste task prompts. |
+| 24 | `docs/sources/exposure-management-research-map.md` | All agents | Research basis and capability references. |
 
 ## Feature flags
 

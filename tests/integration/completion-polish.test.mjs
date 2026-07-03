@@ -7,7 +7,7 @@ import { demoHeaders, request } from '../helpers/http.mjs';
 import { freshStore } from '../helpers/reset.mjs';
 import { verifyCustodyManifest } from '../../src/lib/custody.mjs';
 import { getStore } from '../../src/store.mjs';
-import { validHighScaleRequestPayload } from '../helpers/highScalePayload.mjs';
+import { artifactProofBody, validHighScaleRequestPayload } from '../helpers/highScalePayload.mjs';
 
 let baseUrl;
 let server;
@@ -38,7 +38,7 @@ describe('completion polish security and observability', () => {
     const hsId = hs.json.id;
     const art = await request(baseUrl, 'POST', `/v1/high-scale-requests/${hsId}/artifacts`, {
       headers: demoHeaders('engineer'),
-      body: { type: 'test_plan' },
+      body: artifactProofBody('test_plan'),
     });
     const artId = art.json.id;
 
@@ -79,6 +79,62 @@ describe('completion polish security and observability', () => {
     });
     assert.equal(raw.status, 400);
     assert.equal(raw.json.error, 'packet_payload_forbidden');
+
+    const nested = await request(baseUrl, 'POST', '/v1/events', {
+      headers: h,
+      body: { event_id: 'evt_pkt_3', metadata: { sample: { headers: { authorization: 'secret' } } } },
+    });
+    assert.equal(nested.status, 400);
+    assert.equal(nested.json.error, 'packet_payload_forbidden');
+
+    const evidenceNested = await request(baseUrl, 'POST', '/v1/events', {
+      headers: h,
+      body: { event_id: 'evt_pkt_4', evidence: { metadata: { request: { body: 'raw' } } } },
+    });
+    assert.equal(evidenceNested.status, 400);
+    assert.equal(evidenceNested.json.error, 'packet_payload_forbidden');
+
+    const camelRawPacket = await request(baseUrl, 'POST', '/v1/events', {
+      headers: h,
+      body: { event_id: 'evt_pkt_5', metadata: { rawPacket: { bytes: '00' } } },
+    });
+    assert.equal(camelRawPacket.status, 400);
+    assert.equal(camelRawPacket.json.error, 'packet_payload_forbidden');
+
+    const camelRequestBody = await request(baseUrl, 'POST', '/v1/events', {
+      headers: h,
+      body: { event_id: 'evt_pkt_6', metadata: { requestBody: 'raw' } },
+    });
+    assert.equal(camelRequestBody.status, 400);
+    assert.equal(camelRequestBody.json.error, 'packet_payload_forbidden');
+
+    const compactRawPayload = await request(baseUrl, 'POST', '/v1/events', {
+      headers: h,
+      body: { event_id: 'evt_pkt_7', metadata: { rawpayload: 'deadbeef' } },
+    });
+    assert.equal(compactRawPayload.status, 400);
+    assert.equal(compactRawPayload.json.error, 'packet_payload_forbidden');
+
+    const compactRequestHeaders = await request(baseUrl, 'POST', '/v1/events', {
+      headers: h,
+      body: { event_id: 'evt_pkt_8', metadata: { requestheaders: { authorization: 'secret' } } },
+    });
+    assert.equal(compactRequestHeaders.status, 400);
+    assert.equal(compactRequestHeaders.json.error, 'packet_payload_forbidden');
+
+    const directAuthorization = await request(baseUrl, 'POST', '/v1/events', {
+      headers: h,
+      body: { event_id: 'evt_pkt_9', metadata: { authorization: 'Bearer secret' } },
+    });
+    assert.equal(directAuthorization.status, 400);
+    assert.equal(directAuthorization.json.error, 'packet_payload_forbidden');
+
+    const variantAuthorization = await request(baseUrl, 'POST', '/v1/events', {
+      headers: h,
+      body: { event_id: 'evt_pkt_10', evidence: { metadata: { 'authori-zation': 'Bearer secret' } } },
+    });
+    assert.equal(variantAuthorization.status, 400);
+    assert.equal(variantAuthorization.json.error, 'packet_payload_forbidden');
   });
 
   it('serves /metrics and /v1/observability', async () => {

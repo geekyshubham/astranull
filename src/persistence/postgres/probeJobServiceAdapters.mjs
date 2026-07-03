@@ -1,5 +1,6 @@
 import { newId } from '../../lib/ids.mjs';
 import { validateProbeResultBody } from '../../lib/probeResultValidation.mjs';
+import { enrichProbeMetadataWithWafCatalog } from '../../lib/wafProductCatalog.mjs';
 
 /** @type {readonly string[]} */
 export const PROBE_JOB_REPOSITORY_METHODS = Object.freeze([
@@ -147,6 +148,16 @@ export function createPostgresProbeJobServices(repositories, options = {}) {
         await probeJobs.claimPendingJobForWorker(ctx, job.id, workerId, nowIso);
       }
 
+      const probeMetadata = enrichProbeMetadataWithWafCatalog(
+        {
+          ...workerMetadata,
+          external_result: externalResult,
+          probe_worker_id: workerId,
+          safety_attestation: safetyAttestation,
+        },
+        job.check_id,
+      );
+
       const probeEvent = await validationEvidence.appendProbeResultEventIdempotent(evidenceCtx, {
         id: newIdFn('event'),
         test_run_id: run.id,
@@ -156,25 +167,23 @@ export function createPostgresProbeJobServices(repositories, options = {}) {
         signal_type: 'probe_result',
         timestamp: nowIso,
         nonce_hash: job.nonce_hash,
-        metadata: {
-          ...workerMetadata,
-          external_result: externalResult,
-          probe_worker_id: workerId,
-          safety_attestation: safetyAttestation,
-        },
+        metadata: probeMetadata,
       });
 
       await validationEvidence.appendEvidence(evidenceCtx, {
         id: newIdFn('ev'),
         test_run_id: run.id,
         label: 'probe_worker_evidence',
-        metadata: {
-          probe_job_id: job.id,
-          probe_event_id: probeEvent.id,
-          external_result: externalResult,
-          vector_family: job.vector_family,
-          safety_attestation: safetyAttestation,
-        },
+        metadata: enrichProbeMetadataWithWafCatalog(
+          {
+            probe_job_id: job.id,
+            probe_event_id: probeEvent.id,
+            external_result: externalResult,
+            vector_family: job.vector_family,
+            safety_attestation: safetyAttestation,
+          },
+          job.check_id,
+        ),
         related_event_id: probeEvent.id,
         created_at: nowIso,
       });

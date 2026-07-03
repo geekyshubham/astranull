@@ -1,4 +1,7 @@
 import {
+  operatorAttestedEnvironmentRejection,
+} from '../../../scripts/submit-staging-evidence.mjs';
+import {
   aggregateStagingReadinessAttestation,
   isRehearsalOrSampleEvidenceInput,
   isSampleOrRehearsalReleaseId,
@@ -118,6 +121,9 @@ export function createPostgresProductionReleaseEvidenceServices(repositories, op
     async recordProductionReleaseEvidence(ctx, body = {}) {
       const rehearsalRejection = rehearsalEvidenceRejection(body);
       if (rehearsalRejection) return rehearsalRejection;
+
+      const environmentRejection = operatorAttestedEnvironmentRejection(body);
+      if (environmentRejection) return environmentRejection;
 
       const validation = validateProductionReleaseEvidence(body.kind, body.evidence);
       const error = validationError(validation);

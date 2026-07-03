@@ -28,6 +28,13 @@ Optional connectors add deeper rule/config visibility when the customer grants r
 | CVE-to-WAF mitigation | Match new CVEs to affected web assets and create deployable WAF-rule guidance. | CVE pipeline match, validation status, vendor-specific recommendation, ticket. |
 | Remediation workflow | Turn WAF gaps into action items and tickets. | Jira/ServiceNow/SIEM/SOAR event with evidence, owner, retest state. |
 | Executive reporting | Show WAF coverage %, trend, vendor mix, drift count, SLA status. | Aggregates from posture snapshots and validation runs. |
+| Coverage analytics rollups | Break down coverage by vendor, entity/business unit, and geography. | `wafCoverageService` rollups; see [WAF Risk and Coverage Analytics](../backend/14-waf-risk-coverage-analytics.md). |
+| Tiered deployment roadmap | Rank gaps into Tier 1–4 with suggested rollout windows. | `wafRiskService` scoring and `GET /v1/waf/coverage/risk-roadmap`. |
+| Per-asset effectiveness | Rule count, last rule update, scenario pass rate, control-bypass status. | Connector snapshots + validation history; see [Scenario Cadence](../detection/16-waf-scenario-cadence.md). |
+| Compliance audit evidence | Audit-ready WAF posture export with control mapping appendix. | `compliance_audit` report kind; see [WAF Compliance Audit Evidence](12-waf-compliance-audit-evidence.md). |
+| Vendor consolidation advisory | Optional read-only view of multi-vendor footprint and overlap. | Coverage analytics advisory overlay; no automated migration. |
+| Multi-vendor CVE playbooks | One CVE, many vendors — grouped mitigation checklist and coordinated retest. | [Multi-Vendor CVE Playbook](../detection/17-multi-vendor-cve-mitigation-playbook.md). |
+| Board roadmap brief | Executive narrative for board/procurement from Tier 1–2 roadmap data. | `board_roadmap_brief` report kind. |
 
 ## Deployment modes
 
@@ -90,6 +97,8 @@ Use a 0-100 score. Store factor-level evidence so users can understand the score
 | R4 - CVE pipeline | CVE ingestion, asset matching, safe validation status, rule recommendation templates. |
 | R5 - Enterprise workflows | Jira, ServiceNow, Splunk, Sentinel, XSOAR, Slack, reports, audit packs. |
 | R6 - Opt-in entity discovery | Candidate assets by entity/brand/subsidiary, approval inbox, import into target groups. |
+| R7 - Risk and coverage analytics | Risk scoring, entity/vendor/geography rollups, deployment roadmap, trend series. |
+| R8 - Compliance audit exports | `compliance_audit` report, exception register, framework mapping appendix. |
 
 ## Success metrics
 

@@ -4,6 +4,7 @@ import { incMetric } from '../lib/metrics.mjs';
 import { redactObject } from '../lib/redact.mjs';
 import { recordEvidence } from './evidence.mjs';
 import { newId } from '../lib/ids.mjs';
+import { enrichProbeMetadataWithWafCatalog } from '../lib/wafProductCatalog.mjs';
 import { getStore, persistStore } from '../store.mjs';
 import { enqueueAgentJob } from './agents.mjs';
 import { correlateVerdict, withinCorrelationWindow } from './correlation.mjs';
@@ -21,20 +22,38 @@ import {
 } from './safeTestPolicy.mjs';
 import { isKillSwitchActiveForTenant } from './killSwitchState.mjs';
 import { computePlacementConfidence } from './placement.mjs';
+import { assertSubscriptionLimit, getTenantAccount } from './subscriptions.mjs';
 
 const OBSERVATION_RAW_FIELD_DENYLIST = new Set([
   'packet_payload',
   'raw_packet',
   'raw_packets',
   'packet_data',
+  'raw_payload',
   'payload',
   'body',
   'headers',
+  'request_body',
+  'request_headers',
   'authorization',
   'cookie',
   'raw_log',
   'log_line',
 ]);
+const OBSERVATION_RAW_FIELD_COMPACT_DENYLIST = new Set(
+  [...OBSERVATION_RAW_FIELD_DENYLIST].map((key) => key.replace(/_/g, '')),
+);
+
+function normalizeObservationRawFieldKey(key) {
+  return String(key)
+    .trim()
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2')
+    .replace(/([a-z])([A-Z])/g, '$1_$2')
+    .replace(/[^a-zA-Z0-9]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .toLowerCase();
+}
 
 function observationBodyContainsRawFields(body) {
   if (!body || typeof body !== 'object') return false;
@@ -48,7 +67,16 @@ function observationBodyContainsRawFields(body) {
     }
     if (typeof value !== 'object') return false;
     for (const key of Object.keys(value)) {
-      if (OBSERVATION_RAW_FIELD_DENYLIST.has(key.toLowerCase())) return true;
+      const normalized = normalizeObservationRawFieldKey(key);
+      const compact = normalized.replace(/_/g, '');
+      if (
+        OBSERVATION_RAW_FIELD_DENYLIST.has(normalized)
+        || OBSERVATION_RAW_FIELD_COMPACT_DENYLIST.has(compact)
+        || normalized.startsWith('raw_')
+        || compact.startsWith('raw')
+      ) {
+        return true;
+      }
       if (scan(value[key])) return true;
     }
     return false;
@@ -273,6 +301,32 @@ export function startTestRun(ctx, body, runtimeConfig = { probeMode: 'simulation
     );
   }
 
+  const tenantAccount = getTenantAccount(ctx.tenantId);
+  if (tenantAccount?.lifecycle_state === 'suspended') {
+    return {
+      error: 'tenant_suspended',
+      status: 403,
+      message: 'Tenant access is suspended.',
+    };
+  }
+
+  const hourlyRuns = countCustomerRunnableRunsLastHour(ctx.tenantId);
+  const subscriptionLimit = assertSubscriptionLimit(
+    ctx.tenantId,
+    'safe_runs_per_hour',
+    hourlyRuns,
+  );
+  if (!subscriptionLimit.ok) {
+    return {
+      error: subscriptionLimit.error,
+      status: 403,
+      metric: subscriptionLimit.metric,
+      limit: subscriptionLimit.limit,
+      current: subscriptionLimit.current,
+      message: 'Subscription safe-run limit reached.',
+    };
+  }
+
   if (activeRunForGroup(ctx.tenantId, targetGroupId)) {
     return { error: 'concurrent_run_blocked', status: 409 };
   }
@@ -413,12 +467,15 @@ export function startTestRun(ctx, body, runtimeConfig = { probeMode: 'simulation
     recordEvidence(ctx, {
       test_run_id: runId,
       label: 'probe_simulation_evidence',
-      metadata: {
-        vector_family: check.vector_family,
-        safety_class: check.safety_class,
-        probe_event_id: probeEvent.id,
-        simulation: 'SAFE_PROBE_SIMULATION',
-      },
+      metadata: enrichProbeMetadataWithWafCatalog(
+        {
+          vector_family: check.vector_family,
+          safety_class: check.safety_class,
+          probe_event_id: probeEvent.id,
+          simulation: 'SAFE_PROBE_SIMULATION',
+        },
+        check.check_id,
+      ),
       related_event_id: probeEvent.id,
     });
     run.status = 'collecting';

@@ -115,6 +115,49 @@ describe('notification retry worker args', () => {
 });
 
 describe('notification retry worker planning', () => {
+  it('counts only latest scheduled attempt per event and rule', () => {
+    const ledger = parseNotificationLedger({
+      notification_rules: sampleLedger().notification_rules,
+      notification_events: [
+        {
+          id: 'nevt_stale',
+          tenant_id: 'ten_demo',
+          delivery_attempts: [
+            {
+              id: 'natt_old',
+              rule_id: 'nrule_1',
+              channel: 'webhook',
+              status: 'provider_retry_scheduled',
+              attempt_number: 1,
+              max_attempts: 3,
+              next_retry_at: '2020-01-01T00:00:00.000Z',
+            },
+            {
+              id: 'natt_latest',
+              rule_id: 'nrule_1',
+              channel: 'webhook',
+              status: 'provider_retry_scheduled',
+              attempt_number: 2,
+              max_attempts: 3,
+              next_retry_at: '2026-01-01T00:00:00.000Z',
+            },
+          ],
+        },
+      ],
+    });
+
+    const plan = planNotificationRetries({
+      ledger,
+      asOf: '2026-06-01T12:00:00.000Z',
+      maxAttemptsDefault: 3,
+      dryRun: true,
+    });
+
+    assert.equal(plan.due_count, 1);
+    assert.equal(plan.due_items[0].attempt_id, 'natt_latest');
+    assert.equal(plan.due_items[0].prior_attempt_number, 2);
+  });
+
   it('selects only due provider_retry_scheduled attempts', () => {
     const ledger = parseNotificationLedger(sampleLedger());
     const plan = planNotificationRetries({

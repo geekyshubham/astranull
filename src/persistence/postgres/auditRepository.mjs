@@ -1,5 +1,5 @@
 import { buildAuditRecord } from '../../audit.mjs';
-import { withTenantContext } from './tenantContext.mjs';
+import { runWithTenantClient, withTenantContext } from './tenantContext.mjs';
 
 const LAST_AUDIT_ROW_SQL = `SELECT id, tenant_id, timestamp, sequence, prev_hash, entry_hash,
                   actor_user_id, actor_role, action, resource_type, resource_id, metadata_json
@@ -111,7 +111,7 @@ export function createAuditRepository(pool) {
         throw new Error('tenant id must be a non-empty string.');
       }
 
-      return withTenantContext(pool, tenantId, async (client) => {
+      return runWithTenantClient(pool, tenantId, options.client, async (client) => {
         await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [tenantId]);
         const { rows } = await client.query(LAST_AUDIT_ROW_SQL, [tenantId]);
         const lastRow = rowToAuditEntry(rows[0] ?? null);
@@ -129,6 +129,22 @@ export function createAuditRepository(pool) {
       return withTenantContext(pool, tenantId, async (client) => {
         const { rows } = await client.query(LAST_AUDIT_ROW_SQL, [tenantId]);
         return rowToAuditEntry(rows[0] ?? null);
+      });
+    },
+
+    /**
+     * Run callback under a per-tenant advisory lock with the latest chained audit row.
+     * Use for custody preparation + append in one transaction.
+     *
+     * @param {string} tenantId
+     * @param {(ctx: { client: import('pg').PoolClient, prior: ReturnType<typeof rowToAuditEntry> }) => Promise<unknown>} callback
+     */
+    async withTenantAuditLock(tenantId, callback) {
+      return runWithTenantClient(pool, tenantId, undefined, async (client) => {
+        await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [tenantId]);
+        const { rows } = await client.query(LAST_AUDIT_ROW_SQL, [tenantId]);
+        const prior = rowToAuditEntry(rows[0] ?? null);
+        return callback({ client, prior });
       });
     },
   };

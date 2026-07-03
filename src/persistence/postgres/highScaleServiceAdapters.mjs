@@ -1,7 +1,9 @@
+import { validateArtifactUploadBody } from '../../lib/authorizationArtifactLedger.mjs';
 import { newId } from '../../lib/ids.mjs';
 import { redactObject, redactString } from '../../lib/redact.mjs';
 import { incMetric } from '../../lib/metrics.mjs';
 import { computeScopeHashFromTargets } from '../../lib/scopeHash.mjs';
+import { normalizeGovernedAdapterTelemetryIngest } from '../../lib/governedAdapterTelemetry.mjs';
 import { evaluateHighScaleAdapterStartGate } from '../../lib/highScalePolicy.mjs';
 import {
   TELEMETRY_ACTIVE_STATES,
@@ -69,6 +71,7 @@ export const POSTGRES_HIGH_SCALE_SERVICE_METHODS = Object.freeze([
   'listSocNotes',
   'getAdapterStatus',
   'recordHighScaleTelemetry',
+  'ingestGovernedAdapterTelemetry',
   'listHighScaleTelemetry',
   'upsertPostTestReport',
   'getPostTestReport',
@@ -144,6 +147,11 @@ async function notifyStateChangeOptional(notifications, ctx, req, action) {
 }
 
 async function persistRequestPack(repo, ctx, req) {
+  const patch = buildRequestPackPatch(req);
+  return repo.updateHighScaleRequest(ctx, req.id, patch);
+}
+
+function buildRequestPackPatch(req) {
   refreshAuthorizationPackStatus(req);
   const risk = {
     environment: req.environment,
@@ -156,13 +164,13 @@ async function persistRequestPack(repo, ctx, req) {
     provider_contacts: req.provider_contacts,
     authorization_pack_status: req.authorization_pack_status,
   };
-  return repo.updateHighScaleRequest(ctx, req.id, {
+  return {
     artifacts: req.artifacts,
     provider_approval_checklist: req.provider_approval_checklist,
     risk_review_json: risk,
     adapter: req.adapter,
     updated_at: new Date().toISOString(),
-  });
+  };
 }
 
 async function validateTargetScope(coreCatalog, ctx, targetGroupId) {
@@ -278,20 +286,29 @@ export function createPostgresHighScaleServices(repositories, options = {}) {
       return repo.listHighScaleRequests(ctx);
     },
 
-    async addArtifact(ctx, requestId, body) {
+    async addArtifact(ctx, requestId, body, options = {}) {
       const req = await repo.getHighScaleRequest(ctx, requestId);
       if (!req) return null;
-      const artifact = buildArtifactFromUpload(ctx, body);
+      const validation = validateArtifactUploadBody(body);
+      if (validation.error) return validation;
+      const artifact = buildArtifactFromUpload(ctx, body, { uploadEnvelope: options.uploadEnvelope });
       if (!req.artifacts) req.artifacts = [];
       req.artifacts.push(artifact);
       if (artifact.type === 'provider_approval') {
         syncChecklistFromProviderArtifact(req, artifact, body);
       }
-      await repo.insertAuthorizationArtifact(ctx, requestId, artifact);
-      await persistRequestPack(repo, ctx, req);
+      if (typeof repo.insertAuthorizationArtifactAndUpdateRequest === 'function') {
+        await repo.insertAuthorizationArtifactAndUpdateRequest(ctx, requestId, artifact, buildRequestPackPatch(req));
+      } else {
+        await repo.insertAuthorizationArtifact(ctx, requestId, artifact);
+        await persistRequestPack(repo, ctx, req);
+      }
       await appendAudit(auditRepo, ctx, 'high_scale.artifact_uploaded', 'high_scale_artifact', artifact.id, {
         request_id: requestId,
         type: artifact.type,
+        custody_id: artifact.custody_id,
+        content_sha256: artifact.content_sha256,
+        upload_envelope: artifact.upload_envelope,
       });
       return artifact;
     },
@@ -299,7 +316,8 @@ export function createPostgresHighScaleServices(repositories, options = {}) {
     async listArtifacts(ctx, requestId) {
       const req = await repo.getHighScaleRequest(ctx, requestId);
       if (!req) return null;
-      return req.artifacts ?? [];
+      const artifacts = await repo.listAuthorizationArtifacts(ctx, requestId);
+      return artifacts.length ? artifacts : (req.artifacts ?? []);
     },
 
     async reviewArtifact(ctx, requestId, artifactId, body) {
@@ -314,13 +332,24 @@ export function createPostgresHighScaleServices(repositories, options = {}) {
       if (art.type === 'provider_approval') {
         syncChecklistFromProviderArtifactReview(req, art);
       }
-      await repo.updateAuthorizationArtifact(ctx, requestId, artifactId, {
+      const artifactPatch = {
         status: art.status,
         reviewed_by: art.reviewed_by,
         reviewed_at: art.reviewed_at,
         metadata: { review_notes: art.review_notes },
-      });
-      await persistRequestPack(repo, ctx, req);
+      };
+      if (typeof repo.updateAuthorizationArtifactAndRequest === 'function') {
+        await repo.updateAuthorizationArtifactAndRequest(
+          ctx,
+          requestId,
+          artifactId,
+          artifactPatch,
+          buildRequestPackPatch(req),
+        );
+      } else {
+        await repo.updateAuthorizationArtifact(ctx, requestId, artifactId, artifactPatch);
+        await persistRequestPack(repo, ctx, req);
+      }
       await appendAudit(auditRepo, ctx, 'high_scale.artifact_reviewed', 'high_scale_artifact', artifactId, {
         status: art.status,
         request_id: requestId,
@@ -380,7 +409,7 @@ export function createPostgresHighScaleServices(repositories, options = {}) {
       }
       const observed = parseObservedAt(body?.observed_at);
       if (!observed.ok) return observed;
-      if (body?.metrics != null && telemetryObjectContainsForbiddenKeys(body.metrics)) {
+      if (telemetryObjectContainsForbiddenKeys(body)) {
         return { error: 'forbidden_telemetry_fields', status: 400 };
       }
       const metrics =
@@ -409,6 +438,59 @@ export function createPostgresHighScaleServices(repositories, options = {}) {
       return persisted;
     },
 
+    async ingestGovernedAdapterTelemetry(ctx, requestId, body) {
+      const req = await repo.getHighScaleRequest(ctx, requestId);
+      if (!req) return null;
+      if (!TELEMETRY_ACTIVE_STATES.has(req.state)) {
+        return { error: 'telemetry_not_active', status: 409, state: req.state };
+      }
+
+      const ingestion_id = newIdFn('hsteling');
+      const normalized = normalizeGovernedAdapterTelemetryIngest(body, { ingestion_id });
+      if (!normalized.ok) return normalized;
+
+      const records = [];
+      for (const fields of normalized.records) {
+        const record = {
+          id: newIdFn('hstel'),
+          high_scale_request_id: requestId,
+          category: fields.category,
+          live_status: fields.live_status,
+          observed_at: fields.observed_at,
+          source: fields.source,
+          metrics: fields.metrics,
+          created_at: nowFn().toISOString(),
+          recorded_by: ctx.userId,
+        };
+        records.push(await repo.appendTelemetry(ctx, record));
+      }
+
+      await appendAudit(
+        auditRepo,
+        ctx,
+        'high_scale.adapter_telemetry_ingested',
+        'high_scale_telemetry_ingest',
+        ingestion_id,
+        {
+          high_scale_request_id: requestId,
+          adapter_id: normalized.adapter_id,
+          provider_key: normalized.provider_key,
+          snapshot_count: records.length,
+          ingestion_id,
+        },
+      );
+
+      return {
+        ingestion_id,
+        adapter_id: normalized.adapter_id,
+        adapter_type: normalized.adapter_type,
+        provider_key: normalized.provider_key,
+        provider_run_id: normalized.provider_run_id,
+        snapshot_count: records.length,
+        records,
+      };
+    },
+
     async listHighScaleTelemetry(ctx, requestId) {
       const req = await repo.getHighScaleRequest(ctx, requestId);
       if (!req) return null;
@@ -416,23 +498,33 @@ export function createPostgresHighScaleServices(repositories, options = {}) {
     },
 
     async upsertPostTestReport(ctx, requestId, body) {
-      const req = await repo.getHighScaleRequest(ctx, requestId);
+      const snapshot = typeof repo.getHighScaleReportSnapshot === 'function'
+        ? await repo.getHighScaleReportSnapshot(ctx, requestId)
+        : null;
+      const req = snapshot?.request ?? await repo.getHighScaleRequest(ctx, requestId);
       if (!req) return null;
       if (req.state !== 'stopped') {
         return { error: 'report_requires_stopped_request', status: 409, state: req.state };
       }
-      const existing = await repo.getSocReport(ctx, requestId);
+      const existing = snapshot?.report ?? await repo.getSocReport(ctx, requestId);
       const now = nowFn().toISOString();
       const summary = bodySummaryFields(body, existing);
-      const notes = await repo.listSocNotes(ctx, requestId);
-      const telemetry = await repo.listTelemetry(ctx, requestId);
+      const notes = snapshot?.notes ?? await repo.listSocNotes(ctx, requestId);
+      const telemetry = snapshot?.telemetry ?? await repo.listTelemetry(ctx, requestId);
+      const normalizedArtifacts = snapshot
+        ? req.artifacts ?? []
+        : await repo.listAuthorizationArtifacts(ctx, requestId);
+      const reportRequest = {
+        ...req,
+        artifacts: normalizedArtifacts.length ? normalizedArtifacts : (req.artifacts ?? []),
+      };
       const derived = {
-        timeline: buildTimeline(req),
-        artifacts: summarizeArtifacts(req),
+        timeline: buildTimeline(reportRequest),
+        artifacts: summarizeArtifacts(reportRequest),
         soc_notes: summarizeSocNotes(notes),
-        adapter: summarizeAdapter(req),
+        adapter: summarizeAdapter(reportRequest),
         telemetry_summary: summarizeTelemetryForReport(telemetry),
-        final_state: req.state,
+        final_state: reportRequest.state,
       };
       let report;
       let auditAction;
@@ -635,7 +727,7 @@ export function createPostgresHighScaleServices(repositories, options = {}) {
         await appendAudit(auditRepo, ctx, `high_scale.${action}`, 'high_scale_request', id, metadata);
       }
 
-      const updated = await repo.updateHighScaleRequest(ctx, id, {
+      let updated = await repo.updateHighScaleRequest(ctx, id, {
         state: req.state,
         audit_trail: req.audit_trail,
         soc_approvals: req.soc_approvals,
@@ -644,6 +736,37 @@ export function createPostgresHighScaleServices(repositories, options = {}) {
         adapter: req.adapter,
         updated_at: nowFn().toISOString(),
       });
+
+      if (
+        action === 'approve'
+        && updated?.state === 'under_review'
+        && distinctSocApprovalCount(updated) >= 2
+        && !updated.scope_hash
+      ) {
+        const scope = await validateTargetScope(coreCatalog, ctx, updated.target_group_id);
+        if (!scope.error) {
+          const scopeHash = computeScopeHashFromTargets(updated.target_group_id, scope.targets);
+          updated = await repo.updateHighScaleRequest(ctx, id, {
+            state: 'approved',
+            scope_hash: scopeHash,
+            soc_approvals: updated.soc_approvals,
+            audit_trail: [
+              ...(updated.audit_trail ?? []),
+              {
+                action: 'approve_promoted_after_concurrent_soc_merge',
+                at: nowFn().toISOString(),
+                by: ctx.userId,
+                metadata: { scope_hash: scopeHash },
+              },
+            ],
+            updated_at: nowFn().toISOString(),
+          });
+          await appendAudit(auditRepo, ctx, 'high_scale.approved', 'high_scale_request', id, {
+            scope_hash: scopeHash,
+            concurrent_soc_merge: true,
+          });
+        }
+      }
 
       incMetric('high_scale_transitions_total');
       await notifyStateChangeOptional(notifications, ctx, updated, action);
@@ -726,4 +849,3 @@ export function createPostgresHighScaleServices(repositories, options = {}) {
     },
   };
 }
-

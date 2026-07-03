@@ -22,7 +22,20 @@ export const AGENT_INSTALL_MATRIX_CHECKS = Object.freeze([
   'revoke',
   'uninstall',
   'no_inbound_port',
+  'signature_verify',
 ]);
+
+export const AGENT_INSTALL_RUNTIME_SCENARIOS = Object.freeze({
+  container: Object.freeze({
+    required_runtime: 'docker',
+    optional_fields: ['image_reference_redacted', 'compose_reference_redacted'],
+  }),
+  kubernetes: Object.freeze({
+    required_runtime: 'kubernetes',
+    required_deployment_modes: Object.freeze(['daemonset', 'deployment', 'canary']),
+    optional_fields: ['namespace_redacted', 'helm_release_redacted'],
+  }),
+});
 
 const ALLOWED_CHECK_STATUS = new Set(['passed', 'failed', 'not_run']);
 
@@ -141,6 +154,39 @@ function validateCheckEntry(checkName, check, format) {
       issues.push(`${format}.${checkName}: inbound_listener_count must be 0 when passed`);
     }
   }
+  if (checkName === 'signature_verify' && status === 'passed') {
+    if (!hasValue(check.signing_format)) {
+      issues.push(`${format}.${checkName}: signing_format required when passed`);
+    } else if (check.signing_format !== format && !(format === 'generic' && check.signing_format === 'tarball')) {
+      issues.push(`${format}.${checkName}: signing_format must match row format`);
+    }
+    if (!hasValue(check.trust_anchor_reference)) {
+      issues.push(`${format}.${checkName}: trust_anchor_reference required when passed`);
+    }
+  }
+  return issues;
+}
+
+function validateScenarioMetadata(row, prefix) {
+  const issues = [];
+  const scenario = AGENT_INSTALL_RUNTIME_SCENARIOS[row.format];
+  if (!scenario) {
+    return issues;
+  }
+  if (!hasValue(row.runtime)) {
+    issues.push(`${prefix}: runtime required for ${row.format} scenario`);
+    return issues;
+  }
+  if (row.runtime !== scenario.required_runtime) {
+    issues.push(`${prefix}: runtime must be ${scenario.required_runtime} for ${row.format}`);
+  }
+  if (row.format === 'kubernetes') {
+    if (!hasValue(row.deployment_mode)) {
+      issues.push(`${prefix}: deployment_mode required for kubernetes scenario`);
+    } else if (!scenario.required_deployment_modes.includes(row.deployment_mode)) {
+      issues.push(`${prefix}: invalid deployment_mode "${row.deployment_mode}"`);
+    }
+  }
   return issues;
 }
 
@@ -168,6 +214,7 @@ export function validateMatrixRow(row, index = 0) {
   for (const checkName of AGENT_INSTALL_MATRIX_CHECKS) {
     issues.push(...validateCheckEntry(checkName, checks[checkName], prefix));
   }
+  issues.push(...validateScenarioMetadata(row, prefix));
 
   return { ok: issues.length === 0, format, issues };
 }
@@ -209,6 +256,20 @@ function sanitizeRowMetadata(row) {
   }
   if (typeof row.heartbeat_count === 'number') out.heartbeat_count = row.heartbeat_count;
   if (typeof row.job_poll_count === 'number') out.job_poll_count = row.job_poll_count;
+  if (row.runtime != null) out.runtime = redactString(String(row.runtime));
+  if (row.deployment_mode != null) out.deployment_mode = redactString(String(row.deployment_mode));
+  if (row.image_reference_redacted != null) {
+    out.image_reference_redacted = redactString(String(row.image_reference_redacted));
+  }
+  if (row.compose_reference_redacted != null) {
+    out.compose_reference_redacted = redactString(String(row.compose_reference_redacted));
+  }
+  if (row.namespace_redacted != null) {
+    out.namespace_redacted = redactString(String(row.namespace_redacted));
+  }
+  if (row.helm_release_redacted != null) {
+    out.helm_release_redacted = redactString(String(row.helm_release_redacted));
+  }
   return out;
 }
 
@@ -225,6 +286,12 @@ function sanitizeCheckDetail(check) {
   }
   if (check.agent_id_redacted != null) {
     detail.agent_id_redacted = redactString(String(check.agent_id_redacted));
+  }
+  if (check.signing_format != null) {
+    detail.signing_format = redactString(String(check.signing_format));
+  }
+  if (check.trust_anchor_reference != null) {
+    detail.trust_anchor_reference = redactString(String(check.trust_anchor_reference));
   }
   return detail;
 }
@@ -288,6 +355,7 @@ export function createAgentInstallMatrixSummary(input = {}) {
     caveats: [
       'Summary records metadata-only install/uninstall matrix evidence (pass/fail, counts, redacted IDs, timestamps).',
       'Agents remain outbound-only; no inbound management port requirement is validated via no_inbound_port rows.',
+      'Container and Kubernetes rows require runtime/deployment metadata; signature_verify rows bind installer trust anchors without secret material.',
       'Production promotion still requires signed packages, hosted artifact custody, distro/Kubernetes fleet drills, and operator signoff.',
     ],
   };

@@ -64,6 +64,9 @@ describe('postgres tenant query audit parser', () => {
 
   it('exposes allowlists and default scan targets', () => {
     assert.ok(TENANT_SCOPED_TABLES.includes('test_runs'));
+    assert.ok(TENANT_SCOPED_TABLES.includes('supply_chain_risks'));
+    assert.ok(TENANT_SCOPED_TABLES.includes('waf_validation_plans'));
+    assert.ok(TENANT_SCOPED_TABLES.includes('waf_retest_requests'));
     assert.ok(GLOBAL_TABLES.has('platform_metrics'));
     assert.ok(SKIP_FILE_BASENAMES.has('migrations.mjs'));
     const defaults = defaultPostgresAuditPaths();
@@ -87,6 +90,11 @@ describe('postgres tenant query audit heuristics', () => {
     const file = writeFixture('clean.mjs', source);
     const findings = auditSourceFile(file, source);
     assert.deepEqual(findings, []);
+  });
+
+  it('flags cross-tenant DISTINCT tenant_id enumeration without withTenantContext', () => {
+    const sql = 'SELECT DISTINCT tenant_id FROM waf_assets WHERE tenant_id IS NOT NULL ORDER BY tenant_id';
+    assert.equal(hasTenantContext(sql, 'waf_assets', 'async function listTenants(pool) {'), false);
   });
 
   it('flags suspicious tenant table access without tenant context indicators', () => {

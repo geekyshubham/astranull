@@ -54,7 +54,14 @@ import {
   WAF_POSTURE_REPOSITORY_METHODS,
   POSTGRES_WAF_POSTURE_SERVICE_METHODS,
   createPostgresWafPostureServices,
+  WAF_ORCHESTRATOR_REPOSITORY_METHODS,
+  POSTGRES_WAF_ORCHESTRATOR_SERVICE_METHODS,
+  createPostgresWafOrchestratorServices,
 } from '../../src/persistence/postgres/serviceAdapters.mjs';
+import {
+  buildRetestResultsFromDelegatedRuns,
+  upsertDelegationJobByReservation,
+} from '../../src/persistence/postgres/wafOrchestratorServiceAdapters.mjs';
 import {
   POSTGRES_EVENTS_SERVICE_METHODS,
 } from '../../src/persistence/postgres/validationServiceAdapters.mjs';
@@ -109,6 +116,10 @@ const PRODUCTION_RELEASE_EVIDENCE_ADAPTER_SOURCE = readFileSync(
 );
 const WAF_POSTURE_ADAPTER_SOURCE = readFileSync(
   path.join(ROOT, 'src/persistence/postgres/wafPostureServiceAdapters.mjs'),
+  'utf8',
+);
+const WAF_ORCHESTRATOR_ADAPTER_SOURCE = readFileSync(
+  path.join(ROOT, 'src/persistence/postgres/wafOrchestratorServiceAdapters.mjs'),
   'utf8',
 );
 
@@ -174,8 +185,12 @@ describe('postgres catalog service adapters', () => {
       'createTargetGroup',
       'getTargetGroup',
       'addTarget',
+      'patchTargetGroup',
+      'archiveTargetGroup',
+      'patchTarget',
+      'deleteTarget',
     ]);
-    assert.equal(CORE_CATALOG_SERVICE_METHODS.length, 9);
+    assert.equal(CORE_CATALOG_SERVICE_METHODS.length, 13);
   });
 
   it('fails early when coreCatalog is missing', () => {
@@ -198,7 +213,7 @@ describe('postgres catalog service adapters', () => {
     );
   });
 
-  it('forwards all nine route-facing methods with ctx/body/id args and awaits async results', async () => {
+  it('forwards all catalog service methods with ctx/body/id args and awaits async results', async () => {
     const { coreCatalog, calls } = createRecordingCoreCatalog();
     const { tenants, targetGroups } = createPostgresCatalogServices({ coreCatalog });
 
@@ -214,14 +229,31 @@ describe('postgres catalog service adapters', () => {
     await targetGroups.createTargetGroup(ctx, { name: 'G' });
     await targetGroups.getTargetGroup(ctx, 'tg_1');
     await targetGroups.addTarget(ctx, 'tg_1', { kind: 'hostname', value: 'x.example' });
+    await targetGroups.patchTargetGroup(ctx, 'tg_1', { name: 'G2' });
+    await targetGroups.archiveTargetGroup(ctx, 'tg_1');
+    await targetGroups.patchTarget(ctx, 'tg_1', 'tgt_1', { value: 'y.example' });
+    await targetGroups.deleteTarget(ctx, 'tg_1', 'tgt_1');
 
-    assert.equal(calls.length, 9);
+    assert.equal(calls.length, CORE_CATALOG_SERVICE_METHODS.length);
     assert.deepEqual(calls[0], { method: 'getCurrentTenant', args: [ctx] });
     assert.deepEqual(calls[1], { method: 'patchCurrentTenant', args: [ctx, { name: 'T' }] });
     assert.deepEqual(calls[4], { method: 'patchEnvironment', args: [ctx, 'env_1', { name: 'E2' }] });
     assert.deepEqual(calls[8], {
       method: 'addTarget',
       args: [ctx, 'tg_1', { kind: 'hostname', value: 'x.example' }],
+    });
+    assert.deepEqual(calls[9], {
+      method: 'patchTargetGroup',
+      args: [ctx, 'tg_1', { name: 'G2' }],
+    });
+    assert.deepEqual(calls[10], { method: 'archiveTargetGroup', args: [ctx, 'tg_1'] });
+    assert.deepEqual(calls[11], {
+      method: 'patchTarget',
+      args: [ctx, 'tg_1', 'tgt_1', { value: 'y.example' }],
+    });
+    assert.deepEqual(calls[12], {
+      method: 'deleteTarget',
+      args: [ctx, 'tg_1', 'tgt_1'],
     });
 
     const pending = tenants.listEnvironments(ctx);
@@ -1181,6 +1213,37 @@ describe('postgres validation service adapters', () => {
         audit: 'observation.rejected',
       },
       {
+        name: 'camel_raw_packet',
+        body: { test_run_id: 'run_1', agent_job_id: 'job_1', nonce_hash: 'nh_1', rawPacket: 'x' },
+        error: 'raw_packet_rejected',
+        status: 400,
+        audit: 'observation.rejected',
+      },
+      {
+        name: 'kebab_request_body',
+        body: {
+          test_run_id: 'run_1',
+          agent_job_id: 'job_1',
+          nonce_hash: 'nh_1',
+          metadata: { 'request-body': 'raw' },
+        },
+        error: 'raw_packet_rejected',
+        status: 400,
+        audit: 'observation.rejected',
+      },
+      {
+        name: 'compact_request_headers',
+        body: {
+          test_run_id: 'run_1',
+          agent_job_id: 'job_1',
+          nonce_hash: 'nh_1',
+          metadata: { requestheaders: { authorization: 'secret' } },
+        },
+        error: 'raw_packet_rejected',
+        status: 400,
+        audit: 'observation.rejected',
+      },
+      {
         name: 'missing_job',
         body: { test_run_id: 'run_1', nonce_hash: 'nh_1' },
         error: 'missing_agent_job_id',
@@ -1678,6 +1741,70 @@ describe('postgres validation service adapters', () => {
     assert.equal(auditEvents[0].entry.action, 'event.ingested');
     assert.equal(auditEvents[0].entry.resource_id, 'ext_evt_1');
     assert.equal(JSON.stringify(auditEvents[0].entry).includes('secret-key-value'), false);
+  });
+
+  it('ingestEvent rejects nested raw event metadata before appending', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_1', role: 'admin' };
+    const { repositories, validationCalls, auditEvents } = createRecordingValidationRepositories();
+    const { events } = createPostgresValidationServices(repositories);
+
+    const nested = await events.ingestEvent(ctx, {
+      event_id: 'ext_raw_nested',
+      metadata: { sample: { headers: { authorization: 'secret' } } },
+    });
+    assert.deepEqual(nested, { error: 'packet_payload_forbidden', status: 400 });
+
+    const evidenceNested = await events.ingestEvent(ctx, {
+      event_id: 'ext_raw_evidence',
+      evidence: { metadata: { request: { body: 'raw' } } },
+    });
+    assert.deepEqual(evidenceNested, { error: 'packet_payload_forbidden', status: 400 });
+
+    const camelPacketPayload = await events.ingestEvent(ctx, {
+      event_id: 'ext_raw_camel',
+      metadata: { packetPayload: 'deadbeef' },
+    });
+    assert.deepEqual(camelPacketPayload, { error: 'packet_payload_forbidden', status: 400 });
+
+    const camelRequestBody = await events.ingestEvent(ctx, {
+      event_id: 'ext_raw_camel_body',
+      metadata: { requestBody: 'raw' },
+    });
+    assert.deepEqual(camelRequestBody, { error: 'packet_payload_forbidden', status: 400 });
+
+    const compactRawPayload = await events.ingestEvent(ctx, {
+      event_id: 'ext_raw_compact',
+      metadata: { rawpayload: 'deadbeef' },
+    });
+    assert.deepEqual(compactRawPayload, { error: 'packet_payload_forbidden', status: 400 });
+
+    const compactRequestHeaders = await events.ingestEvent(ctx, {
+      event_id: 'ext_raw_compact_headers',
+      metadata: { requestheaders: { authorization: 'secret' } },
+    });
+    assert.deepEqual(compactRequestHeaders, { error: 'packet_payload_forbidden', status: 400 });
+
+    const directAuthorization = await events.ingestEvent(ctx, {
+      event_id: 'ext_raw_authorization',
+      metadata: { authorization: 'Bearer secret' },
+    });
+    assert.deepEqual(directAuthorization, { error: 'packet_payload_forbidden', status: 400 });
+
+    const variantAuthorization = await events.ingestEvent(ctx, {
+      event_id: 'ext_raw_authorization_variant',
+      evidence: { metadata: { Authorization: 'Bearer secret' } },
+    });
+    assert.deepEqual(variantAuthorization, { error: 'packet_payload_forbidden', status: 400 });
+
+    const hyphenAuthorization = await events.ingestEvent(ctx, {
+      event_id: 'ext_raw_authorization_hyphen',
+      metadata: { 'authori-zation': 'Bearer secret' },
+    });
+    assert.deepEqual(hyphenAuthorization, { error: 'packet_payload_forbidden', status: 400 });
+
+    assert.equal(validationCalls.some((c) => c.method === 'appendEventIdempotent'), false);
+    assert.equal(validationCalls.some((c) => c.method === 'appendEvidence'), false);
+    assert.equal(auditEvents.length, 0);
   });
 
   it('ingestEvent returns duplicate without append or ingest audit', async () => {
@@ -2195,6 +2322,7 @@ describe('postgres notification service adapters', () => {
       'createNotificationRule',
       'emitNotification',
       'processDueNotificationRetries',
+      'redriveNotificationDlq',
     ]);
   });
 
@@ -3156,6 +3284,7 @@ describe('postgres production release evidence service adapters', () => {
 function createRecordingWafPostureRepositories(overrides = {}) {
   const auditEvents = [];
   const repoCalls = [];
+  const evidenceCalls = [];
   const wafPosture = {};
   for (const method of WAF_POSTURE_REPOSITORY_METHODS) {
     wafPosture[method] = async (...args) => {
@@ -3165,15 +3294,39 @@ function createRecordingWafPostureRepositories(overrides = {}) {
     };
   }
   const audit = {
+    getLastAuditEntry: async () => overrides.getLastAuditEntry?.() ?? null,
     appendAuditEvent: async (entry) => {
       auditEvents.push(entry);
       return entry;
     },
+    withTenantAuditLock: async (_tenantId, callback) => {
+      const prior = overrides.getLastAuditEntry ? await overrides.getLastAuditEntry() : null;
+      return callback({ client: {}, prior });
+    },
   };
   const coreCatalog = {
     getTargetGroup: overrides.getTargetGroup ?? (async () => ({ id: 'tg_1' })),
+    listTargetGroups: overrides.listTargetGroups ?? (async () => [{ id: 'tg_1', settings_json: {} }]),
+    listEnvironments: overrides.listEnvironments ?? (async () => []),
   };
-  return { repositories: { wafPosture, audit, coreCatalog }, auditEvents, repoCalls };
+  const validationEvidence = {
+    getTestRun: async (...args) => {
+      evidenceCalls.push({ method: 'getTestRun', args });
+      if (overrides.getTestRun) return overrides.getTestRun(...args);
+      return { id: 'run_bound_1', target_group_id: 'tg_1' };
+    },
+    listRunEvents: async (...args) => {
+      evidenceCalls.push({ method: 'listRunEvents', args });
+      if (overrides.listRunEvents) return overrides.listRunEvents(...args);
+      return [];
+    },
+  };
+  return {
+    repositories: { wafPosture, audit, coreCatalog, validationEvidence },
+    auditEvents,
+    repoCalls,
+    evidenceCalls,
+  };
 }
 
 describe('postgres WAF posture service adapters', () => {
@@ -3185,6 +3338,11 @@ describe('postgres WAF posture service adapters', () => {
       'updateWafAsset',
       'listCurrentPostureSnapshots',
       'getCurrentPostureSnapshot',
+      'listPostureSnapshotsSince',
+      'listLatestValidationSummariesByAsset',
+      'listTenantCveAssetMatches',
+      'listWafFindingIdsByAsset',
+      'listWafActionItemIdsByAsset',
       'listWafValidationRuns',
       'createWafValidationRun',
       'getWafValidationRun',
@@ -3207,6 +3365,15 @@ describe('postgres WAF posture service adapters', () => {
       'getWafAsset',
       'patchWafAsset',
       'getWafCoverage',
+      'getWafCoverageVendors',
+      'getWafCoverageEntities',
+      'getWafCoverageGeography',
+      'getWafCoverageCriticality',
+      'getWafRiskRoadmap',
+      'getWafVendorConsolidation',
+      'listWafProducts',
+      'listScenarioIntakes',
+      'submitScenarioIntake',
       'createWafValidation',
       'listWafValidations',
       'getWafValidation',
@@ -3219,6 +3386,7 @@ describe('postgres WAF posture service adapters', () => {
       'pollConnector',
       'listConnectorSnapshots',
       'disableConnector',
+      'exportWafReport',
     ]);
   });
 
@@ -3244,6 +3412,23 @@ describe('postgres WAF posture service adapters', () => {
     assert.throws(
       () => createPostgresWafPostureServices(repositories),
       /requires audit\.appendAuditEvent/,
+    );
+    repositories.audit.appendAuditEvent = async () => null;
+    delete repositories.audit.getLastAuditEntry;
+    assert.throws(
+      () => createPostgresWafPostureServices(repositories),
+      /requires audit\.getLastAuditEntry/,
+    );
+    repositories.audit.getLastAuditEntry = async () => null;
+    delete repositories.validationEvidence;
+    assert.throws(
+      () => createPostgresWafPostureServices(repositories),
+      /requires repositories\.validationEvidence/,
+    );
+    repositories.validationEvidence = { getTestRun: async () => null };
+    assert.throws(
+      () => createPostgresWafPostureServices(repositories),
+      /requires validationEvidence\.listRunEvents/,
     );
   });
 
@@ -3287,11 +3472,52 @@ describe('postgres WAF posture service adapters', () => {
     assert.equal(/\bcreateServer\b/.test(WAF_POSTURE_ADAPTER_SOURCE), false);
   });
 
+  it('rejects bound test_run_id when test run is missing or target group mismatches', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    const asset = {
+      id: 'waf_1',
+      target_group_id: 'tg_1',
+      expected_waf_required: true,
+    };
+    const { repositories, repoCalls } = createRecordingWafPostureRepositories({
+      getWafAsset: async () => asset,
+      getTestRun: async () => null,
+    });
+    const svc = createPostgresWafPostureServices(repositories);
+
+    const missing = await svc.createWafValidation(ctx, {
+      waf_asset_id: 'waf_1',
+      modes: ['marker'],
+      test_run_id: 'run_missing',
+    });
+    assert.equal(missing.error, 'test_run_not_found');
+    assert.equal(missing.status, 404);
+    assert.equal(repoCalls.some((c) => c.method === 'createWafValidationRun'), false);
+
+    repositories.validationEvidence.getTestRun = async () => ({
+      id: 'run_other_tg',
+      target_group_id: 'tg_other',
+    });
+    const mismatch = await svc.createWafValidation(ctx, {
+      waf_asset_id: 'waf_1',
+      modes: ['marker'],
+      test_run_id: 'run_other_tg',
+    });
+    assert.equal(mismatch.error, 'invalid_request');
+    assert.equal(mismatch.status, 400);
+    assert.match(mismatch.message, /target group/i);
+    assert.equal(repoCalls.some((c) => c.method === 'createWafValidationRun'), false);
+  });
+
   it('forwards optional test_run_id to createWafValidationRun', async () => {
     const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
     const fixed = new Date('2026-07-02T12:00:00.000Z');
     const { repositories, repoCalls } = createRecordingWafPostureRepositories({
-      getWafAsset: async () => ({ id: 'waf_1', expected_waf_required: true }),
+      getWafAsset: async () => ({
+        id: 'waf_1',
+        target_group_id: 'tg_1',
+        expected_waf_required: true,
+      }),
       createWafValidationRun: async (_ctx, record) => record,
     });
     const svc = createPostgresWafPostureServices(repositories, {
@@ -3335,6 +3561,124 @@ describe('postgres WAF posture service adapters', () => {
     assert.equal(items[0].id, 'drf_1');
     assert.equal(items[0].after_summary.posture_status, 'underprotected');
     assert.equal(repoCalls.filter((c) => c.method === 'listWafDriftEvents').length, 1);
+  });
+
+  it('derives underprotected posture from bound probe/agent events by nonce without explicit scenarios', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    const nonceHash = 'sha256:marker_leak_nonce';
+    const { fixed, repositories, repoCalls, evidenceCalls, run } = wafFinalizeFixture({
+      repo: {
+        listRunEvents: async (_ctx, runId, options = {}) => {
+          assert.equal(runId, 'run_bound_1');
+          if (options.signalType === 'probe_result') {
+            return [{
+              id: 'evt_probe_1',
+              nonce_hash: nonceHash,
+              metadata: { external_result: 'blocked' },
+            }];
+          }
+          if (options.signalType === 'agent_observation') {
+            return [{
+              id: 'evt_agent_1',
+              nonce_hash: nonceHash,
+              metadata: { waf_marker: true, marker_type: 'header' },
+            }];
+          }
+          return [];
+        },
+        finalizeWafValidationBundle: async (_ctx, bundle) => ({
+          validation_run: { ...run, status: 'finalized' },
+          snapshot: {
+            id: 'snap_pg_1',
+            waf_asset_id: 'waf_1',
+            status: bundle.snapshot.status,
+            reason_codes: bundle.snapshot.reason_codes,
+            coverage_required: true,
+            risk_score: 0,
+            confidence: 0.5,
+            source_mix_json: bundle.snapshot.source_mix_json,
+            created_at: fixed.toISOString(),
+            is_current: true,
+          },
+        }),
+      },
+    });
+    const svc = createPostgresWafPostureServices(repositories, {
+      now: () => fixed,
+      newId: (prefix) => (prefix === 'finding' ? 'fnd_marker_leak' : 'snap_pg_1'),
+    });
+
+    const result = await svc.finalizeWafValidation(ctx, run.id, {});
+    assert.equal(result.posture.status, 'underprotected');
+    assert.ok(result.posture.reason_codes.includes('marker_rule_not_blocking'));
+
+    const finalizeCall = repoCalls.find((c) => c.method === 'finalizeWafValidationBundle');
+    assert.ok(finalizeCall);
+    assert.equal(finalizeCall.args[1].run_updates.summary_json.validation_failed, true);
+    assert.equal(finalizeCall.args[1].run_updates.summary_json.waf_detected, true);
+    assert.equal(finalizeCall.args[1].snapshot.source_mix_json.external, true);
+    assert.equal(finalizeCall.args[1].snapshot.source_mix_json.agent, true);
+    const scenario = finalizeCall.args[1].scenarios[0];
+    assert.equal(scenario.observed_action, 'allow');
+    assert.equal(scenario.passed, false);
+    assert.equal(scenario.evidence_summary_json.nonce_hash, nonceHash);
+    assert.equal(scenario.evidence_summary_json.observed_at_agent, true);
+
+    assert.equal(evidenceCalls.filter((c) => c.method === 'listRunEvents').length, 2);
+    assert.equal(evidenceCalls[0].args[0].tenantId, 'ten_demo');
+    assert.equal(repoCalls.some((c) => c.method === 'upsertWafPostureFinding'), true);
+  });
+
+  it('derives protected posture from bound blocked probe without agent marker leakage', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    const nonceHash = 'sha256:blocked_only_nonce';
+    const { fixed, repositories, repoCalls, run } = wafFinalizeFixture({
+      repo: {
+        listRunEvents: async (_ctx, _runId, options = {}) => {
+          if (options.signalType === 'probe_result') {
+            return [{
+              id: 'evt_probe_blocked',
+              nonce_hash: nonceHash,
+              metadata: {
+                external_result: 'blocked',
+                waf_fingerprint_detected: true,
+                waf_product_hint: 'cloudflare',
+              },
+            }];
+          }
+          return [];
+        },
+        finalizeWafValidationBundle: async (_ctx, bundle) => ({
+          validation_run: { ...run, status: 'finalized' },
+          snapshot: {
+            id: 'snap_prot',
+            waf_asset_id: 'waf_1',
+            status: bundle.snapshot.status,
+            reason_codes: bundle.snapshot.reason_codes,
+            coverage_required: true,
+            risk_score: 0,
+            confidence: 0.85,
+            source_mix_json: bundle.snapshot.source_mix_json,
+            created_at: fixed.toISOString(),
+            is_current: true,
+          },
+        }),
+        upsertWafPostureFinding: async () => {
+          throw new Error('unexpected finding upsert for protected posture');
+        },
+      },
+    });
+    const svc = createPostgresWafPostureServices(repositories, {
+      now: () => fixed,
+      newId: () => 'snap_prot',
+    });
+
+    const result = await svc.finalizeWafValidation(ctx, run.id, {});
+    assert.equal(result.posture.status, 'protected');
+    const finalizeCall = repoCalls.find((c) => c.method === 'finalizeWafValidationBundle');
+    assert.equal(finalizeCall.args[1].run_updates.summary_json.validation_passed, true);
+    assert.equal(finalizeCall.args[1].scenarios[0].passed, true);
+    assert.equal(repoCalls.some((c) => c.method === 'upsertWafPostureFinding'), false);
   });
 
   it('rejects naked protected finalize before repository finalize or audit', async () => {
@@ -3381,6 +3725,7 @@ describe('postgres WAF posture service adapters', () => {
       getWafValidationRun: async () => run,
       getWafAsset: async () => asset,
       getCurrentPostureSnapshot: async () => null,
+      listTenantCveAssetMatches: async () => new Map(),
       finalizeWafValidationBundle: async () => ({
         validation_run: { ...run, status: 'finalized' },
         snapshot: {
@@ -3462,7 +3807,10 @@ describe('postgres WAF posture service adapters', () => {
           expected_action: 'block',
           observed_action: 'block',
           passed: true,
-          evidence_summary: { marker_seen: true },
+          evidence_summary: {
+            nonce_hash: 'e'.repeat(64),
+            observed_at_agent: true,
+          },
         },
       ],
     });
@@ -3578,6 +3926,80 @@ describe('postgres WAF posture service adapters', () => {
     assert.equal(auditEvents.length, 0);
   });
 
+  it('exports metadata-only WAF reports with custody chain and sanitized fields', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    const { repositories, auditEvents, repoCalls } = createRecordingWafPostureRepositories({
+      getLastAuditEntry: async () => ({ entry_hash: 'hash_prev_waf' }),
+      listWafAssets: async () => [{
+        id: 'waf_1',
+        target_group_id: 'tg_1',
+        canonical_url: 'https://app.example.com',
+        business_criticality: 'high',
+        status: 'active',
+      }],
+      listCurrentPostureSnapshots: async () => [{
+        id: 'snap_1',
+        waf_asset_id: 'waf_1',
+        status: 'protected',
+        reason_codes: ['marker_blocked'],
+        detected_vendor: 'cloudflare',
+        risk_score: 3,
+        created_at: '2026-07-02T12:00:00.000Z',
+      }],
+      listWafValidationRuns: async () => [{
+        id: 'waf_val_1',
+        waf_asset_id: 'waf_1',
+        mode: 'marker',
+        status: 'finalized',
+        created_at: '2026-07-02T12:00:00.000Z',
+      }],
+      listWafScenarioResultsForRun: async () => [{
+        scenario_family: 'marker',
+        expected_action: 'block',
+        observed_action: 'block',
+        passed: true,
+        confidence: 0.9,
+        evidence_summary_json: {
+          nonce_hash: 'nonce_hash_only',
+          harmless_extra_field: 'drop-me',
+        },
+      }],
+      listWafDriftEvents: async () => [],
+      listConnectors: async () => [{
+        id: 'conn_1',
+        provider: 'cloudflare',
+        name: 'Edge',
+        status: 'active',
+        config: {
+          read_only: true,
+          owner_hint: 'edge-team',
+          api_token: 'must-not-render',
+        },
+      }],
+    });
+    const svc = createPostgresWafPostureServices(repositories);
+
+    const technical = await svc.exportWafReport(ctx, 'technical_evidence', 'json');
+    assert.equal(technical.payload.validation_runs[0].scenario_results[0].evidence_summary.nonce_hash, 'nonce_hash_only');
+    assert.equal(
+      technical.payload.validation_runs[0].scenario_results[0].evidence_summary.harmless_extra_field,
+      undefined,
+    );
+    assert.equal(technical.custody.previous_audit_hash, 'hash_prev_waf');
+    assert.equal(technical.custody.previous_tenant_audit_hash, 'hash_prev_waf');
+
+    const connector = await svc.exportWafReport(ctx, 'connector_health', 'markdown');
+    assert.match(connector.content, /previous_audit_hash: hash_prev_waf/);
+    assert.equal(connector.payload.connectors[0].config.read_only, true);
+    assert.equal(connector.payload.connectors[0].config.owner_hint, 'edge-team');
+    assert.equal(connector.payload.connectors[0].config.api_token, undefined);
+
+    assert.equal(auditEvents.filter((entry) => entry.action === 'waf.report.exported').length, 2);
+    assert.equal(repoCalls.filter((call) => call.method === 'listWafScenarioResultsForRun').length, 1);
+    assert.equal(JSON.stringify(technical).includes('must-not-render'), false);
+    assert.equal(JSON.stringify(connector).includes('drop-me'), false);
+  });
+
   it('validateConnector marks active or error locally without outbound calls', async () => {
     const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
     const fixed = new Date('2026-07-02T12:00:00.000Z');
@@ -3604,7 +4026,8 @@ describe('postgres WAF posture service adapters', () => {
 
     const active = await svc.validateConnector(ctx, 'conn_ok');
     assert.equal(active.status, 'active');
-    assert.equal(active.capabilities.length > 0, true);
+    assert.equal(active.capabilities.read_only_metadata, true);
+    assert.equal(active.capabilities.outbound_polling, false);
     assert.equal(repoCalls.filter((c) => c.method === 'updateConnectorStatus').length, 1);
     assert.equal(auditEvents[0].action, 'connector.validated');
 
@@ -3725,5 +4148,2225 @@ describe('postgres WAF posture service adapters', () => {
     assert.equal(repoCalls.filter((c) => c.method === 'patchWafDriftEvent').length, 1);
     assert.equal(auditEvents[0].action, 'waf.drift.updated');
     assert.equal(auditEvents[0].metadata.status, 'acknowledged');
+  });
+});
+
+function createRecordingWafOrchestratorRepositories(overrides = {}) {
+  const auditEvents = [];
+  const repoCalls = [];
+  const wafOrchestrator = {};
+  for (const method of WAF_ORCHESTRATOR_REPOSITORY_METHODS) {
+    wafOrchestrator[method] = async (...args) => {
+      repoCalls.push({ method, args });
+      if (overrides[method]) return overrides[method](...args);
+      return null;
+    };
+  }
+  wafOrchestrator.claimValidationPlanExecution = async (...args) => {
+    repoCalls.push({ method: 'claimValidationPlanExecution', args });
+    if (overrides.claimValidationPlanExecution) return overrides.claimValidationPlanExecution(...args);
+    const [ctx, id] = args;
+    return wafOrchestrator.getValidationPlan(ctx, id);
+  };
+  wafOrchestrator.stageValidationPlanDelegation = async (ctx, id, lockToken, patch) => {
+    repoCalls.push({ method: 'stageValidationPlanDelegation', args: [ctx, id, lockToken, patch] });
+    if (overrides.stageValidationPlanDelegation) {
+      return overrides.stageValidationPlanDelegation(ctx, id, lockToken, patch);
+    }
+    const plan = await wafOrchestrator.getValidationPlan(ctx, id);
+    return {
+      ...(plan ?? { id }),
+      delegated_jobs: patch.delegated_jobs,
+      updated_at: patch.updated_at,
+    };
+  };
+  wafOrchestrator.finishValidationPlanExecution = async (ctx, id, lockToken, patch) => {
+    repoCalls.push({ method: 'finishValidationPlanExecution', args: [ctx, id, lockToken, patch] });
+    if (overrides.finishValidationPlanExecution) {
+      return overrides.finishValidationPlanExecution(ctx, id, lockToken, patch);
+    }
+    if (overrides.updateValidationPlan) {
+      return overrides.updateValidationPlan(ctx, id, patch);
+    }
+    return { id, ...patch };
+  };
+  wafOrchestrator.releaseValidationPlanExecution = async (...args) => {
+    repoCalls.push({ method: 'releaseValidationPlanExecution', args });
+    if (overrides.releaseValidationPlanExecution) return overrides.releaseValidationPlanExecution(...args);
+    return null;
+  };
+  wafOrchestrator.claimRetestExecution = async (...args) => {
+    repoCalls.push({ method: 'claimRetestExecution', args });
+    if (overrides.claimRetestExecution) return overrides.claimRetestExecution(...args);
+    const [ctx, id] = args;
+    return wafOrchestrator.getRetestRequest(ctx, id);
+  };
+  wafOrchestrator.stageRetestDelegation = async (ctx, id, lockToken, patch) => {
+    repoCalls.push({ method: 'stageRetestDelegation', args: [ctx, id, lockToken, patch] });
+    if (overrides.stageRetestDelegation) {
+      return overrides.stageRetestDelegation(ctx, id, lockToken, patch);
+    }
+    const retest = await wafOrchestrator.getRetestRequest(ctx, id);
+    return {
+      ...(retest ?? { id }),
+      delegated_jobs: patch.delegated_jobs,
+      updated_at: patch.updated_at,
+    };
+  };
+  wafOrchestrator.finishRetestExecution = async (ctx, id, lockToken, patch) => {
+    repoCalls.push({ method: 'finishRetestExecution', args: [ctx, id, lockToken, patch] });
+    if (overrides.finishRetestExecution) {
+      return overrides.finishRetestExecution(ctx, id, lockToken, patch);
+    }
+    if (overrides.updateRetestRequest) {
+      return overrides.updateRetestRequest(ctx, id, patch);
+    }
+    return { id, ...patch };
+  };
+  wafOrchestrator.releaseRetestExecution = async (...args) => {
+    repoCalls.push({ method: 'releaseRetestExecution', args });
+    if (overrides.releaseRetestExecution) return overrides.releaseRetestExecution(...args);
+    return null;
+  };
+  const wafPosture = {
+    patchWafDriftEvent: async (...args) => {
+      repoCalls.push({ method: 'patchWafDriftEvent', args });
+      if (overrides.patchWafDriftEvent) return overrides.patchWafDriftEvent(...args);
+      return { id: 'drift_1', status: 'retest_pending', waf_asset_id: 'waf_1' };
+    },
+    listWafAssets: async (...args) => {
+      repoCalls.push({ method: 'listWafAssets', args });
+      if (overrides.listWafAssets) return overrides.listWafAssets(...args);
+      return [
+        {
+          id: 'waf_asset_1',
+          target_group_id: 'tg_1',
+          target_id: 'tgt_1',
+        },
+      ];
+    },
+  };
+  const coreCatalog = {
+    getTargetGroup: async (...args) => {
+      repoCalls.push({ method: 'getTargetGroup', args });
+      if (overrides.getTargetGroup) return overrides.getTargetGroup(...args);
+      return { id: 'tg_1' };
+    },
+  };
+  const audit = {
+    appendAuditEvent: async (event) => {
+      auditEvents.push(event);
+    },
+  };
+  return { repositories: { wafOrchestrator, wafPosture, coreCatalog, audit }, auditEvents, repoCalls };
+}
+
+describe('postgres WAF orchestrator service adapters', () => {
+  it('builds retest results only from terminal delegated runs with verdict evidence', () => {
+    const delegatedJobs = [
+      {
+        test_run_id: 'run_a',
+        probe_job_id: 'pjob_a',
+        scenario: 'marker',
+        waf_asset_id: 'waf_1',
+      },
+    ];
+    assert.equal(
+      buildRetestResultsFromDelegatedRuns(delegatedJobs, {
+        run_a: { status: 'running', verdict: null },
+      }),
+      null,
+    );
+    const ready = buildRetestResultsFromDelegatedRuns(delegatedJobs, {
+      run_a: { status: 'verdicted', verdict: { verdict: 'pass' } },
+    });
+    assert.equal(ready.validation_passed, true);
+    assert.equal(ready.results[0].passed, true);
+    assert.equal(ready.results[0].observed_action, 'block');
+  });
+
+  it('maps correlation verdicts protected and bypassable into retest scenario results', () => {
+    const delegatedJobs = [
+      {
+        test_run_id: 'run_pass',
+        probe_job_id: 'pjob_pass',
+        scenario: 'marker',
+        waf_asset_id: 'waf_1',
+        check_id: 'waf.marker_rule.safe',
+      },
+      {
+        test_run_id: 'run_fail',
+        probe_job_id: 'pjob_fail',
+        scenario: 'fingerprint',
+        waf_asset_id: 'waf_1',
+        check_id: 'waf.fingerprint.safe',
+      },
+    ];
+    const results = buildRetestResultsFromDelegatedRuns(delegatedJobs, {
+      run_pass: {
+        status: 'verdicted',
+        check_id: 'waf.marker_rule.safe',
+        probe_job_id: 'pjob_pass',
+        verdict: { verdict: 'protected' },
+      },
+      run_fail: {
+        status: 'verdicted',
+        check_id: 'waf.fingerprint.safe',
+        probe_job_id: 'pjob_fail',
+        verdict: { verdict: 'bypassable' },
+      },
+    });
+    assert.equal(results.validation_passed, false);
+    assert.equal(results.validation_failed, true);
+    assert.equal(results.results[0].passed, true);
+    assert.equal(results.results[1].passed, false);
+  });
+
+  it('upsertDelegationJobByReservation replaces jobs by reservation_id', () => {
+    const initial = [
+      {
+        reservation_id: 'res_1',
+        status: 'pending_start',
+        scenario: 'marker',
+      },
+    ];
+    const updated = upsertDelegationJobByReservation(initial, 'res_1', {
+      reservation_id: 'res_1',
+      status: 'delegated',
+      test_run_id: 'run_1',
+      probe_job_id: 'pjob_1',
+      scenario: 'marker',
+    });
+    assert.equal(updated.length, 1);
+    assert.equal(updated[0].status, 'delegated');
+    assert.equal(updated[0].test_run_id, 'run_1');
+
+    const appended = upsertDelegationJobByReservation(updated, 'res_2', {
+      reservation_id: 'res_2',
+      status: 'pending_start',
+      scenario: 'fingerprint',
+    });
+    assert.equal(appended.length, 2);
+    assert.equal(appended[1].scenario, 'fingerprint');
+  });
+
+  it('exposes stable repository and service method lists', () => {
+    assert.deepEqual(POSTGRES_WAF_ORCHESTRATOR_SERVICE_METHODS, [
+      'listValidationPlans',
+      'createValidationPlan',
+      'getScheduledPlans',
+      'getRunnablePlans',
+      'cancelValidationPlan',
+      'approveBaseline',
+      'requestRetest',
+      'listRetests',
+      'executeValidationPlan',
+      'executeRetest',
+      'completeRetest',
+    ]);
+    assert.equal(WAF_ORCHESTRATOR_REPOSITORY_METHODS.length, 24);
+    assert.ok(WAF_ORCHESTRATOR_REPOSITORY_METHODS.includes('cancelValidationPlanExecution'));
+    assert.ok(WAF_ORCHESTRATOR_REPOSITORY_METHODS.includes('claimValidationPlanExecution'));
+    assert.ok(WAF_ORCHESTRATOR_REPOSITORY_METHODS.includes('finishRetestExecution'));
+    assert.ok(WAF_ORCHESTRATOR_REPOSITORY_METHODS.includes('completeRetestWithDriftAndAudit'));
+  });
+
+  it('cancelValidationPlan clears execution lease via cancelValidationPlanExecution and audits previous_state', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    const fixed = new Date('2026-07-02T12:00:00.000Z');
+    const scheduledPlan = {
+      id: 'plan_1',
+      target_group_id: 'tg_1',
+      mode: 'manual',
+      state: 'scheduled',
+      scenarios: ['marker'],
+      max_concurrent: 1,
+      timeout_ms: 60_000,
+      delegated_jobs: [],
+      created_at: fixed.toISOString(),
+      updated_at: fixed.toISOString(),
+    };
+    const { repositories, auditEvents, repoCalls } = createRecordingWafOrchestratorRepositories({
+      getValidationPlan: async () => scheduledPlan,
+      cancelValidationPlanExecution: async (_ctx, planId, patch) => ({
+        ...scheduledPlan,
+        id: planId,
+        state: 'cancelled',
+        cancelled_at: patch.cancelled_at,
+        updated_at: patch.updated_at,
+        execution_lock_token: null,
+        execution_lock_expires_at: null,
+      }),
+      updateValidationPlan: async () => {
+        throw new Error('cancel must not use updateValidationPlan');
+      },
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, { now: () => fixed });
+
+    const result = await svc.cancelValidationPlan(ctx, 'plan_1');
+    assert.equal(result.error, undefined);
+    assert.equal(result.validation_plan.state, 'cancelled');
+    assert.equal(result.validation_plan.cancelled_at, fixed.toISOString());
+    const cancelCall = repoCalls.find((c) => c.method === 'cancelValidationPlanExecution');
+    assert.ok(cancelCall);
+    assert.equal(cancelCall.args[1], 'plan_1');
+    assert.equal(cancelCall.args[2].cancelled_at, fixed.toISOString());
+    assert.equal(repoCalls.some((c) => c.method === 'updateValidationPlan'), false);
+    const cancelledAudit = auditEvents.find((e) => e.action === 'waf.validation_plan.cancelled');
+    assert.ok(cancelledAudit);
+    assert.equal(cancelledAudit.metadata.previous_state, 'scheduled');
+    assert.equal(cancelledAudit.metadata.target_group_id, 'tg_1');
+  });
+
+  it('cancelValidationPlan best-effort cancels delegated test runs and audits cancelled_run_ids', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    const fixed = new Date('2026-07-02T12:00:00.000Z');
+    const delegatedJobs = [
+      {
+        test_run_id: 'run_del_1',
+        probe_job_id: 'pjob_del_1',
+        scenario: 'marker',
+        waf_asset_id: 'waf_asset_1',
+        check_id: 'waf.marker_rule.safe',
+      },
+      {
+        test_run_id: 'run_del_2',
+        probe_job_id: 'pjob_del_2',
+        scenario: 'fingerprint',
+        waf_asset_id: 'waf_asset_1',
+        check_id: 'waf.fingerprint.safe',
+      },
+    ];
+    const runningPlan = {
+      id: 'plan_1',
+      target_group_id: 'tg_1',
+      mode: 'manual',
+      state: 'running',
+      scenarios: ['marker', 'fingerprint'],
+      max_concurrent: 2,
+      timeout_ms: 60_000,
+      delegated_jobs: delegatedJobs,
+      created_at: fixed.toISOString(),
+      updated_at: fixed.toISOString(),
+    };
+    const cancelledRunIds = [];
+    const { repositories, auditEvents } = createRecordingWafOrchestratorRepositories({
+      getValidationPlan: async () => runningPlan,
+      cancelValidationPlanExecution: async (_ctx, planId, patch) => ({
+        ...runningPlan,
+        id: planId,
+        state: 'cancelled',
+        cancelled_at: patch.cancelled_at,
+        updated_at: patch.updated_at,
+        execution_lock_token: null,
+        execution_lock_expires_at: null,
+      }),
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      now: () => fixed,
+      testRuns: {
+        cancelTestRun: async (_ctx, runId) => {
+          cancelledRunIds.push(runId);
+        },
+      },
+    });
+
+    const result = await svc.cancelValidationPlan(ctx, 'plan_1');
+    assert.equal(result.error, undefined);
+    assert.equal(result.validation_plan.state, 'cancelled');
+    assert.deepEqual(cancelledRunIds, ['run_del_1', 'run_del_2']);
+    const cancelledAudit = auditEvents.find((e) => e.action === 'waf.validation_plan.cancelled');
+    assert.ok(cancelledAudit);
+    assert.deepEqual(cancelledAudit.metadata.cancelled_run_ids, ['run_del_1', 'run_del_2']);
+  });
+
+  it('cancelValidationPlan cancels delegated runs from post-cancel row when pre-read lacked delegated_jobs', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    const fixed = new Date('2026-07-02T12:00:00.000Z');
+    const delegatedJobsFromCancel = [
+      {
+        test_run_id: 'run_race_1',
+        probe_job_id: 'pjob_race_1',
+        scenario: 'marker',
+        waf_asset_id: 'waf_asset_1',
+        check_id: 'waf.marker_rule.safe',
+      },
+    ];
+    const runningPlanStaleRead = {
+      id: 'plan_1',
+      target_group_id: 'tg_1',
+      mode: 'manual',
+      state: 'running',
+      scenarios: ['marker'],
+      max_concurrent: 1,
+      timeout_ms: 60_000,
+      delegated_jobs: [],
+      created_at: fixed.toISOString(),
+      updated_at: fixed.toISOString(),
+    };
+    const cancelledRunIds = [];
+    const { repositories, auditEvents } = createRecordingWafOrchestratorRepositories({
+      getValidationPlan: async () => runningPlanStaleRead,
+      cancelValidationPlanExecution: async (_ctx, planId, patch) => ({
+        ...runningPlanStaleRead,
+        id: planId,
+        state: 'cancelled',
+        cancelled_at: patch.cancelled_at,
+        updated_at: patch.updated_at,
+        execution_lock_token: null,
+        execution_lock_expires_at: null,
+        delegated_jobs: delegatedJobsFromCancel,
+      }),
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      now: () => fixed,
+      testRuns: {
+        cancelTestRun: async (_ctx, runId) => {
+          cancelledRunIds.push(runId);
+        },
+      },
+    });
+
+    const result = await svc.cancelValidationPlan(ctx, 'plan_1');
+    assert.equal(result.error, undefined);
+    assert.equal(result.validation_plan.state, 'cancelled');
+    assert.deepEqual(cancelledRunIds, ['run_race_1']);
+    const cancelledAudit = auditEvents.find((e) => e.action === 'waf.validation_plan.cancelled');
+    assert.ok(cancelledAudit);
+    assert.deepEqual(cancelledAudit.metadata.cancelled_run_ids, ['run_race_1']);
+  });
+
+  it('fails early when orchestrator, catalog, posture, or audit dependencies are missing', () => {
+    assert.throws(
+      () => createPostgresWafOrchestratorServices({}),
+      /requires repositories\.wafOrchestrator/,
+    );
+    const { repositories } = createRecordingWafOrchestratorRepositories();
+    delete repositories.wafPosture.patchWafDriftEvent;
+    assert.throws(
+      () => createPostgresWafOrchestratorServices(repositories),
+      /requires wafPosture\.patchWafDriftEvent/,
+    );
+    const { repositories: repos2 } = createRecordingWafOrchestratorRepositories();
+    delete repos2.wafPosture.listWafAssets;
+    assert.throws(
+      () => createPostgresWafOrchestratorServices(repos2),
+      /wafPosture\.listWafAssets\(\)/,
+    );
+  });
+
+  it('does not reference dev-json memory store in adapter source', () => {
+    assert.equal(/\bgetStore\b/.test(WAF_ORCHESTRATOR_ADAPTER_SOURCE), false);
+    assert.equal(/\bpersistStore\b/.test(WAF_ORCHESTRATOR_ADAPTER_SOURCE), false);
+    assert.equal(/services\/wafOrchestrator/.test(WAF_ORCHESTRATOR_ADAPTER_SOURCE), false);
+    assert.equal(/probeCoordinator/.test(WAF_ORCHESTRATOR_ADAPTER_SOURCE), false);
+    assert.equal(/simulateProbeResult/.test(WAF_ORCHESTRATOR_ADAPTER_SOURCE), false);
+    assert.equal(/createProbeJob\(/.test(WAF_ORCHESTRATOR_ADAPTER_SOURCE), false);
+  });
+
+  it('re-exports WAF orchestrator symbols from serviceAdapters barrel', () => {
+    assert.match(ADAPTER_SOURCE, /createPostgresWafOrchestratorServices/);
+    assert.match(ADAPTER_SOURCE, /POSTGRES_WAF_ORCHESTRATOR_SERVICE_METHODS/);
+  });
+
+  it('0011 migration guards orchestrator tenant unique constraints idempotently', () => {
+    const sql = readFileSync(path.join(ROOT, 'db/migrations/0011_waf_orchestrator.sql'), 'utf8');
+    for (const conname of [
+      'waf_validation_plans_tenant_id_id_key',
+      'waf_baseline_approvals_tenant_id_id_key',
+      'waf_retest_requests_tenant_id_id_key',
+    ]) {
+      assert.match(sql, new RegExp(`conname = '${conname}'`));
+    }
+  });
+
+  it('creates validation plan with audit and target group check', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    const fixed = new Date('2026-07-02T12:00:00.000Z');
+    const { repositories, auditEvents, repoCalls } = createRecordingWafOrchestratorRepositories({
+      createValidationPlan: async (_ctx, record) => ({
+        ...record,
+        scenarios: record.scenarios,
+        delegated_jobs: [],
+      }),
+      listValidationPlans: async () => [],
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      now: () => fixed,
+      newId: () => 'plan_pg_1',
+    });
+
+    const created = await svc.createValidationPlan(ctx, {
+      target_group_id: 'tg_1',
+      scenarios: ['marker'],
+    });
+    assert.equal(created.validation_plan.id, 'plan_pg_1');
+    assert.equal(repoCalls[0].method, 'getTargetGroup');
+    assert.equal(repoCalls.find((c) => c.method === 'createValidationPlan').args[1].id, 'plan_pg_1');
+    assert.equal(auditEvents[0].action, 'waf.validation_plan.created');
+  });
+
+  it('fail-closes executeValidationPlan without mutating plan state', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    const draftPlan = {
+      id: 'plan_1',
+      target_group_id: 'tg_1',
+      mode: 'manual',
+      state: 'draft',
+      scenarios: ['marker'],
+      max_concurrent: 1,
+      timeout_ms: 60_000,
+      delegated_jobs: [],
+      created_at: FIXED_NOW.toISOString(),
+      updated_at: FIXED_NOW.toISOString(),
+    };
+    const { repositories, repoCalls } = createRecordingWafOrchestratorRepositories({
+      getValidationPlan: async () => draftPlan,
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories);
+    const result = await svc.executeValidationPlan(ctx, 'plan_1', {});
+    assert.equal(result.error, 'waf_orchestrator_execution_not_ready');
+    assert.equal(result.status, 422);
+    assert.equal(repoCalls.some((c) => c.method === 'updateValidationPlan'), false);
+  });
+
+  it('rejects executeValidationPlan without signed-worker probeMode before startTestRun', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    let startCalled = false;
+    const { repositories, repoCalls } = createRecordingWafOrchestratorRepositories({
+      getValidationPlan: async () => ({
+        id: 'plan_1',
+        target_group_id: 'tg_1',
+        mode: 'manual',
+        state: 'draft',
+        scenarios: ['marker'],
+        max_concurrent: 1,
+        timeout_ms: 60_000,
+        delegated_jobs: [],
+        created_at: FIXED_NOW.toISOString(),
+        updated_at: FIXED_NOW.toISOString(),
+      }),
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      testRuns: {
+        startTestRun: async () => {
+          startCalled = true;
+          return { run: { id: 'run_x' }, probe_job: { id: 'pjob_x' } };
+        },
+      },
+    });
+
+    const result = await svc.executeValidationPlan(ctx, 'plan_1', {});
+    assert.equal(result.error, 'waf_orchestrator_signed_worker_required');
+    assert.equal(result.status, 422);
+    assert.match(result.message, /signed probe-worker/i);
+    assert.equal(startCalled, false);
+    assert.equal(repoCalls.some((c) => c.method === 'getTargetGroup'), false);
+    assert.equal(repoCalls.some((c) => c.method === 'listWafAssets'), false);
+    assert.equal(repoCalls.some((c) => c.method === 'updateValidationPlan'), false);
+  });
+
+  it('delegates one safe scenario through startTestRun and completes plan', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    const fixed = new Date('2026-07-02T12:00:00.000Z');
+    let startBody;
+    const { repositories, auditEvents, repoCalls } = createRecordingWafOrchestratorRepositories({
+      getValidationPlan: async () => ({
+        id: 'plan_1',
+        target_group_id: 'tg_1',
+        mode: 'manual',
+        state: 'draft',
+        scenarios: ['marker'],
+        max_concurrent: 1,
+        timeout_ms: 60_000,
+        delegated_jobs: [],
+        created_at: fixed.toISOString(),
+        updated_at: fixed.toISOString(),
+      }),
+      getTargetGroup: async () => ({
+        id: 'tg_1',
+        targets: [{ id: 'tgt_1', kind: 'fqdn', value: 'edge.example' }],
+      }),
+      updateValidationPlan: async (_ctx, planId, patch) => ({
+        id: planId,
+        target_group_id: 'tg_1',
+        mode: 'manual',
+        state: patch.state,
+        scenarios: ['marker'],
+        max_concurrent: 1,
+        timeout_ms: 60_000,
+        delegated_jobs: patch.delegated_jobs,
+        executed_at: patch.executed_at,
+        created_at: fixed.toISOString(),
+        updated_at: patch.updated_at,
+      }),
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      now: () => fixed,
+      testRuns: {
+        startTestRun: async (_ctx, body) => {
+          startBody = body;
+          return { run: { id: 'run_waf_1' }, probe_job: { id: 'pjob_waf_1' } };
+        },
+      },
+    });
+
+    const result = await svc.executeValidationPlan(ctx, 'plan_1', { probeMode: 'signed-worker' });
+    assert.equal(result.error, undefined);
+    assert.equal(result.validation_plan.state, 'completed');
+    assert.equal(result.delegated_jobs.length, 1);
+    assert.equal(result.delegated_jobs[0].test_run_id, 'run_waf_1');
+    assert.equal(result.delegated_jobs[0].probe_job_id, 'pjob_waf_1');
+    assert.equal(startBody.check_id, 'waf.marker_rule.safe');
+    assert.equal(startBody.probe_profile.scenario_family, 'marker');
+    assert.equal(startBody.target_group_id, 'tg_1');
+    const claimCall = repoCalls.find((c) => c.method === 'claimValidationPlanExecution');
+    assert.ok(claimCall);
+    const lockExpiresAt = new Date(claimCall.args[2].lock_expires_at).getTime();
+    assert.ok(lockExpiresAt >= fixed.getTime() + 60_000 + 30_000);
+
+    const finishCall = repoCalls.find((c) => c.method === 'finishValidationPlanExecution');
+    assert.equal(finishCall.args[3].state, 'completed');
+    assert.deepEqual(finishCall.args[3].delegated_jobs, result.delegated_jobs);
+    const executedAudit = auditEvents.find((e) => e.action === 'waf.validation_plan.executed');
+    assert.ok(executedAudit);
+    assert.equal(executedAudit.metadata.target_group_id, 'tg_1');
+    assert.equal(executedAudit.metadata.delegated_job_count, 1);
+    assert.deepEqual(executedAudit.metadata.test_run_ids, ['run_waf_1']);
+    assert.deepEqual(executedAudit.metadata.probe_job_ids, ['pjob_waf_1']);
+    assert.equal('nonce' in (executedAudit.metadata ?? {}), false);
+  });
+
+  it('delegates one safe job per execute call when multiple scenarios remain within max_concurrent', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    const fixed = new Date('2026-07-02T12:00:00.000Z');
+    let startBody;
+    let startCalls = 0;
+    const { repositories, auditEvents, repoCalls } = createRecordingWafOrchestratorRepositories({
+      getValidationPlan: async () => ({
+        id: 'plan_1',
+        target_group_id: 'tg_1',
+        mode: 'manual',
+        state: 'draft',
+        scenarios: ['marker', 'fingerprint'],
+        max_concurrent: 2,
+        timeout_ms: 60_000,
+        delegated_jobs: [],
+        created_at: fixed.toISOString(),
+        updated_at: fixed.toISOString(),
+      }),
+      getTargetGroup: async () => ({
+        id: 'tg_1',
+        targets: [{ id: 'tgt_1', kind: 'fqdn', value: 'edge.example' }],
+      }),
+      updateValidationPlan: async (_ctx, planId, patch) => ({
+        id: planId,
+        target_group_id: 'tg_1',
+        mode: 'manual',
+        state: patch.state,
+        scenarios: ['marker', 'fingerprint'],
+        max_concurrent: 2,
+        timeout_ms: 60_000,
+        delegated_jobs: patch.delegated_jobs,
+        executed_at: patch.executed_at,
+        created_at: fixed.toISOString(),
+        updated_at: patch.updated_at,
+      }),
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      now: () => fixed,
+      testRuns: {
+        startTestRun: async (_ctx, body) => {
+          startCalls += 1;
+          startBody = body;
+          return { run: { id: 'run_multi_1' }, probe_job: { id: 'pjob_multi_1' } };
+        },
+      },
+    });
+
+    const result = await svc.executeValidationPlan(ctx, 'plan_1', { probeMode: 'signed-worker' });
+    assert.equal(result.error, undefined);
+    assert.equal(result.validation_plan.state, 'running');
+    assert.equal(result.continuation_required, true);
+    assert.equal(startCalls, 1);
+    assert.equal(result.delegated_jobs.length, 1);
+    assert.equal(result.delegated_jobs[0].test_run_id, 'run_multi_1');
+    assert.equal(startBody.check_id, 'waf.marker_rule.safe');
+    assert.equal(startBody.target_id, 'tgt_1');
+    const finishCall = repoCalls.find((c) => c.method === 'finishValidationPlanExecution');
+    assert.equal(finishCall.args[3].state, 'running');
+    assert.equal(finishCall.args[3].delegated_jobs.length, 1);
+    const executedAudit = auditEvents.find((e) => e.action === 'waf.validation_plan.executed');
+    assert.ok(executedAudit);
+    assert.equal(executedAudit.metadata.delegated_job_count, 1);
+    assert.equal(executedAudit.metadata.new_delegated_job_count, 1);
+    assert.deepEqual(executedAudit.metadata.test_run_ids, ['run_multi_1']);
+    assert.deepEqual(executedAudit.metadata.probe_job_ids, ['pjob_multi_1']);
+  });
+
+  it('fail-closes validation plan execute when work queue exceeds max_concurrent', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    let startCalled = false;
+    const { repositories, repoCalls } = createRecordingWafOrchestratorRepositories({
+      getValidationPlan: async () => ({
+        id: 'plan_1',
+        target_group_id: 'tg_1',
+        mode: 'manual',
+        state: 'draft',
+        scenarios: ['marker', 'fingerprint'],
+        max_concurrent: 2,
+        timeout_ms: 60_000,
+        delegated_jobs: [],
+        created_at: FIXED_NOW.toISOString(),
+        updated_at: FIXED_NOW.toISOString(),
+      }),
+      getTargetGroup: async () => ({
+        id: 'tg_1',
+        targets: [{ id: 'tgt_1', kind: 'fqdn', value: 'edge.example' }],
+      }),
+      listWafAssets: async () => [
+        { id: 'waf_asset_1', target_group_id: 'tg_1', target_id: 'tgt_1' },
+        { id: 'waf_asset_2', target_group_id: 'tg_1', target_id: 'tgt_1' },
+      ],
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      testRuns: {
+        startTestRun: async () => {
+          startCalled = true;
+          return { run: { id: 'run_x' }, probe_job: { id: 'pjob_x' } };
+        },
+      },
+    });
+
+    const result = await svc.executeValidationPlan(ctx, 'plan_1', { probeMode: 'signed-worker' });
+    assert.equal(result.error, 'waf_orchestration_batch_too_large');
+    assert.equal(result.status, 422);
+    assert.match(result.message, /max_concurrent/i);
+    assert.equal(startCalled, false);
+    assert.equal(repoCalls.some((c) => c.method === 'updateValidationPlan'), false);
+  });
+
+  it('fail-closes continuation executeValidationPlan when the next safe startTestRun fails', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    const cancelledRunIds = [];
+    let startCalls = 0;
+    const { repositories, auditEvents, repoCalls } = createRecordingWafOrchestratorRepositories({
+      getValidationPlan: async () => ({
+        id: 'plan_1',
+        target_group_id: 'tg_1',
+        mode: 'manual',
+        state: 'running',
+        scenarios: ['marker', 'fingerprint'],
+        max_concurrent: 2,
+        timeout_ms: 60_000,
+        delegated_jobs: [
+          {
+            test_run_id: 'run_plan_existing',
+            probe_job_id: 'pjob_plan_existing',
+            scenario: 'marker',
+            waf_asset_id: 'waf_asset_1',
+            check_id: 'waf.marker_rule.safe',
+          },
+        ],
+        executed_at: FIXED_NOW.toISOString(),
+        created_at: FIXED_NOW.toISOString(),
+        updated_at: FIXED_NOW.toISOString(),
+      }),
+      getTargetGroup: async () => ({
+        id: 'tg_1',
+        targets: [{ id: 'tgt_1', kind: 'fqdn', value: 'edge.example' }],
+      }),
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      testRuns: {
+        startTestRun: async () => {
+          startCalls += 1;
+          return { error: 'concurrent_run_blocked', status: 409 };
+        },
+        cancelTestRun: async (_ctx, runId) => {
+          cancelledRunIds.push(runId);
+        },
+      },
+    });
+
+    const result = await svc.executeValidationPlan(ctx, 'plan_1', { probeMode: 'signed-worker' });
+    assert.equal(result.error, 'concurrent_run_blocked');
+    assert.equal(result.status, 409);
+    assert.equal(startCalls, 1);
+    assert.deepEqual(cancelledRunIds, []);
+    assert.equal(repoCalls.some((c) => c.method === 'updateValidationPlan'), false);
+    assert.equal(auditEvents.some((e) => e.action === 'waf.validation_plan.executed'), false);
+  });
+
+  it('cancels malformed delegated run when startTestRun omits probe_job id', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    const cancelledRunIds = [];
+    const malformedRunId = 'run_malformed_no_probe_job';
+    const { repositories, auditEvents, repoCalls } = createRecordingWafOrchestratorRepositories({
+      getValidationPlan: async () => ({
+        id: 'plan_1',
+        target_group_id: 'tg_1',
+        mode: 'manual',
+        state: 'draft',
+        scenarios: ['marker'],
+        max_concurrent: 1,
+        timeout_ms: 60_000,
+        delegated_jobs: [],
+        created_at: FIXED_NOW.toISOString(),
+        updated_at: FIXED_NOW.toISOString(),
+      }),
+      getTargetGroup: async () => ({
+        id: 'tg_1',
+        targets: [{ id: 'tgt_1', kind: 'fqdn', value: 'edge.example' }],
+      }),
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      testRuns: {
+        startTestRun: async () => ({
+          run: { id: malformedRunId },
+          probe_job: null,
+        }),
+        cancelTestRun: async (_ctx, runId) => {
+          cancelledRunIds.push(runId);
+        },
+      },
+    });
+
+    const result = await svc.executeValidationPlan(ctx, 'plan_1', { probeMode: 'signed-worker' });
+    assert.equal(result.error, 'validation_plan_execution_failed');
+    assert.equal(result.status, 422);
+    assert.match(result.message, /probe job identifiers/i);
+    assert.deepEqual(cancelledRunIds, [malformedRunId]);
+    assert.equal(repoCalls.some((c) => c.method === 'updateValidationPlan'), false);
+    assert.equal(auditEvents.some((e) => e.action === 'waf.validation_plan.executed'), false);
+  });
+
+  it('fail-closes when WAF asset target_id is missing or not in target group', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    let startCalled = false;
+    const plan = {
+      id: 'plan_1',
+      target_group_id: 'tg_1',
+      mode: 'manual',
+      state: 'draft',
+      scenarios: ['marker'],
+      max_concurrent: 1,
+      timeout_ms: 60_000,
+      delegated_jobs: [],
+      created_at: FIXED_NOW.toISOString(),
+      updated_at: FIXED_NOW.toISOString(),
+    };
+    const { repositories, repoCalls } = createRecordingWafOrchestratorRepositories({
+      getValidationPlan: async () => plan,
+      getTargetGroup: async () => ({
+        id: 'tg_1',
+        targets: [{ id: 'tgt_1', kind: 'fqdn', value: 'edge.example' }],
+      }),
+      listWafAssets: async () => [
+        {
+          id: 'waf_asset_1',
+          target_group_id: 'tg_1',
+          target_id: 'tgt_unknown',
+        },
+      ],
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      testRuns: {
+        startTestRun: async () => {
+          startCalled = true;
+          return { run: { id: 'run_x' }, probe_job: { id: 'pjob_x' } };
+        },
+      },
+    });
+
+    const result = await svc.executeValidationPlan(ctx, 'plan_1', { probeMode: 'signed-worker' });
+    assert.equal(result.error, 'validation_plan_execution_failed');
+    assert.equal(result.status, 422);
+    assert.match(result.message, /target_id/);
+    assert.equal(startCalled, false);
+    assert.equal(repoCalls.some((c) => c.method === 'updateValidationPlan'), false);
+  });
+
+  it('continues a running plan and completes after remaining assets are delegated', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    let startCalls = 0;
+    const { repositories, repoCalls } = createRecordingWafOrchestratorRepositories({
+      getValidationPlan: async () => ({
+        id: 'plan_1',
+        target_group_id: 'tg_1',
+        mode: 'manual',
+        state: 'running',
+        scenarios: ['marker'],
+        max_concurrent: 2,
+        timeout_ms: 60_000,
+        delegated_jobs: [
+          {
+            test_run_id: 'run_existing',
+            probe_job_id: 'pjob_existing',
+            scenario: 'marker',
+            waf_asset_id: 'waf_asset_1',
+            check_id: 'waf.marker_rule.safe',
+          },
+        ],
+        executed_at: FIXED_NOW.toISOString(),
+        created_at: FIXED_NOW.toISOString(),
+        updated_at: FIXED_NOW.toISOString(),
+      }),
+      getTargetGroup: async () => ({
+        id: 'tg_1',
+        targets: [{ id: 'tgt_1', kind: 'fqdn', value: 'edge.example' }],
+      }),
+      listWafAssets: async () => [
+        { id: 'waf_asset_1', target_group_id: 'tg_1', target_id: 'tgt_1' },
+        { id: 'waf_asset_2', target_group_id: 'tg_1', target_id: 'tgt_1' },
+      ],
+      updateValidationPlan: async (_ctx, planId, patch) => ({
+        id: planId,
+        state: patch.state,
+        delegated_jobs: patch.delegated_jobs,
+        executed_at: patch.executed_at,
+        updated_at: patch.updated_at,
+      }),
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      testRuns: {
+        startTestRun: async () => {
+          startCalls += 1;
+          return {
+            run: { id: 'run_asset_2' },
+            probe_job: { id: 'pjob_asset_2' },
+          };
+        },
+      },
+    });
+
+    const result = await svc.executeValidationPlan(ctx, 'plan_1', { probeMode: 'signed-worker' });
+    assert.equal(result.error, undefined);
+    assert.equal(result.validation_plan.state, 'completed');
+    assert.equal(startCalls, 1);
+    assert.equal(result.delegated_jobs.length, 2);
+    assert.equal(result.continuation_required, undefined);
+    const finishCall = repoCalls.find((c) => c.method === 'finishValidationPlanExecution');
+    assert.equal(finishCall.args[3].state, 'completed');
+  });
+
+  it('returns 409 when validation plan execution lease claim conflicts', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    let startCalled = false;
+    const { repositories, auditEvents, repoCalls } = createRecordingWafOrchestratorRepositories({
+      getValidationPlan: async () => ({
+        id: 'plan_1',
+        target_group_id: 'tg_1',
+        mode: 'manual',
+        state: 'draft',
+        scenarios: ['marker'],
+        max_concurrent: 1,
+        timeout_ms: 60_000,
+        delegated_jobs: [],
+        created_at: FIXED_NOW.toISOString(),
+        updated_at: FIXED_NOW.toISOString(),
+      }),
+      getTargetGroup: async () => ({
+        id: 'tg_1',
+        targets: [{ id: 'tgt_1', kind: 'fqdn', value: 'edge.example' }],
+      }),
+      claimValidationPlanExecution: async () => null,
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      testRuns: {
+        startTestRun: async () => {
+          startCalled = true;
+          return { run: { id: 'run_x' }, probe_job: { id: 'pjob_x' } };
+        },
+      },
+    });
+
+    const result = await svc.executeValidationPlan(ctx, 'plan_1', { probeMode: 'signed-worker' });
+    assert.equal(result.error, 'waf_orchestrator_execution_in_progress');
+    assert.equal(result.status, 409);
+    assert.equal(startCalled, false);
+    assert.equal(repoCalls.some((c) => c.method === 'finishValidationPlanExecution'), false);
+    assert.equal(repoCalls.some((c) => c.method === 'updateValidationPlan'), false);
+    assert.equal(auditEvents.length, 0);
+  });
+
+  it('returns validation_plan_cancelled when claim misses after plan was cancelled', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    let startCalled = false;
+    let getPlanCalls = 0;
+    const basePlan = {
+      id: 'plan_1',
+      target_group_id: 'tg_1',
+      mode: 'manual',
+      scenarios: ['marker'],
+      max_concurrent: 1,
+      timeout_ms: 60_000,
+      delegated_jobs: [],
+      created_at: FIXED_NOW.toISOString(),
+      updated_at: FIXED_NOW.toISOString(),
+    };
+    const { repositories } = createRecordingWafOrchestratorRepositories({
+      getValidationPlan: async () => {
+        getPlanCalls += 1;
+        if (getPlanCalls === 1) {
+          return { ...basePlan, state: 'running' };
+        }
+        return { ...basePlan, state: 'cancelled' };
+      },
+      getTargetGroup: async () => ({
+        id: 'tg_1',
+        targets: [{ id: 'tgt_1', kind: 'fqdn', value: 'edge.example' }],
+      }),
+      claimValidationPlanExecution: async () => null,
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      testRuns: {
+        startTestRun: async () => {
+          startCalled = true;
+          return { run: { id: 'run_x' }, probe_job: { id: 'pjob_x' } };
+        },
+      },
+    });
+
+    const result = await svc.executeValidationPlan(ctx, 'plan_1', { probeMode: 'signed-worker' });
+    assert.equal(result.error, 'validation_plan_cancelled');
+    assert.equal(result.status, 409);
+    assert.equal(startCalled, false);
+    assert.equal(getPlanCalls, 2);
+  });
+
+  it('returns validation_plan_already_completed when claim misses after plan completed', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    let startCalled = false;
+    let getPlanCalls = 0;
+    const basePlan = {
+      id: 'plan_1',
+      target_group_id: 'tg_1',
+      mode: 'manual',
+      scenarios: ['marker'],
+      max_concurrent: 1,
+      timeout_ms: 60_000,
+      delegated_jobs: [],
+      created_at: FIXED_NOW.toISOString(),
+      updated_at: FIXED_NOW.toISOString(),
+    };
+    const { repositories } = createRecordingWafOrchestratorRepositories({
+      getValidationPlan: async () => {
+        getPlanCalls += 1;
+        if (getPlanCalls === 1) {
+          return { ...basePlan, state: 'running' };
+        }
+        return { ...basePlan, state: 'completed' };
+      },
+      getTargetGroup: async () => ({
+        id: 'tg_1',
+        targets: [{ id: 'tgt_1', kind: 'fqdn', value: 'edge.example' }],
+      }),
+      claimValidationPlanExecution: async () => null,
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      testRuns: {
+        startTestRun: async () => {
+          startCalled = true;
+          return { run: { id: 'run_x' }, probe_job: { id: 'pjob_x' } };
+        },
+      },
+    });
+
+    const result = await svc.executeValidationPlan(ctx, 'plan_1', { probeMode: 'signed-worker' });
+    assert.equal(result.error, 'validation_plan_already_completed');
+    assert.equal(result.status, 409);
+    assert.equal(startCalled, false);
+    assert.equal(getPlanCalls, 2);
+  });
+
+  it('finishes validation plan without startTestRun when claim shows no pending work', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    let startCalled = false;
+    const existingJobs = [
+      {
+        test_run_id: 'run_done',
+        probe_job_id: 'pjob_done',
+        scenario: 'marker',
+        waf_asset_id: 'waf_asset_1',
+        check_id: 'waf.marker_rule.safe',
+      },
+    ];
+    const { repositories, auditEvents, repoCalls } = createRecordingWafOrchestratorRepositories({
+      getValidationPlan: async () => ({
+        id: 'plan_1',
+        target_group_id: 'tg_1',
+        mode: 'manual',
+        state: 'running',
+        scenarios: ['marker'],
+        max_concurrent: 1,
+        timeout_ms: 60_000,
+        delegated_jobs: [],
+        created_at: FIXED_NOW.toISOString(),
+        updated_at: FIXED_NOW.toISOString(),
+      }),
+      getTargetGroup: async () => ({
+        id: 'tg_1',
+        targets: [{ id: 'tgt_1', kind: 'fqdn', value: 'edge.example' }],
+      }),
+      claimValidationPlanExecution: async () => ({
+        id: 'plan_1',
+        target_group_id: 'tg_1',
+        mode: 'manual',
+        state: 'running',
+        scenarios: ['marker'],
+        max_concurrent: 1,
+        timeout_ms: 60_000,
+        delegated_jobs: existingJobs,
+        executed_at: FIXED_NOW.toISOString(),
+        created_at: FIXED_NOW.toISOString(),
+        updated_at: FIXED_NOW.toISOString(),
+      }),
+      finishValidationPlanExecution: async (_ctx, planId, _lockToken, patch) => ({
+        id: planId,
+        state: patch.state,
+        delegated_jobs: patch.delegated_jobs,
+        executed_at: patch.executed_at,
+        updated_at: patch.updated_at,
+      }),
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      testRuns: {
+        startTestRun: async () => {
+          startCalled = true;
+          return { run: { id: 'run_x' }, probe_job: { id: 'pjob_x' } };
+        },
+      },
+    });
+
+    const result = await svc.executeValidationPlan(ctx, 'plan_1', { probeMode: 'signed-worker' });
+    assert.equal(result.error, undefined);
+    assert.equal(result.validation_plan.state, 'completed');
+    assert.deepEqual(result.delegated_jobs, existingJobs);
+    assert.equal(startCalled, false);
+    assert.equal(repoCalls.some((c) => c.method === 'finishValidationPlanExecution'), true);
+    assert.equal(repoCalls.some((c) => c.method === 'updateValidationPlan'), false);
+    assert.equal(auditEvents.some((e) => e.action === 'waf.validation_plan.executed'), false);
+  });
+
+  it('cancels started validation plan run when finishValidationPlanExecution returns null', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    const cancelledRunIds = [];
+    const { repositories, auditEvents, repoCalls } = createRecordingWafOrchestratorRepositories({
+      getValidationPlan: async () => ({
+        id: 'plan_1',
+        target_group_id: 'tg_1',
+        mode: 'manual',
+        state: 'draft',
+        scenarios: ['marker'],
+        max_concurrent: 1,
+        timeout_ms: 60_000,
+        delegated_jobs: [],
+        created_at: FIXED_NOW.toISOString(),
+        updated_at: FIXED_NOW.toISOString(),
+      }),
+      getTargetGroup: async () => ({
+        id: 'tg_1',
+        targets: [{ id: 'tgt_1', kind: 'fqdn', value: 'edge.example' }],
+      }),
+      finishValidationPlanExecution: async () => null,
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      newId: () => 'lock_finish_null_plan',
+      testRuns: {
+        startTestRun: async () => ({ run: { id: 'run_lost_lease' }, probe_job: { id: 'pjob_lost' } }),
+        cancelTestRun: async (_ctx, runId) => {
+          cancelledRunIds.push(runId);
+        },
+      },
+    });
+
+    const result = await svc.executeValidationPlan(ctx, 'plan_1', { probeMode: 'signed-worker' });
+    assert.equal(result.error, 'validation_plan_execution_failed');
+    assert.equal(result.status, 422);
+    assert.match(result.message, /lease was lost/i);
+    assert.deepEqual(cancelledRunIds, ['run_lost_lease']);
+    assert.equal(result.validation_plan, undefined);
+    assert.equal(result.delegated_jobs, undefined);
+    assert.equal(auditEvents.some((e) => e.action === 'waf.validation_plan.executed'), false);
+    assert.equal(repoCalls.some((c) => c.method === 'updateValidationPlan'), false);
+    assert.equal(repoCalls.some((c) => c.method === 'finishValidationPlanExecution'), true);
+    const releaseCall = repoCalls.find((c) => c.method === 'releaseValidationPlanExecution');
+    assert.ok(releaseCall);
+    assert.equal(releaseCall.args[2], 'lock_finish_null_plan');
+  });
+
+  it('releases validation plan lease when startTestRun fails', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    const releasedTokens = [];
+    const { repositories, repoCalls } = createRecordingWafOrchestratorRepositories({
+      getValidationPlan: async () => ({
+        id: 'plan_1',
+        target_group_id: 'tg_1',
+        mode: 'manual',
+        state: 'draft',
+        scenarios: ['marker'],
+        max_concurrent: 1,
+        timeout_ms: 60_000,
+        delegated_jobs: [],
+        created_at: FIXED_NOW.toISOString(),
+        updated_at: FIXED_NOW.toISOString(),
+      }),
+      getTargetGroup: async () => ({
+        id: 'tg_1',
+        targets: [{ id: 'tgt_1', kind: 'fqdn', value: 'edge.example' }],
+      }),
+      releaseValidationPlanExecution: async (_ctx, _id, lockToken) => {
+        releasedTokens.push(lockToken);
+        return null;
+      },
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      newId: () => 'lock_release_test',
+      testRuns: {
+        startTestRun: async () => ({ error: 'concurrent_run_blocked', status: 409 }),
+      },
+    });
+
+    const result = await svc.executeValidationPlan(ctx, 'plan_1', { probeMode: 'signed-worker' });
+    assert.equal(result.error, 'concurrent_run_blocked');
+    assert.deepEqual(releasedTokens, ['lock_release_test']);
+    assert.equal(repoCalls.some((c) => c.method === 'finishValidationPlanExecution'), false);
+    assert.equal(repoCalls.some((c) => c.method === 'updateValidationPlan'), false);
+  });
+
+  it('rejects executeRetest without signed-worker probeMode before startTestRun', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    let startCalled = false;
+    const { repositories, repoCalls } = createRecordingWafOrchestratorRepositories({
+      getRetestRequest: async () => ({
+        id: 'rt_1',
+        drift_event_id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: 'requested',
+        retest_plan: ['marker'],
+      }),
+      getWafDriftEvent: async () => ({
+        id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: 'retest_pending',
+      }),
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      testRuns: {
+        startTestRun: async () => {
+          startCalled = true;
+          return { run: { id: 'run_x' }, probe_job: { id: 'pjob_x' } };
+        },
+      },
+    });
+
+    const result = await svc.executeRetest(ctx, 'rt_1', {}, {});
+    assert.equal(result.error, 'waf_orchestrator_signed_worker_required');
+    assert.equal(result.status, 422);
+    assert.match(result.message, /signed probe-worker/i);
+    assert.equal(startCalled, false);
+    assert.equal(repoCalls.some((c) => c.method === 'getTargetGroup'), false);
+    assert.equal(repoCalls.some((c) => c.method === 'listWafAssets'), false);
+    assert.equal(repoCalls.some((c) => c.method === 'updateRetestRequest'), false);
+    assert.equal(repoCalls.some((c) => c.method === 'patchWafDriftEvent'), false);
+  });
+
+  it('delegates one safe retest scenario through startTestRun and ignores request-body verdict fields', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    const fixed = new Date('2026-07-02T12:00:00.000Z');
+    let startBody;
+    const retestBody = {
+      results: [
+        {
+          scenario_family: 'marker',
+          passed: true,
+          observed_action: 'block',
+          evidence_summary: {
+            probe_job_id: 'pjob_retest_1',
+            test_run_id: 'run_retest_1',
+            scenario_id: 'marker',
+          },
+        },
+      ],
+      validation_passed: true,
+      posture_status: 'protected',
+    };
+    const { repositories, auditEvents, repoCalls } = createRecordingWafOrchestratorRepositories({
+      getRetestRequest: async () => ({
+        id: 'rt_1',
+        drift_event_id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: 'requested',
+        retest_plan: ['marker'],
+      }),
+      getWafDriftEvent: async () => ({
+        id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: 'retest_pending',
+        drift_type: 'marker_failed',
+        before_summary_json: { status: 'protected' },
+      }),
+      getTargetGroup: async () => ({
+        id: 'tg_1',
+        targets: [{ id: 'tgt_1', kind: 'fqdn', value: 'edge.example' }],
+      }),
+      updateRetestRequest: async (_ctx, retestId, patch) => ({
+        id: retestId,
+        drift_event_id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: patch.status,
+        delegated_jobs: patch.delegated_jobs,
+        updated_at: patch.updated_at,
+        retest_plan: ['marker'],
+      }),
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      now: () => fixed,
+      testRuns: {
+        startTestRun: async (_ctx, body) => {
+          startBody = body;
+          return { run: { id: 'run_retest_1' }, probe_job: { id: 'pjob_retest_1' } };
+        },
+      },
+    });
+
+    const result = await svc.executeRetest(ctx, 'rt_1', retestBody, { probeMode: 'signed-worker' });
+    assert.equal(result.error, undefined);
+    assert.equal(result.retest_request.status, 'delegated');
+    assert.equal(result.verdict, undefined);
+    assert.equal(result.delegated_jobs.length, 1);
+    assert.equal(result.delegated_jobs[0].test_run_id, 'run_retest_1');
+    assert.equal(result.delegated_jobs[0].probe_job_id, 'pjob_retest_1');
+    assert.equal(startBody.check_id, 'waf.marker_rule.safe');
+    assert.equal(startBody.target_id, 'tgt_1');
+    assert.equal(startBody.target_group_id, 'tg_1');
+    assert.equal(startBody.probe_profile.scenario_family, 'marker');
+    const claimCall = repoCalls.find((c) => c.method === 'claimRetestExecution');
+    assert.ok(claimCall);
+    const lockExpiresAt = new Date(claimCall.args[2].lock_expires_at).getTime();
+    assert.ok(lockExpiresAt >= fixed.getTime() + 90_000);
+
+    const finishCall = repoCalls.find((c) => c.method === 'finishRetestExecution');
+    assert.equal(finishCall.args[3].status, 'delegated');
+    assert.equal(finishCall.args[3].verdict, undefined);
+    assert.equal(finishCall.args[3].verdict_reason, undefined);
+    assert.equal(finishCall.args[3].completed_at, undefined);
+    assert.deepEqual(finishCall.args[3].delegated_jobs, result.delegated_jobs);
+    assert.equal(finishCall.args[3].updated_at, fixed.toISOString());
+    assert.equal(repoCalls.some((c) => c.method === 'patchWafDriftEvent'), false);
+    const delegatedAudit = auditEvents.find((e) => e.action === 'waf.retest.delegated');
+    assert.ok(delegatedAudit);
+    assert.equal(delegatedAudit.metadata.verdict, undefined);
+    assert.equal(delegatedAudit.metadata.delegated_job_count, 1);
+    assert.deepEqual(delegatedAudit.metadata.test_run_ids, ['run_retest_1']);
+    assert.deepEqual(delegatedAudit.metadata.probe_job_ids, ['pjob_retest_1']);
+    assert.equal('nonce' in (delegatedAudit.metadata ?? {}), false);
+  });
+
+  it('rejects executeRetest when retest is already completed without startTestRun', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    let startCalled = false;
+    const { repositories, repoCalls } = createRecordingWafOrchestratorRepositories({
+      getRetestRequest: async () => ({
+        id: 'rt_1',
+        drift_event_id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: 'completed',
+        retest_plan: ['marker'],
+        delegated_jobs: [{ test_run_id: 'run_existing', probe_job_id: 'pjob_existing' }],
+        verdict: 'resolved',
+      }),
+      getWafDriftEvent: async () => ({
+        id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: 'resolved',
+      }),
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      testRuns: {
+        startTestRun: async () => {
+          startCalled = true;
+          return { run: { id: 'run_x' }, probe_job: { id: 'pjob_x' } };
+        },
+      },
+    });
+
+    const result = await svc.executeRetest(ctx, 'rt_1', {}, { probeMode: 'signed-worker' });
+    assert.equal(result.error, 'waf_retest_already_completed');
+    assert.equal(result.status, 409);
+    assert.equal(startCalled, false);
+    assert.equal(repoCalls.some((c) => c.method === 'updateRetestRequest'), false);
+  });
+
+  it('rejects executeRetest when retest is already delegated without startTestRun', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    let startCalled = false;
+    const { repositories, repoCalls } = createRecordingWafOrchestratorRepositories({
+      getRetestRequest: async () => ({
+        id: 'rt_1',
+        drift_event_id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: 'delegated',
+        retest_plan: ['marker'],
+        delegated_jobs: [{ test_run_id: 'run_existing', probe_job_id: 'pjob_existing' }],
+      }),
+      getWafDriftEvent: async () => ({
+        id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: 'retest_pending',
+      }),
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      testRuns: {
+        startTestRun: async () => {
+          startCalled = true;
+          return { run: { id: 'run_x' }, probe_job: { id: 'pjob_x' } };
+        },
+      },
+    });
+
+    const result = await svc.executeRetest(ctx, 'rt_1', {}, { probeMode: 'signed-worker' });
+    assert.equal(result.error, 'waf_retest_already_delegated');
+    assert.equal(result.status, 409);
+    assert.equal(startCalled, false);
+    assert.equal(repoCalls.some((c) => c.method === 'updateRetestRequest'), false);
+    assert.equal(repoCalls.some((c) => c.method === 'listWafAssets'), false);
+  });
+
+  it('delegates one safe retest scenario per execute call and requires continuation', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    const fixed = new Date('2026-07-02T12:00:00.000Z');
+    let startBody;
+    let startCalls = 0;
+    const { repositories, auditEvents, repoCalls } = createRecordingWafOrchestratorRepositories({
+      getRetestRequest: async () => ({
+        id: 'rt_1',
+        drift_event_id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: 'requested',
+        retest_plan: ['marker', 'fingerprint'],
+      }),
+      getWafDriftEvent: async () => ({
+        id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: 'retest_pending',
+        drift_type: 'marker_failed',
+        before_summary_json: { status: 'protected' },
+      }),
+      getTargetGroup: async () => ({
+        id: 'tg_1',
+        targets: [{ id: 'tgt_1', kind: 'fqdn', value: 'edge.example' }],
+      }),
+      updateRetestRequest: async (_ctx, retestId, patch) => ({
+        id: retestId,
+        drift_event_id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: patch.status,
+        delegated_jobs: patch.delegated_jobs,
+        updated_at: patch.updated_at,
+        retest_plan: ['marker', 'fingerprint'],
+      }),
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      now: () => fixed,
+      testRuns: {
+        startTestRun: async (_ctx, body) => {
+          startCalls += 1;
+          startBody = body;
+          return { run: { id: 'run_rt_multi_1' }, probe_job: { id: 'pjob_rt_multi_1' } };
+        },
+      },
+    });
+
+    const result = await svc.executeRetest(ctx, 'rt_1', {}, { probeMode: 'signed-worker' });
+    assert.equal(result.error, undefined);
+    assert.equal(result.retest_request.status, 'running');
+    assert.equal(result.continuation_required, true);
+    assert.equal(result.verdict, undefined);
+    assert.equal(result.delegated_jobs.length, 1);
+    assert.equal(startCalls, 1);
+    assert.equal(startBody.check_id, 'waf.marker_rule.safe');
+    assert.equal(startBody.target_id, 'tgt_1');
+    const finishCall = repoCalls.find((c) => c.method === 'finishRetestExecution');
+    assert.equal(finishCall.args[3].status, 'running');
+    assert.equal(finishCall.args[3].delegated_jobs.length, 1);
+    assert.equal(finishCall.args[3].verdict, undefined);
+    assert.equal(finishCall.args[3].completed_at, undefined);
+    assert.equal(repoCalls.some((c) => c.method === 'patchWafDriftEvent'), false);
+    const delegatedAudits = auditEvents.filter((e) => e.action === 'waf.retest.delegated');
+    assert.equal(delegatedAudits.length, 1);
+    assert.equal(delegatedAudits[0].metadata.delegated_job_count, 1);
+    assert.equal(delegatedAudits[0].metadata.new_delegated_job_count, 1);
+    assert.deepEqual(delegatedAudits[0].metadata.test_run_ids, ['run_rt_multi_1']);
+    assert.deepEqual(delegatedAudits[0].metadata.probe_job_ids, ['pjob_rt_multi_1']);
+  });
+
+  it('continues a running retest and delegates the remaining safe scenario', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    const fixed = new Date('2026-07-02T12:00:00.000Z');
+    let startCalls = 0;
+    const { repositories, auditEvents, repoCalls } = createRecordingWafOrchestratorRepositories({
+      getRetestRequest: async () => ({
+        id: 'rt_1',
+        drift_event_id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: 'running',
+        retest_plan: ['marker', 'fingerprint'],
+        delegated_jobs: [
+          {
+            test_run_id: 'run_rt_existing',
+            probe_job_id: 'pjob_rt_existing',
+            scenario: 'marker',
+            waf_asset_id: 'waf_asset_1',
+            check_id: 'waf.marker_rule.safe',
+          },
+        ],
+      }),
+      getWafDriftEvent: async () => ({
+        id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: 'retest_pending',
+        drift_type: 'marker_failed',
+        before_summary_json: { status: 'protected' },
+      }),
+      getTargetGroup: async () => ({
+        id: 'tg_1',
+        targets: [{ id: 'tgt_1', kind: 'fqdn', value: 'edge.example' }],
+      }),
+      updateRetestRequest: async (_ctx, retestId, patch) => ({
+        id: retestId,
+        drift_event_id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: patch.status,
+        delegated_jobs: patch.delegated_jobs,
+        updated_at: patch.updated_at,
+        retest_plan: ['marker', 'fingerprint'],
+      }),
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      now: () => fixed,
+      testRuns: {
+        startTestRun: async () => {
+          startCalls += 1;
+          return { run: { id: 'run_rt_multi_2' }, probe_job: { id: 'pjob_rt_multi_2' } };
+        },
+      },
+    });
+
+    const result = await svc.executeRetest(ctx, 'rt_1', {}, { probeMode: 'signed-worker' });
+    assert.equal(result.error, undefined);
+    assert.equal(result.retest_request.status, 'delegated');
+    assert.equal(result.continuation_required, undefined);
+    assert.equal(result.verdict, undefined);
+    assert.equal(startCalls, 1);
+    assert.equal(result.delegated_jobs.length, 2);
+    const finishCall = repoCalls.find((c) => c.method === 'finishRetestExecution');
+    assert.equal(finishCall.args[3].status, 'delegated');
+    assert.equal(finishCall.args[3].delegated_jobs.length, 2);
+    assert.equal(repoCalls.some((c) => c.method === 'patchWafDriftEvent'), false);
+    assert.equal(auditEvents.some((e) => e.action === 'waf.retest.completed'), false);
+  });
+
+  it('returns 409 when retest execution lease claim conflicts', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    let startCalled = false;
+    const { repositories, auditEvents, repoCalls } = createRecordingWafOrchestratorRepositories({
+      getRetestRequest: async () => ({
+        id: 'rt_1',
+        drift_event_id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: 'requested',
+        retest_plan: ['marker'],
+      }),
+      getWafDriftEvent: async () => ({
+        id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: 'retest_pending',
+      }),
+      getTargetGroup: async () => ({
+        id: 'tg_1',
+        targets: [{ id: 'tgt_1', kind: 'fqdn', value: 'edge.example' }],
+      }),
+      claimRetestExecution: async () => null,
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      testRuns: {
+        startTestRun: async () => {
+          startCalled = true;
+          return { run: { id: 'run_x' }, probe_job: { id: 'pjob_x' } };
+        },
+      },
+    });
+
+    const result = await svc.executeRetest(ctx, 'rt_1', {}, { probeMode: 'signed-worker' });
+    assert.equal(result.error, 'waf_orchestrator_execution_in_progress');
+    assert.equal(result.status, 409);
+    assert.equal(startCalled, false);
+    assert.equal(repoCalls.some((c) => c.method === 'finishRetestExecution'), false);
+    assert.equal(repoCalls.some((c) => c.method === 'updateRetestRequest'), false);
+    assert.equal(auditEvents.length, 0);
+  });
+
+  it('returns waf_retest_already_delegated when claim misses after retest was delegated', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    let startCalled = false;
+    let getRetestCalls = 0;
+    const baseRetest = {
+      id: 'rt_1',
+      drift_event_id: 'drift_1',
+      waf_asset_id: 'waf_asset_1',
+      retest_plan: ['marker'],
+    };
+    const { repositories } = createRecordingWafOrchestratorRepositories({
+      getRetestRequest: async () => {
+        getRetestCalls += 1;
+        if (getRetestCalls === 1) {
+          return { ...baseRetest, status: 'requested' };
+        }
+        return { ...baseRetest, status: 'delegated' };
+      },
+      getWafDriftEvent: async () => ({
+        id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: 'retest_pending',
+      }),
+      getTargetGroup: async () => ({
+        id: 'tg_1',
+        targets: [{ id: 'tgt_1', kind: 'fqdn', value: 'edge.example' }],
+      }),
+      claimRetestExecution: async () => null,
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      testRuns: {
+        startTestRun: async () => {
+          startCalled = true;
+          return { run: { id: 'run_x' }, probe_job: { id: 'pjob_x' } };
+        },
+      },
+    });
+
+    const result = await svc.executeRetest(ctx, 'rt_1', {}, { probeMode: 'signed-worker' });
+    assert.equal(result.error, 'waf_retest_already_delegated');
+    assert.equal(result.status, 409);
+    assert.equal(startCalled, false);
+    assert.equal(getRetestCalls, 2);
+  });
+
+  it('returns waf_retest_already_completed when claim misses after retest completed', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    let startCalled = false;
+    let getRetestCalls = 0;
+    const baseRetest = {
+      id: 'rt_1',
+      drift_event_id: 'drift_1',
+      waf_asset_id: 'waf_asset_1',
+      retest_plan: ['marker'],
+    };
+    const { repositories } = createRecordingWafOrchestratorRepositories({
+      getRetestRequest: async () => {
+        getRetestCalls += 1;
+        if (getRetestCalls === 1) {
+          return { ...baseRetest, status: 'running' };
+        }
+        return { ...baseRetest, status: 'completed' };
+      },
+      getWafDriftEvent: async () => ({
+        id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: 'retest_pending',
+      }),
+      getTargetGroup: async () => ({
+        id: 'tg_1',
+        targets: [{ id: 'tgt_1', kind: 'fqdn', value: 'edge.example' }],
+      }),
+      claimRetestExecution: async () => null,
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      testRuns: {
+        startTestRun: async () => {
+          startCalled = true;
+          return { run: { id: 'run_x' }, probe_job: { id: 'pjob_x' } };
+        },
+      },
+    });
+
+    const result = await svc.executeRetest(ctx, 'rt_1', {}, { probeMode: 'signed-worker' });
+    assert.equal(result.error, 'waf_retest_already_completed');
+    assert.equal(result.status, 409);
+    assert.equal(startCalled, false);
+    assert.equal(getRetestCalls, 2);
+  });
+
+  it('cancels started retest run when finishRetestExecution returns null', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    const cancelledRunIds = [];
+    const { repositories, auditEvents, repoCalls } = createRecordingWafOrchestratorRepositories({
+      getRetestRequest: async () => ({
+        id: 'rt_1',
+        drift_event_id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: 'requested',
+        retest_plan: ['marker'],
+      }),
+      getWafDriftEvent: async () => ({
+        id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: 'retest_pending',
+        before_summary_json: { status: 'protected' },
+      }),
+      getTargetGroup: async () => ({
+        id: 'tg_1',
+        targets: [{ id: 'tgt_1', kind: 'fqdn', value: 'edge.example' }],
+      }),
+      finishRetestExecution: async () => null,
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      newId: () => 'lock_finish_null_retest',
+      testRuns: {
+        startTestRun: async () => ({ run: { id: 'run_rt_lost' }, probe_job: { id: 'pjob_rt_lost' } }),
+        cancelTestRun: async (_ctx, runId) => {
+          cancelledRunIds.push(runId);
+        },
+      },
+    });
+
+    const result = await svc.executeRetest(ctx, 'rt_1', {}, { probeMode: 'signed-worker' });
+    assert.equal(result.error, 'validation_plan_execution_failed');
+    assert.equal(result.status, 422);
+    assert.match(result.message, /lease was lost/i);
+    assert.deepEqual(cancelledRunIds, ['run_rt_lost']);
+    assert.equal(auditEvents.some((e) => e.action === 'waf.retest.delegated'), false);
+    assert.equal(repoCalls.some((c) => c.method === 'updateRetestRequest'), false);
+    const releaseCall = repoCalls.find((c) => c.method === 'releaseRetestExecution');
+    assert.ok(releaseCall);
+    assert.equal(releaseCall.args[2], 'lock_finish_null_retest');
+  });
+
+  it('completes delegated retest atomically without separate drift patch or audit append', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    const fixed = new Date('2026-07-02T12:00:00.000Z');
+    const delegatedJobs = [
+      {
+        test_run_id: 'run_close_1',
+        probe_job_id: 'pjob_close_1',
+        scenario: 'marker',
+        waf_asset_id: 'waf_asset_1',
+        check_id: 'waf.marker_rule.safe',
+      },
+    ];
+    const { repositories, auditEvents, repoCalls } = createRecordingWafOrchestratorRepositories({
+      getRetestRequest: async () => ({
+        id: 'rt_1',
+        drift_event_id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: 'delegated',
+        retest_plan: ['marker'],
+        delegated_jobs: delegatedJobs,
+      }),
+      getWafDriftEvent: async () => ({
+        id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: 'retest_pending',
+        drift_type: 'marker_failed',
+        before_summary_json: { status: 'protected' },
+      }),
+      completeRetestWithDriftAndAudit: async (_ctx, payload) => ({
+        retest_request: {
+          id: payload.retest_id,
+          status: payload.retest_patch.status,
+          verdict: payload.retest_patch.verdict,
+          verdict_reason: payload.retest_patch.verdict_reason,
+          delegated_jobs: payload.retest_patch.delegated_jobs,
+          completed_at: payload.retest_patch.completed_at,
+          updated_at: payload.retest_patch.updated_at,
+        },
+        drift_event: {
+          id: payload.drift_event_id,
+          status: payload.drift_patch?.status ?? 'retest_pending',
+        },
+        audit_event: { action: 'waf.retest.completed', ...payload.audit_event },
+      }),
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      now: () => fixed,
+      testRuns: {
+        getTestRun: async (_ctx, runId) => ({
+          id: runId,
+          status: 'verdicted',
+          check_id: 'waf.marker_rule.safe',
+          probe_job_id: 'pjob_close_1',
+          verdict: { verdict: 'pass', confidence: 0.9 },
+        }),
+      },
+    });
+
+    const result = await svc.completeRetest(ctx, 'rt_1');
+    assert.equal(result.error, undefined);
+    assert.equal(result.verdict.verdict, 'resolved');
+    assert.equal(result.retest_request.status, 'completed');
+    assert.equal(result.retest_request.verdict, 'resolved');
+    assert.deepEqual(result.delegated_jobs, delegatedJobs);
+    assert.equal(repoCalls.filter((c) => c.method === 'completeRetestWithDriftAndAudit').length, 1);
+    assert.equal(repoCalls.filter((c) => c.method === 'updateRetestRequest').length, 0);
+    assert.equal(repoCalls.filter((c) => c.method === 'patchWafDriftEvent').length, 0);
+    assert.equal(auditEvents.length, 0);
+    const atomicCall = repoCalls.find((c) => c.method === 'completeRetestWithDriftAndAudit');
+    assert.equal(atomicCall.args[1].audit_event.action, 'waf.retest.completed');
+    assert.deepEqual(atomicCall.args[1].retest_patch.delegated_jobs, delegatedJobs);
+  });
+
+  it('fail-closes retest completion when delegated runs are not finalized', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    const { repositories, repoCalls } = createRecordingWafOrchestratorRepositories({
+      getRetestRequest: async () => ({
+        id: 'rt_1',
+        drift_event_id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: 'delegated',
+        retest_plan: ['marker'],
+        delegated_jobs: [
+          {
+            test_run_id: 'run_open_1',
+            probe_job_id: 'pjob_open_1',
+            scenario: 'marker',
+            waf_asset_id: 'waf_asset_1',
+            check_id: 'waf.marker_rule.safe',
+          },
+        ],
+      }),
+      getWafDriftEvent: async () => ({
+        id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: 'retest_pending',
+      }),
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      testRuns: {
+        getTestRun: async () => ({
+          id: 'run_open_1',
+          status: 'running',
+          verdict: null,
+        }),
+      },
+    });
+
+    const result = await svc.completeRetest(ctx, 'rt_1');
+    assert.equal(result.error, 'waf_retest_closure_not_ready');
+    assert.equal(result.status, 422);
+    assert.equal(repoCalls.some((c) => c.method === 'updateRetestRequest'), false);
+    assert.equal(repoCalls.some((c) => c.method === 'completeRetestWithDriftAndAudit'), false);
+  });
+
+  it('fail-closes retest completion when loaded run check_id mismatches delegated job', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    const { repositories, repoCalls } = createRecordingWafOrchestratorRepositories({
+      getRetestRequest: async () => ({
+        id: 'rt_1',
+        drift_event_id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: 'delegated',
+        retest_plan: ['marker'],
+        delegated_jobs: [
+          {
+            test_run_id: 'run_close_1',
+            probe_job_id: 'pjob_close_1',
+            scenario: 'marker',
+            waf_asset_id: 'waf_asset_1',
+            check_id: 'waf.marker_rule.safe',
+          },
+        ],
+      }),
+      getWafDriftEvent: async () => ({
+        id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: 'retest_pending',
+      }),
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      testRuns: {
+        getTestRun: async () => ({
+          id: 'run_close_1',
+          status: 'verdicted',
+          check_id: 'waf.fingerprint.safe',
+          verdict: { verdict: 'pass' },
+        }),
+      },
+    });
+
+    const result = await svc.completeRetest(ctx, 'rt_1');
+    assert.equal(result.error, 'waf_retest_closure_not_ready');
+    assert.equal(result.status, 422);
+    assert.equal(repoCalls.some((c) => c.method === 'completeRetestWithDriftAndAudit'), false);
+    assert.equal(repoCalls.some((c) => c.method === 'updateRetestRequest'), false);
+  });
+
+  it('fail-closes retest completion when loaded run probe_job_id mismatches delegated job', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    const { repositories, repoCalls } = createRecordingWafOrchestratorRepositories({
+      getRetestRequest: async () => ({
+        id: 'rt_1',
+        drift_event_id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: 'delegated',
+        retest_plan: ['marker'],
+        delegated_jobs: [
+          {
+            test_run_id: 'run_close_1',
+            probe_job_id: 'pjob_close_1',
+            scenario: 'marker',
+            waf_asset_id: 'waf_asset_1',
+            check_id: 'waf.marker_rule.safe',
+          },
+        ],
+      }),
+      getWafDriftEvent: async () => ({
+        id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: 'retest_pending',
+      }),
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      testRuns: {
+        getTestRun: async () => ({
+          id: 'run_close_1',
+          status: 'verdicted',
+          check_id: 'waf.marker_rule.safe',
+          probe_job_id: 'pjob_other',
+          verdict: { verdict: 'pass' },
+        }),
+      },
+    });
+
+    const result = await svc.completeRetest(ctx, 'rt_1');
+    assert.equal(result.error, 'waf_retest_closure_not_ready');
+    assert.equal(result.status, 422);
+    assert.equal(repoCalls.some((c) => c.method === 'completeRetestWithDriftAndAudit'), false);
+    assert.equal(repoCalls.some((c) => c.method === 'updateRetestRequest'), false);
+  });
+
+  it('fail-closes executeRetest when WAF asset target_id is missing or not in target group', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    let startCalled = false;
+    const { repositories, repoCalls } = createRecordingWafOrchestratorRepositories({
+      getRetestRequest: async () => ({
+        id: 'rt_1',
+        drift_event_id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: 'requested',
+        retest_plan: ['marker'],
+      }),
+      getWafDriftEvent: async () => ({
+        id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: 'retest_pending',
+      }),
+      getTargetGroup: async () => ({
+        id: 'tg_1',
+        targets: [{ id: 'tgt_1', kind: 'fqdn', value: 'edge.example' }],
+      }),
+      listWafAssets: async () => [
+        {
+          id: 'waf_asset_1',
+          target_group_id: 'tg_1',
+          target_id: 'tgt_unknown',
+        },
+      ],
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      testRuns: {
+        startTestRun: async () => {
+          startCalled = true;
+          return { run: { id: 'run_x' }, probe_job: { id: 'pjob_x' } };
+        },
+      },
+    });
+
+    const result = await svc.executeRetest(ctx, 'rt_1', {}, { probeMode: 'signed-worker' });
+    assert.equal(result.error, 'validation_plan_execution_failed');
+    assert.equal(result.status, 422);
+    assert.match(result.message, /target_id/);
+    assert.equal(startCalled, false);
+    assert.equal(repoCalls.some((c) => c.method === 'updateRetestRequest'), false);
+    assert.equal(repoCalls.some((c) => c.method === 'patchWafDriftEvent'), false);
+  });
+
+  it('cancels malformed delegated retest run when startTestRun omits probe_job id', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    const cancelledRunIds = [];
+    const malformedRunId = 'run_retest_malformed_no_probe_job';
+    const { repositories, auditEvents, repoCalls } = createRecordingWafOrchestratorRepositories({
+      getRetestRequest: async () => ({
+        id: 'rt_1',
+        drift_event_id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: 'requested',
+        retest_plan: ['marker'],
+        delegated_jobs: [],
+      }),
+      getWafDriftEvent: async () => ({
+        id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: 'retest_pending',
+      }),
+      getTargetGroup: async () => ({
+        id: 'tg_1',
+        targets: [{ id: 'tgt_1', kind: 'fqdn', value: 'edge.example' }],
+      }),
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      testRuns: {
+        startTestRun: async () => ({
+          run: { id: malformedRunId },
+          probe_job: null,
+        }),
+        cancelTestRun: async (_ctx, runId) => {
+          cancelledRunIds.push(runId);
+        },
+      },
+    });
+
+    const result = await svc.executeRetest(ctx, 'rt_1', {}, { probeMode: 'signed-worker' });
+    assert.equal(result.error, 'validation_plan_execution_failed');
+    assert.equal(result.status, 422);
+    assert.match(result.message, /probe job identifiers/i);
+    assert.deepEqual(cancelledRunIds, [malformedRunId]);
+    assert.equal(repoCalls.some((c) => c.method === 'updateRetestRequest'), false);
+    assert.equal(auditEvents.some((e) => e.action === 'waf.retest.delegated'), false);
+  });
+
+  it('cancels delegated test run when retest persistence fails after startTestRun', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    const cancelledRunIds = [];
+    let startCalled = false;
+    const { repositories, auditEvents, repoCalls } = createRecordingWafOrchestratorRepositories({
+      getRetestRequest: async () => ({
+        id: 'rt_1',
+        drift_event_id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: 'requested',
+        retest_plan: ['marker'],
+      }),
+      getWafDriftEvent: async () => ({
+        id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: 'retest_pending',
+        before_summary_json: { status: 'protected' },
+      }),
+      getTargetGroup: async () => ({
+        id: 'tg_1',
+        targets: [{ id: 'tgt_1', kind: 'fqdn', value: 'edge.example' }],
+      }),
+      updateRetestRequest: async () => {
+        throw new Error('db_write_failed');
+      },
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      newId: () => 'lock_finish_throw_retest',
+      testRuns: {
+        startTestRun: async () => {
+          startCalled = true;
+          return { run: { id: 'run_retest_comp_1' }, probe_job: { id: 'pjob_retest_comp_1' } };
+        },
+        cancelTestRun: async (_ctx, runId) => {
+          cancelledRunIds.push(runId);
+        },
+      },
+    });
+
+    const result = await svc.executeRetest(
+      ctx,
+      'rt_1',
+      {
+        results: [
+          {
+            scenario_family: 'marker',
+            passed: true,
+            observed_action: 'block',
+            evidence_summary: { scenario_id: 'marker' },
+          },
+        ],
+        validation_passed: true,
+        posture_status: 'protected',
+      },
+      { probeMode: 'signed-worker' },
+    );
+    assert.equal(result.error, 'validation_plan_execution_failed');
+    assert.equal(result.status, 422);
+    assert.match(result.message, /retest execution lease persistence failed/i);
+    assert.equal(startCalled, true);
+    assert.deepEqual(cancelledRunIds, ['run_retest_comp_1']);
+    assert.equal(repoCalls.some((c) => c.method === 'finishRetestExecution'), true);
+    const releaseRetestCall = repoCalls.find((c) => c.method === 'releaseRetestExecution');
+    assert.ok(releaseRetestCall);
+    assert.equal(releaseRetestCall.args[2], 'lock_finish_throw_retest');
+    assert.equal(auditEvents.some((e) => e.action === 'waf.retest.delegated'), false);
+    assert.equal(auditEvents.some((e) => e.action === 'waf.retest.completed'), false);
+  });
+
+  it('cancels delegated retest run when persistence fails after a continuation startTestRun success', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    const cancelledRunIds = [];
+    let startCalls = 0;
+    const { repositories, auditEvents, repoCalls } = createRecordingWafOrchestratorRepositories({
+      getRetestRequest: async () => ({
+        id: 'rt_1',
+        drift_event_id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: 'requested',
+        retest_plan: ['marker', 'fingerprint'],
+      }),
+      getWafDriftEvent: async () => ({
+        id: 'drift_1',
+        waf_asset_id: 'waf_asset_1',
+        status: 'retest_pending',
+        before_summary_json: { status: 'protected' },
+      }),
+      getTargetGroup: async () => ({
+        id: 'tg_1',
+        targets: [{ id: 'tgt_1', kind: 'fqdn', value: 'edge.example' }],
+      }),
+      updateRetestRequest: async () => {
+        throw new Error('db_write_failed');
+      },
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      newId: () => 'lock_finish_throw_retest_cont',
+      testRuns: {
+        startTestRun: async () => {
+          startCalls += 1;
+          return { run: { id: 'run_retest_comp_a' }, probe_job: { id: 'pjob_retest_comp_a' } };
+        },
+        cancelTestRun: async (_ctx, runId) => {
+          cancelledRunIds.push(runId);
+        },
+      },
+    });
+
+    const result = await svc.executeRetest(ctx, 'rt_1', {}, { probeMode: 'signed-worker' });
+    assert.equal(result.error, 'validation_plan_execution_failed');
+    assert.equal(result.status, 422);
+    assert.match(result.message, /retest execution lease persistence failed/i);
+    assert.equal(startCalls, 1);
+    assert.deepEqual(cancelledRunIds, ['run_retest_comp_a']);
+    assert.equal(repoCalls.some((c) => c.method === 'finishRetestExecution'), true);
+    const releaseRetestCont = repoCalls.find((c) => c.method === 'releaseRetestExecution');
+    assert.ok(releaseRetestCont);
+    assert.equal(releaseRetestCont.args[2], 'lock_finish_throw_retest_cont');
+    assert.equal(auditEvents.some((e) => e.action === 'waf.retest.delegated'), false);
+  });
+
+  it('cancels delegated test run when plan persistence fails after startTestRun', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    const cancelledRunIds = [];
+    let startCalled = false;
+    const { repositories, auditEvents, repoCalls } = createRecordingWafOrchestratorRepositories({
+      getValidationPlan: async () => ({
+        id: 'plan_1',
+        target_group_id: 'tg_1',
+        mode: 'manual',
+        state: 'draft',
+        scenarios: ['marker'],
+        max_concurrent: 1,
+        timeout_ms: 60_000,
+        delegated_jobs: [],
+        created_at: FIXED_NOW.toISOString(),
+        updated_at: FIXED_NOW.toISOString(),
+      }),
+      getTargetGroup: async () => ({
+        id: 'tg_1',
+        targets: [{ id: 'tgt_1', kind: 'fqdn', value: 'edge.example' }],
+      }),
+      updateValidationPlan: async () => {
+        throw new Error('db_write_failed');
+      },
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      newId: () => 'lock_finish_throw_plan',
+      testRuns: {
+        startTestRun: async () => {
+          startCalled = true;
+          return { run: { id: 'run_comp_1' }, probe_job: { id: 'pjob_comp_1' } };
+        },
+        cancelTestRun: async (_ctx, runId) => {
+          cancelledRunIds.push(runId);
+        },
+      },
+    });
+
+    const result = await svc.executeValidationPlan(ctx, 'plan_1', { probeMode: 'signed-worker' });
+    assert.equal(result.error, 'validation_plan_execution_failed');
+    assert.equal(result.status, 422);
+    assert.match(result.message, /persistence failed/i);
+    assert.equal(startCalled, true);
+    assert.deepEqual(cancelledRunIds, ['run_comp_1']);
+    assert.equal(repoCalls.some((c) => c.method === 'finishValidationPlanExecution'), true);
+    const releasePlanCall = repoCalls.find((c) => c.method === 'releaseValidationPlanExecution');
+    assert.ok(releasePlanCall);
+    assert.equal(releasePlanCall.args[2], 'lock_finish_throw_plan');
+    assert.equal(auditEvents.some((e) => e.action === 'waf.validation_plan.executed'), false);
+  });
+
+  it('propagates startTestRun errors without completing plan', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    const { repositories, repoCalls } = createRecordingWafOrchestratorRepositories({
+      getValidationPlan: async () => ({
+        id: 'plan_1',
+        target_group_id: 'tg_1',
+        mode: 'manual',
+        state: 'draft',
+        scenarios: ['marker'],
+        max_concurrent: 1,
+        timeout_ms: 60_000,
+        delegated_jobs: [],
+        created_at: FIXED_NOW.toISOString(),
+        updated_at: FIXED_NOW.toISOString(),
+      }),
+      getTargetGroup: async () => ({
+        id: 'tg_1',
+        targets: [{ id: 'tgt_1', kind: 'fqdn', value: 'edge.example' }],
+      }),
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      testRuns: {
+        startTestRun: async () => ({ error: 'concurrent_run_blocked', status: 409 }),
+      },
+    });
+
+    const result = await svc.executeValidationPlan(ctx, 'plan_1', { probeMode: 'signed-worker' });
+    assert.equal(result.error, 'concurrent_run_blocked');
+    assert.equal(result.status, 409);
+    assert.equal(repoCalls.some((c) => c.method === 'finishValidationPlanExecution'), false);
+    assert.equal(repoCalls.some((c) => c.method === 'updateValidationPlan'), false);
+    assert.equal(repoCalls.some((c) => c.method === 'releaseValidationPlanExecution'), true);
+  });
+
+  it('requests retest, patches drift, and audits', async () => {
+    const ctx = { tenantId: 'ten_demo', userId: 'usr_waf', role: 'admin' };
+    const fixed = new Date('2026-07-02T12:00:00.000Z');
+    const { repositories, auditEvents, repoCalls } = createRecordingWafOrchestratorRepositories({
+      getWafDriftEvent: async () => ({
+        id: 'drift_1',
+        waf_asset_id: 'waf_1',
+        status: 'open',
+        drift_type: 'marker_failed',
+        severity: 'high',
+        before_summary: {},
+        after_summary: {},
+      }),
+      createRetestRequest: async (_ctx, record) => record,
+    });
+    const svc = createPostgresWafOrchestratorServices(repositories, {
+      now: () => fixed,
+      newId: () => 'rt_pg_1',
+    });
+
+    const result = await svc.requestRetest(ctx, 'drift_1', {
+      retest_plan: ['marker'],
+      requested_by: 'usr_waf',
+    });
+    assert.equal(result.retest_request.id, 'rt_pg_1');
+    assert.equal(repoCalls.some((c) => c.method === 'patchWafDriftEvent'), true);
+    assert.equal(auditEvents[0].action, 'waf.retest.requested');
   });
 });

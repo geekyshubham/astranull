@@ -55,7 +55,7 @@ Unset or empty `app.tenant_id` fails closed (no visible rows). Global tables wit
 
 Child rows that reference another tenant-scoped entity use composite foreign keys `(tenant_id, parent_id) → parent(tenant_id, id)`, backed by `UNIQUE (tenant_id, id)` on each referenced parent table. This blocks cross-tenant object graphs even if application code mis-assigns ids. `scripts/validate-db-schema.mjs` enforces the named constraint set; do not reintroduce single-column `REFERENCES …(id)` for those relationships.
 
-`runMigrations()` holds a single client, opens a transaction, takes `pg_advisory_xact_lock` before reading `schema_migrations`, then applies or skips sorted migrations and commits once — so concurrent migrators do not race.
+`runMigrations()` holds a single client, takes `pg_advisory_xact_lock` before reading `schema_migrations`, and applies transactional migrations under that lock. Migrations containing `CREATE INDEX CONCURRENTLY` temporarily commit, take a session advisory lock, re-read `schema_migrations`, repair invalid matching indexes before rebuild, verify the index is valid, record the version, then reacquire the transaction lock and refresh applied versions before continuing.
 
 ## Production release blockers
 
