@@ -13,6 +13,7 @@ import { requireStaffPermission } from './lib/staffRbac.mjs';
 import * as signupIntake from './services/signupIntake.mjs';
 import * as internalManagement from './services/internalManagement.mjs';
 import * as publicSite from './services/publicSite.mjs';
+import * as bundledStagingAuth from './services/bundledStagingAuth.mjs';
 import { readArtifactUploadBody } from './lib/authorizationArtifactLedger.mjs';
 import { HttpBodyError, json, parseUrl, readBodyText, readJsonBody, serveStatic, text } from './lib/http.mjs';
 import { isProbeWorkerRoute } from './context.mjs';
@@ -2168,6 +2169,19 @@ async function handlePublicApi(req, res, url, runtimeConfig, options = {}) {
 
   if (method === 'GET' && path === '/v1/public/site-config') {
     return json(res, 200, publicSite.getPublicSiteConfig(runtimeConfig));
+  }
+
+  if (method === 'POST' && path === '/v1/auth/bundled-staging-login') {
+    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+    const result = bundledStagingAuth.loginBundledStagingPrincipal(body, runtimeConfig);
+    if (result.error) {
+      return json(res, result.status ?? 400, {
+        error: result.error,
+        message: result.message,
+        fields: result.fields,
+      });
+    }
+    return json(res, 200, result);
   }
 
   if (method === 'POST' && path === '/v1/signup-requests') {

@@ -1,15 +1,38 @@
+import {
+  buildStaffApiHeaders,
+  clearSession,
+  ensurePortalSession,
+} from './portal-auth.mjs';
+
 let route = 'overview';
 let selectedTenantId = null;
 let selectedSignupId = null;
 
+/** @type {{ config: Record<string, unknown>, session: Record<string, unknown> | null } | null} */
+let staffPortalState = null;
+
 const el = (id) => document.getElementById(id);
 
 function staffHeaders() {
-  return {
-    'x-principal-type': 'staff',
-    'x-staff-id': el('staffId')?.value ?? 'staff_admin',
-    'x-staff-role': el('staffRole')?.value ?? 'internal_admin',
-  };
+  if (!staffPortalState) {
+    return {
+      'x-principal-type': 'staff',
+      'x-staff-id': el('staffId')?.value ?? 'staff_admin',
+      'x-staff-role': el('staffRole')?.value ?? 'internal_admin',
+    };
+  }
+  return buildStaffApiHeaders(staffPortalState.config, staffPortalState.session);
+}
+
+function applyStaffPortalChrome() {
+  const context = document.querySelector('.internal-app .context');
+  const authMode = staffPortalState?.config?.authMode ?? 'dev-headers';
+  if (context) context.hidden = authMode !== 'dev-headers';
+  const session = staffPortalState?.session;
+  if (session && authMode === 'dev-headers') {
+    if (el('staffId') && session.staff_id) el('staffId').value = String(session.staff_id);
+    if (el('staffRole') && session.staff_role) el('staffRole').value = String(session.staff_role);
+  }
 }
 
 async function staffApi(path, options = {}) {
@@ -282,8 +305,24 @@ document.querySelectorAll('#staffNav a').forEach((a) => {
   };
 });
 
-el('staffId').onchange = () => render();
-el('staffRole').onchange = () => render();
+async function bootstrapStaffPortal() {
+  const gate = await ensurePortalSession('staff');
+  if (gate.redirectToLogin) {
+    window.location.replace(gate.loginUrl ?? '/internal/admin/login');
+    return;
+  }
+  staffPortalState = { config: gate.config, session: gate.session };
+  applyStaffPortalChrome();
+  document.getElementById('staffLogout')?.addEventListener('click', (event) => {
+    event.preventDefault();
+    clearSession();
+    window.location.href = staffPortalState?.config?.staffLoginPath ?? '/internal/admin/login';
+  });
+  el('staffId')?.addEventListener('change', () => render());
+  el('staffRole')?.addEventListener('change', () => render());
+  route = location.hash.replace('#', '') || 'overview';
+  await render();
+}
 
 window.addEventListener('hashchange', () => {
   route = location.hash.replace('#', '') || 'overview';
@@ -291,4 +330,4 @@ window.addEventListener('hashchange', () => {
 });
 
 route = location.hash.replace('#', '') || 'overview';
-render();
+bootstrapStaffPortal();

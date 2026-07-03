@@ -49,6 +49,11 @@ import {
   renderFindingVerdictExplanation,
   renderVerdictExplanation,
 } from './verdict-explanation.mjs';
+import {
+  buildApiHeaders,
+  clearSession,
+  ensurePortalSession,
+} from './portal-auth.mjs';
 
 /** User-facing platform promise (no-access-first, customer-declared scope). */
 const PLATFORM_PROMISE =
@@ -79,7 +84,9 @@ const NAV = [
 ];
 
 function uiPermissions() {
-  const role = el('role')?.value ?? '';
+  const role = portalState?.session?.role
+    ?? el('role')?.value
+    ?? '';
   return {
     findingWrite: roleHasUiPermission(role, 'finding:write'),
     bootstrapTokenCreate: roleHasUiPermission(role, 'bootstrap_token:create'),
@@ -152,13 +159,53 @@ const CUSTODY_CONTENT_CANONICALIZATION = 'json-key-sorted-v1';
 
 const el = (id) => document.getElementById(id);
 
+/** @type {{ config: import('./portal-auth.mjs').fetchPortalConfig extends () => Promise<infer T> ? T : never, session: Record<string, unknown> | null } | null} */
+let portalState = null;
+
 function headers() {
-  return {
-    'Content-Type': 'application/json',
-    'x-tenant-id': el('tenantId').value,
-    'x-user-id': 'usr_admin',
-    'x-role': el('role').value,
-  };
+  if (!portalState) {
+    return {
+      'Content-Type': 'application/json',
+      'x-tenant-id': el('tenantId')?.value ?? 'ten_demo',
+      'x-user-id': 'usr_admin',
+      'x-role': el('role')?.value ?? 'admin',
+    };
+  }
+  return buildApiHeaders(portalState.config, portalState.session);
+}
+
+function applyPortalChrome() {
+  const ctx = el('portalContext');
+  const userLine = el('portalUser');
+  const logout = el('portalLogout');
+  const session = portalState?.session;
+  const authMode = portalState?.config?.authMode ?? 'dev-headers';
+
+  if (ctx) {
+    ctx.hidden = authMode !== 'dev-headers';
+  }
+
+  if (session && authMode !== 'dev-headers') {
+    if (userLine) {
+      userLine.hidden = false;
+      const tenant = session.tenant_id ?? '—';
+      const user = session.user_id ?? '—';
+      const role = session.role ?? '—';
+      userLine.textContent = `${user} · ${role} · ${tenant}`;
+    }
+  } else if (session && authMode === 'dev-headers') {
+    if (el('tenantId') && session.tenant_id) el('tenantId').value = String(session.tenant_id);
+    if (el('role') && session.role) el('role').value = String(session.role);
+    if (userLine) userLine.hidden = true;
+  }
+
+  if (logout) {
+    logout.onclick = (event) => {
+      event.preventDefault();
+      clearSession();
+      window.location.href = portalState?.config?.loginUrl ?? '/login';
+    };
+  }
 }
 
 async function api(path, opts = {}) {
@@ -745,8 +792,24 @@ async function render() {
     const message = err?.message ?? 'Unable to load this page.';
     if (/forbidden/i.test(message)) {
       view.innerHTML = '<div class="empty">Your current role cannot access this page. Switch role or open a permitted section.</div>';
+    } else if (/unauthorized/i.test(message)) {
+      const loginUrl = portalState?.config?.loginUrl ?? '/login';
+      view.innerHTML = `<div class="card portal-auth-error">
+        <h2>Sign-in required</h2>
+        <p class="muted">Your session expired or this deployment requires OIDC login.</p>
+        <div class="friendly-empty-actions">
+          <a class="btn" href="${vizEsc(loginUrl)}">Log in</a>
+          <button type="button" class="btn secondary" data-action="portal-reload">Retry</button>
+        </div>
+      </div>`;
+      document.querySelector('[data-action="portal-reload"]')?.addEventListener('click', () => render());
     } else {
-      view.innerHTML = `<div class="card">Unable to load this page: ${vizEsc(message)}</div>`;
+      view.innerHTML = `<div class="card portal-error">
+        <h2>Unable to load this page</h2>
+        <p class="muted">${vizEsc(message)}</p>
+        <button type="button" class="btn secondary" data-action="portal-reload">Retry</button>
+      </div>`;
+      document.querySelector('[data-action="portal-reload"]')?.addEventListener('click', () => render());
     }
   }
 }
@@ -3371,8 +3434,30 @@ window.addEventListener('hashchange', () => {
   render();
 });
 
-el('tenantId').onchange = () => render();
-el('role').onchange = () => render();
+async function bootstrapPortal() {
+  const gate = await ensurePortalSession('customer');
+  if (gate.redirectToLogin) {
+    window.location.replace(gate.loginUrl ?? '/login');
+    return;
+  }
+  portalState = { config: gate.config, session: gate.session };
+  applyPortalChrome();
+  el('tenantId')?.addEventListener('change', () => {
+    if (portalState?.session && gate.config.authMode === 'dev-headers') {
+      portalState.session.tenant_id = el('tenantId').value;
+    }
+    render();
+  });
+  el('role')?.addEventListener('change', () => {
+    if (portalState?.session && gate.config.authMode === 'dev-headers') {
+      portalState.session.role = el('role').value;
+    }
+    render();
+  });
+  route = location.hash.replace('#', '') || 'dashboard';
+  await loadEnvBadge().catch(() => {});
+  await render();
+}
+
 route = location.hash.replace('#', '') || 'dashboard';
-loadEnvBadge().catch(() => {});
-render();
+bootstrapPortal();

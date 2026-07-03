@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Log in — AstraNull Customer Portal</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body class="public-page">
+  <header class="public-header">
+    <div class="public-brand"><a href="/">AstraNull</a></div>
+    <nav class="public-nav">
+      <a href="/signup" class="btn secondary">Sign up</a>
+    </nav>
+  </header>
+  <main class="public-form-shell">
+    <div class="card public-form-card login-card">
+      <p class="public-eyebrow">Customer portal</p>
+      <h1>Log in to AstraNull</h1>
+      <p class="muted" id="loginIntro">
+        Access your tenant readiness dashboard, target groups, agents, and safe validation runs.
+      </p>
+      <form id="loginForm" class="public-form">
+        <label>
+          Work email / user ID
+          <input id="userId" name="user_id" type="text" value="usr_admin" autocomplete="username" required />
+        </label>
+        <label>
+          Tenant
+          <input id="tenantId" name="tenant_id" type="text" value="ten_demo" readonly />
+        </label>
+        <label>
+          Role (staging demo)
+          <select id="role" name="role">
+            <option value="owner">owner</option>
+            <option value="admin" selected>admin</option>
+            <option value="engineer">engineer</option>
+            <option value="viewer">viewer</option>
+            <option value="auditor">auditor</option>
+            <option value="soc">soc</option>
+          </select>
+        </label>
+        <button type="submit" class="btn" id="loginSubmit">Continue to portal</button>
+      </form>
+      <p class="muted login-footnote" id="loginFootnote">
+        Hosted staging uses a bundled identity provider for demonstration. Production customers use your enterprise SSO.
+      </p>
+      <p class="public-error" id="loginError" hidden></p>
+      <p class="muted login-staff-link">
+        AstraNull staff? <a href="/internal/admin/login">Internal management sign-in</a>
+      </p>
+    </div>
+  </main>
+  <script type="module" src="/login.mjs"></script>
+</body>
+</html>

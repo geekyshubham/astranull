@@ -64,8 +64,10 @@ export function parseUrl(req) {
 const STATIC_ROUTE_ALIASES = {
   '/': '/landing.html',
   '/app': '/index.html',
+  '/login': '/login.html',
   '/signup': '/signup.html',
   '/internal/admin': '/internal/admin/index.html',
+  '/internal/admin/login': '/staff-login.html',
 };
 
 export async function serveStatic(req, res, url) {

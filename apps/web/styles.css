@@ -39,6 +39,18 @@ body { margin: 0; background: var(--bg); color: var(--text); }
 }
 .checkbox-row { display: flex !important; gap: 0.5rem; align-items: flex-start; font-weight: 500 !important; }
 .public-error { color: var(--danger); margin-top: 0.75rem; }
+.login-card { max-width: 520px; margin: 0 auto; }
+.login-footnote { font-size: 0.85rem; margin-top: 1rem; }
+.login-staff-link { margin-top: 1.25rem; font-size: 0.9rem; }
+.portal-surface-label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; color: #9fb0c0; margin: 0 0 0.75rem; }
+.portal-dev-hint { font-size: 0.72rem; margin-top: 0.5rem; }
+.portal-sidebar-foot { font-size: 0.78rem; margin-top: 1.25rem; }
+.portal-sidebar-foot a { color: #d5dee8; }
+.brand-link { color: inherit; text-decoration: none; }
+.topbar-titles h1 { margin: 0; }
+.portal-user { margin: 0.15rem 0 0; font-size: 0.85rem; }
+.portal-loading { color: var(--muted); }
+.portal-auth-error h2, .portal-error h2 { margin-top: 0; }
 .public-kv { display: grid; grid-template-columns: 8rem 1fr; gap: 0.35rem 1rem; }
 .staff-note { font-size: 0.75rem; margin-top: 1.5rem; color: #aeb9c5; }
 .internal-app .btn-sm { font-size: 0.78rem; padding: 0.28rem 0.5rem; }

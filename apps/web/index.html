@@ -7,10 +7,11 @@
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
-  <div class="app">
+  <div class="app" id="portalApp">
     <aside class="sidebar">
-      <div class="brand">AstraNull</div>
-      <div class="context">
+      <div class="brand"><a href="/app" class="brand-link">AstraNull</a></div>
+      <p class="portal-surface-label">Customer portal</p>
+      <div class="context" id="portalContext">
         <label>Tenant</label>
         <input id="tenantId" value="ten_demo" />
         <label>Role</label>
@@ -22,15 +23,22 @@
           <option>auditor</option>
           <option>owner</option>
         </select>
+        <p class="muted portal-dev-hint">Developer validation headers (local mode only).</p>
       </div>
       <nav id="nav"></nav>
+      <p class="portal-sidebar-foot muted">
+        <a href="/">Public site</a> · <a href="#" id="portalLogout">Sign out</a>
+      </p>
     </aside>
     <main class="content">
       <header class="topbar">
-        <h1 id="pageTitle">Dashboard</h1>
-        <span class="badge" id="envBadge">Developer validation · Safe checks only</span>
+        <div class="topbar-titles">
+          <h1 id="pageTitle">Dashboard</h1>
+          <p class="muted portal-user" id="portalUser" hidden></p>
+        </div>
+        <span class="badge" id="envBadge">Loading…</span>
       </header>
-      <section id="view"></section>
+      <section id="view"><div class="card portal-loading">Loading your readiness workspace…</div></section>
     </main>
   </div>
   <script type="module" src="/app.js"></script>

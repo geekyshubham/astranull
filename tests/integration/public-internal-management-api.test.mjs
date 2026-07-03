@@ -36,7 +36,10 @@ describe('public landing and internal management APIs', () => {
     assert.equal(landing.status, 200);
     assert.match(landing.text, /No-access-first/);
     assert.match(landing.text, /Sign up/);
-    assert.doesNotMatch(landing.text, /internal\/admin/);
+    const navMatch = landing.text.match(/<nav class="public-nav">([\s\S]*?)<\/nav>/);
+    assert.ok(navMatch);
+    assert.doesNotMatch(navMatch[1], /internal\/admin/);
+    assert.match(landing.text, /\/login/);
 
     const appShell = await request(baseUrl, 'GET', '/app');
     assert.equal(appShell.status, 200);
@@ -45,7 +48,12 @@ describe('public landing and internal management APIs', () => {
     const config = await request(baseUrl, 'GET', '/v1/public/site-config');
     assert.equal(config.status, 200);
     assert.equal(config.json.product_name, 'AstraNull');
+    assert.equal(config.json.customer_portal_path, '/app');
     assert.equal(config.json.safety_framing.no_default_cloud_access, true);
+
+    const loginPage = await request(baseUrl, 'GET', '/login');
+    assert.equal(loginPage.status, 200);
+    assert.match(loginPage.text, /Customer portal/);
   });
 
   it('accepts public signup requests and exposes public status', async () => {

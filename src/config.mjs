@@ -458,7 +458,11 @@ export function loadRuntimeConfig(env = process.env) {
     'ASTRANULL_CONNECTORS_ENABLED_TENANTS',
   );
 
-  const publicLoginUrl = (env.ASTRANULL_PUBLIC_LOGIN_URL ?? '/app').trim() || '/app';
+  const bundledStagingOidc = env.ASTRANULL_BUNDLED_STAGING_OIDC === '1';
+  const publicLoginUrl = (
+    env.ASTRANULL_PUBLIC_LOGIN_URL
+    ?? (bundledStagingOidc ? '/login' : '/app')
+  ).trim() || (bundledStagingOidc ? '/login' : '/app');
   const publicSignupEnabled = env.ASTRANULL_PUBLIC_SIGNUP_ENABLED !== '0';
 
   return {
@@ -466,7 +470,7 @@ export function loadRuntimeConfig(env = process.env) {
     sessionSecret,
     oidc,
     deploymentProfile,
-    bundledStagingOidc: env.ASTRANULL_BUNDLED_STAGING_OIDC === '1',
+    bundledStagingOidc,
     publicSite: {
       loginUrl: publicLoginUrl,
       signupEnabled: publicSignupEnabled,

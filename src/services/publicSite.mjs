@@ -1,7 +1,8 @@
 import { SUBSCRIPTION_PLANS } from '../contracts/subscriptions.mjs';
 
 export function getPublicSiteConfig(runtimeConfig) {
-  const loginUrl = (runtimeConfig.publicSite?.loginUrl ?? '/app').trim() || '/app';
+  const defaultLogin = runtimeConfig.bundledStagingOidc ? '/login' : '/app';
+  const loginUrl = (runtimeConfig.publicSite?.loginUrl ?? defaultLogin).trim() || defaultLogin;
   const signupEnabled = runtimeConfig.publicSite?.signupEnabled !== false;
   return {
     product_name: 'AstraNull',
@@ -10,6 +11,10 @@ export function getPublicSiteConfig(runtimeConfig) {
     signup_enabled: signupEnabled,
     signup_path: '/signup',
     customer_portal_path: '/app',
+    internal_admin_path: '/internal/admin',
+    staff_login_path: '/internal/admin/login',
+    auth_mode: runtimeConfig.authMode ?? 'dev-headers',
+    bundled_staging_login_enabled: runtimeConfig.bundledStagingOidc === true,
     plans: Object.values(SUBSCRIPTION_PLANS).map((p) => ({
       id: p.id,
       name: p.name,
