@@ -280,7 +280,19 @@ describe('submit staging evidence utility', () => {
         error: 'invalid_promotion_environment',
         status: 400,
         environment: 'qa-lab',
-        allowed: ['staging', 'production', 'local-staging'],
+        allowed: ['staging', 'production'],
+      },
+    );
+    assert.deepEqual(
+      operatorAttestedEnvironmentRejection({
+        kind: 'migration_apply',
+        evidence: { environment: 'local-staging' },
+      }),
+      {
+        error: 'local_staging_evidence_rejected',
+        status: 400,
+        environment: 'local-staging',
+        allowed: ['staging', 'production'],
       },
     );
     assert.equal(
@@ -289,6 +301,24 @@ describe('submit staging evidence utility', () => {
         evidence: PRODUCTION_RELEASE_EVIDENCE_COMPLETE.third_party_security_review,
       }),
       null,
+    );
+  });
+
+  it('rejects dry-run records during submission validation', () => {
+    const records = completeEvidenceRecords(['migration_apply']).map((record) => ({
+      ...record,
+      dry_run: true,
+      submittable: false,
+      status: 'draft',
+    }));
+    assert.throws(
+      () => validateOperatorAttestedRecords({
+        release_id: 'rel-staging-2026-07-03',
+        dry_run: true,
+        submittable: false,
+        records,
+      }),
+      /Dry-run or non-submittable evidence cannot be submitted/,
     );
   });
 
@@ -306,6 +336,23 @@ describe('submit staging evidence utility', () => {
       },
     );
     assert.equal(rejected.error, 'simulated_environment_rejected');
+    assert.equal(rejected.status, 400);
+  });
+
+  it('recordProductionReleaseEvidence rejects local-staging environments at the service boundary', () => {
+    freshStore();
+    const rejected = recordProductionReleaseEvidence(
+      { tenantId: 'ten_demo', userId: 'usr_operator', role: 'admin' },
+      {
+        kind: 'migration_apply',
+        release_id: 'rel-staging-2026-07-03',
+        evidence: {
+          ...PRODUCTION_RELEASE_EVIDENCE_COMPLETE.migration_apply,
+          environment: 'local-staging',
+        },
+      },
+    );
+    assert.equal(rejected.error, 'local_staging_evidence_rejected');
     assert.equal(rejected.status, 400);
   });
 });

@@ -173,6 +173,7 @@ function notificationProvider(channel, suffix) {
   return {
     provider_id: `${channel}-${suffix}`,
     channel,
+    delivery_mode: channel,
     encrypted_credential_ref_id: `secret://vault/notif/${channel}-${suffix}`,
     rotation_owner: 'platform-ops',
     retry_dlq_policy: {

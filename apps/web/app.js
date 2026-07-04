@@ -2245,6 +2245,7 @@ async function viewReleaseEvidence() {
   })}
     ${renderReleaseEvidencePanel({
     items: evidence.items,
+    attestation: attestation.attestation,
     permissionDenied: evidence.permissionDenied,
     loadError: evidence.loadError,
   })}

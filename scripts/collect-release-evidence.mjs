@@ -7,6 +7,7 @@ import {
   PRODUCTION_RELEASE_EVIDENCE_KINDS,
   validateProductionReleaseEvidence,
 } from '../src/contracts/productionReleaseEvidence.mjs';
+import { isNonSubmittableEvidenceRecord } from '../src/contracts/releaseEvidenceProvenance.mjs';
 import {
   adaptContractEvidence,
   buildCollectorScriptInput,
@@ -339,7 +340,7 @@ export function extractProductionReleaseRecord(kind, artifact, context) {
   };
 }
 
-export function validateCollectedRecord(record) {
+export function validateCollectedRecord(record, options = {}) {
   const validation = validateProductionReleaseEvidence(record.kind, record.evidence);
   if (!validation.ok) {
     const problems = [
@@ -352,6 +353,9 @@ export function validateCollectedRecord(record) {
   if (record.rehearsal_only === true) {
     throw new Error(`${record.kind} record must not include rehearsal_only=true`);
   }
+  if (options.requireSubmittable === true && isNonSubmittableEvidenceRecord(record)) {
+    throw new Error(`${record.kind} record is non-submittable dry-run or draft evidence`);
+  }
   return validation;
 }
 
@@ -362,10 +366,14 @@ export function buildRecordsPayload(records, context) {
     created_at: context.createdAt,
     release_id: context.releaseId,
     environment: context.environment,
+    dry_run: context.dryRun === true,
+    submittable: context.dryRun !== true,
     records,
     caveats: [
       'Collected via scripts/collect-release-evidence.mjs invoking metadata-only evidence CLIs.',
-      'Staging-sim inventory for local gap audit only; submit operator-attested staging records via scripts/submit-staging-evidence.mjs.',
+      context.dryRun === true
+        ? 'Dry-run records are contract-shaped previews only; they are non-submittable and cannot satisfy production readiness.'
+        : 'Staging-sim inventory for local gap audit only; submit operator-attested staging records via scripts/submit-staging-evidence.mjs.',
       'External staging, security, SOC, and legal signoff gates remain required beyond this bundle.',
     ],
   };
@@ -401,6 +409,10 @@ export function runCollector(collector, context, options = {}) {
     mkdirSync(path.dirname(artifactPath), { recursive: true });
     writeFileSync(artifactPath, `${JSON.stringify(dryArtifact, null, 2)}\n`);
     const record = extractProductionReleaseRecord(collector.kind, dryArtifact, context);
+    record.status = 'draft';
+    record.submittable = false;
+    record.dry_run = true;
+    record.collector_dry_run = true;
     validateCollectedRecord(record);
     return { kind: collector.kind, ok: true, artifactPath, dryRun: true, record };
   }

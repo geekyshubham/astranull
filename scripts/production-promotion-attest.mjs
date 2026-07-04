@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..');
 
-function shell(command, inherit = false) {
+function defaultShell(command, inherit = false) {
   execSync(command, {
     cwd: REPO_ROOT,
     stdio: inherit ? 'inherit' : 'pipe',
@@ -33,17 +33,18 @@ export function parseArgs(argv = []) {
   return opts;
 }
 
-export async function runProductionPromotionAttest(opts = {}) {
+export async function runProductionPromotionAttest(opts = {}, deps = {}) {
+  const shell = deps.shell ?? defaultShell;
   const baseUrl = String(opts.baseUrl || process.env.ASTRANULL_HOSTED_STAGING_BASE_URL || '').replace(/\/$/, '');
   if (!baseUrl) throw new Error('ASTRANULL_HOSTED_STAGING_BASE_URL or --base-url is required');
-
-  process.env.ASTRANULL_HOSTED_STAGING_BASE_URL = baseUrl;
-  process.env.ASTRANULL_RELEASE_ID = 'rel-hosted-staging-2026-07-03';
 
   shell('npm test', true);
   shell('npm run lint');
   shell('npm run safety');
   shell('node scripts/validate-db-schema.mjs');
+
+  process.env.ASTRANULL_HOSTED_STAGING_BASE_URL = baseUrl;
+  process.env.ASTRANULL_RELEASE_ID = 'rel-hosted-staging-2026-07-03';
 
   shell(`node scripts/run-live-oidc-staging-login.mjs --base-url ${JSON.stringify(baseUrl)}`);
   shell(`node scripts/run-live-ui-accessibility-matrix.mjs --base-url ${JSON.stringify(baseUrl)}`);
@@ -52,12 +53,32 @@ export async function runProductionPromotionAttest(opts = {}) {
   shell(`ASTRANULL_HOSTED_STAGING_BASE_URL=${JSON.stringify(baseUrl)} npm run staging:hosted:attest`, true);
 
   shell('node scripts/apply-release-gate-closeouts.mjs');
+  shell('node scripts/production-readiness-gap-audit.mjs --evidence output/release-evidence/records.json');
+  try {
+    shell('node scripts/attach-external-verification-markers.mjs --force');
+  } catch (err) {
+    console.log(`production-promotion-attest: external verification manifest attach skipped (${err.message})`);
+  }
+  try {
+    shell('node scripts/verify-external-production-readiness.mjs --validate-only');
+  } catch {
+    console.log(
+      'production-promotion-attest: external verification incomplete (expected until live markers are attached).',
+    );
+  }
 
   const gapOut = path.join(REPO_ROOT, 'output/production-readiness-gap-audit.json');
-  const report = JSON.parse(readFileSync(gapOut, 'utf8'));
+  const readGapAuditReport = deps.readGapAuditReport
+    ?? (() => JSON.parse(readFileSync(gapOut, 'utf8')));
+  const report = readGapAuditReport();
   if (!report.production_ready) {
     throw new Error(
       `production_ready=false after promotion attest (external_blockers=${report.release_checklist_gates?.combined?.external_blockers ?? '?'})`,
+    );
+  }
+  if (report.customer_production_ready !== true) {
+    console.log(
+      'production-promotion-attest: customer_production_ready=false — attach live external verification markers before customer launch.',
     );
   }
   return report;

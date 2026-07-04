@@ -134,8 +134,13 @@ describe('collect release evidence orchestrator', () => {
     assert.equal(payload.rehearsal_only, undefined);
     assert.equal(payload.records.length, PRODUCTION_RELEASE_EVIDENCE_KINDS.length);
 
+    assert.equal(payload.dry_run, true);
+    assert.equal(payload.submittable, false);
+
     for (const record of payload.records) {
-      assert.equal(record.status, 'accepted');
+      assert.equal(record.status, 'draft');
+      assert.equal(record.submittable, false);
+      assert.equal(record.dry_run, true);
       assert.notEqual(record.rehearsal_only, true);
       const validation = validateProductionReleaseEvidence(record.kind, record.evidence);
       assert.equal(validation.ok, true, `${record.kind} should be contract-valid`);

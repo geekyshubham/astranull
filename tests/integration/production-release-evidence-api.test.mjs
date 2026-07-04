@@ -325,6 +325,124 @@ describe('production release evidence API', () => {
     assert.notEqual(attestation.json.attestation.signoff_status, 'evidence_complete');
   });
 
+  it('rejects local-staging promotion evidence at API boundary', async () => {
+    const admin = demoHeaders('admin');
+    const created = await request(baseUrl, 'POST', '/v1/production-release-evidence', {
+      headers: admin,
+      body: {
+        kind: 'migration_apply',
+        release_id: 'rel-staging-2026-07-03',
+        evidence: {
+          ...PRODUCTION_RELEASE_EVIDENCE_COMPLETE.migration_apply,
+          environment: 'local-staging',
+        },
+      },
+    });
+    assert.equal(created.status, 400);
+    assert.equal(created.json.error, 'local_staging_evidence_rejected');
+    assert.equal(getStore().productionReleaseEvidence.length, 0);
+  });
+
+  it('rejects dry-run evidence bodies at API boundary', async () => {
+    const admin = demoHeaders('admin');
+    const created = await request(baseUrl, 'POST', '/v1/production-release-evidence', {
+      headers: admin,
+      body: {
+        kind: 'third_party_security_review',
+        release_id: 'rel-staging-2026-07-03',
+        dry_run: true,
+        evidence: {
+          reviewer_org: 'Independent Security Review Co',
+          scope_summary: 'scope',
+          review_report_uri: 'evidence://security-review/report',
+          findings_status: 'all-critical-high-remediated',
+          remediation_tracker_uri: 'evidence://security-review/remediation-tracker',
+          risk_acceptance_reference: 'risk://accepted-medium-items',
+          reviewed_at: '2026-07-02T00:00:00.000Z',
+          security_owner: 'security-lead',
+        },
+      },
+    });
+    assert.equal(created.status, 400);
+    assert.equal(created.json.error, 'dry_run_evidence_rejected');
+    assert.equal(getStore().productionReleaseEvidence.length, 0);
+  });
+
+  it('rejects mixed-release attestation without release_id filter', async () => {
+    const admin = demoHeaders('admin', 'ten_demo', 'usr_mixed_release');
+    for (const [index, record] of completeEvidenceRecords(PRODUCTION_RELEASE_EVIDENCE_KINDS).entries()) {
+      const created = await request(baseUrl, 'POST', '/v1/production-release-evidence', {
+        headers: admin,
+        body: {
+          kind: record.kind,
+          release_id: index < 16 ? 'rel_A' : 'rel_B',
+          evidence: record.evidence,
+        },
+      });
+      assert.equal(created.status, 201, `expected 201 for kind ${record.kind}`);
+    }
+
+    const res = await request(baseUrl, 'GET', '/v1/production-release-evidence/attestation', {
+      headers: admin,
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.json.attestation.production_ready, false);
+    assert.ok(
+      res.json.attestation.blocker_summary.some((entry) => entry.includes('Mixed release_id values')),
+    );
+  });
+
+  it('does not count records with missing release_id for filtered attestation', async () => {
+    const admin = demoHeaders('admin', 'ten_demo', 'usr_unscoped_release');
+    const kinds = ['third_party_security_review', 'migration_apply'];
+    for (const [index, record] of completeEvidenceRecords(kinds).entries()) {
+      const body = {
+        kind: record.kind,
+        evidence: record.evidence,
+      };
+      if (index === 0) body.release_id = 'rel_A';
+      const created = await request(baseUrl, 'POST', '/v1/production-release-evidence', {
+        headers: admin,
+        body,
+      });
+      assert.equal(created.status, 201, `expected 201 for kind ${record.kind}`);
+    }
+
+    const res = await request(baseUrl, 'GET', '/v1/production-release-evidence/attestation?release_id=rel_A', {
+      headers: admin,
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.json.attestation.release_id, 'rel_A');
+    assert.equal(res.json.records.length, 1);
+    assert.equal(res.json.records[0].kind, 'third_party_security_review');
+    assert.equal(res.json.attestation.production_ready, false);
+    assert.ok(res.json.attestation.required_evidence_kinds.missing.includes('migration_apply'));
+  });
+
+  it('scopes attestation to a single release_id query parameter', async () => {
+    const admin = demoHeaders('admin', 'ten_demo', 'usr_scoped_release');
+    const kinds = ['third_party_security_review', 'migration_apply', 'operator_runbook_exercise'];
+    for (const [index, record] of completeEvidenceRecords(kinds).entries()) {
+      const created = await request(baseUrl, 'POST', '/v1/production-release-evidence', {
+        headers: admin,
+        body: {
+          kind: record.kind,
+          release_id: index === 0 ? 'rel_A' : 'rel_B',
+          evidence: record.evidence,
+        },
+      });
+      assert.equal(created.status, 201);
+    }
+
+    const res = await request(baseUrl, 'GET', '/v1/production-release-evidence/attestation?release_id=rel_A', {
+      headers: admin,
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.json.attestation.release_id, 'rel_A');
+    assert.equal(res.json.records.length, 1);
+    assert.equal(res.json.records[0].kind, 'third_party_security_review');
+  });
+
   it('isolates list and get by tenant', async () => {
     const tenantA = demoHeaders('admin', 'ten_demo', 'usr_admin_a');
     const tenantB = demoHeaders('admin', 'ten_other', 'usr_admin_b');

@@ -19,6 +19,7 @@ import {
   parseP0DispositionGateCounts,
   parseProgressTaskCounts,
   parseReleasePlanGateTableCounts,
+  splitMarkdownTableRowCells,
 } from '../../scripts/production-readiness-gap-audit.mjs';
 import {
   DEFAULT_STAGING_READINESS_PROFILE,
@@ -27,6 +28,7 @@ import {
 import {
   completeEvidenceRecords,
   PRODUCTION_RELEASE_EVIDENCE_COMPLETE,
+  stampAcceptedReleaseRecords,
 } from '../fixtures/productionReleaseEvidenceComplete.mjs';
 
 const tempDirs = [];
@@ -70,7 +72,7 @@ const KMS_VAULT_POSTURE = {
   evidence_uri: 'evidence://security/kms-vault-posture',
 };
 
-function safeValidationGaBaselineRecords() {
+function safeValidationGaBaselineRecords(releaseId = 'rel_safe_validation_ga') {
   const kinds = resolveReleaseProfileKinds('safe-validation-ga');
   const contractKinds = kinds.filter((kind) => PRODUCTION_RELEASE_EVIDENCE_COMPLETE[kind]);
   const records = completeEvidenceRecords(contractKinds);
@@ -83,7 +85,11 @@ function safeValidationGaBaselineRecords() {
     };
     records.push({ kind, evidence: evidenceByKind[kind] });
   }
-  return records.map((record) => ({ ...record, status: 'accepted' }));
+  return stampAcceptedReleaseRecords(records, releaseId);
+}
+
+function acceptedRecordsForRelease(releaseId, kinds = PRODUCTION_RELEASE_EVIDENCE_KINDS) {
+  return stampAcceptedReleaseRecords(completeEvidenceRecords(kinds), releaseId);
 }
 
 const closedChecklistOptions = {
@@ -106,6 +112,7 @@ describe('production readiness gap audit', () => {
       profile: DEFAULT_STAGING_READINESS_PROFILE,
       validateOnly: false,
       allowExternalBlockersOnly: false,
+      externalVerification: null,
       help: false,
     });
     assert.deepEqual(parseArgs(['--evidence', 'bundle.json', '--validate-only']), {
@@ -115,6 +122,7 @@ describe('production readiness gap audit', () => {
       profile: DEFAULT_STAGING_READINESS_PROFILE,
       validateOnly: true,
       allowExternalBlockersOnly: false,
+      externalVerification: null,
       help: false,
     });
     assert.equal(parseArgs(['--profile', 'high-scale-ga']).profile, 'high-scale-ga');
@@ -189,6 +197,33 @@ Not a checklist - [ ] fake
     assert.match(counts.open_items[0].text, /Product and API contract accuracy/);
   });
 
+  it('parses release-plan gate rows when evidence cells contain escaped pipes', () => {
+    const counts = parseReleasePlanGateTableCounts(`
+## Production release gates (all releases)
+
+| Gate | Owner | Evidence / artifact | Status |
+|---|---|---|---|
+| Staging readiness attestation (profile-aware) | Platform + QA | full\\|safe-validation-ga\\|high-scale-ga | **Closed** — profile matrix |
+| Staging QA / E2E matrix | QA | Accepted matrix | Signed off |
+`);
+
+    assert.equal(counts.total_items, 2);
+    assert.equal(counts.complete, 2);
+    assert.equal(counts.external_blockers, 0);
+    assert.equal(counts.open_gates, false);
+    assert.deepEqual(
+      splitMarkdownTableRowCells(
+        '| Staging readiness attestation (profile-aware) | Platform + QA | full\\|safe-validation-ga\\|high-scale-ga | **Closed** — profile matrix |',
+      ),
+      [
+        'Staging readiness attestation (profile-aware)',
+        'Platform + QA',
+        'full|safe-validation-ga|high-scale-ga',
+        'Closed — profile matrix',
+      ],
+    );
+  });
+
   it('treats closed release-plan gate table rows as complete', () => {
     const counts = parseReleasePlanGateTableCounts(`
 ## Open production release gates (all releases)
@@ -203,6 +238,50 @@ Not a checklist - [ ] fake
     assert.equal(counts.complete, 2);
     assert.equal(counts.external_blockers, 0);
     assert.equal(counts.open_gates, false);
+  });
+
+  it('treats unrecognized release-plan statuses as external blockers', () => {
+    const counts = parseReleasePlanGateTableCounts(`
+## Production release gates (all releases)
+
+| Gate | Owner | Evidence / artifact | Status |
+|---|---|---|---|
+| Product and API contract accuracy | Product | docs | In review |
+| Staging QA / E2E matrix | QA | matrix | Waiting on signoff |
+| Independent security review | Security | report | **Closed** |
+`);
+
+    assert.equal(counts.total_items, 3);
+    assert.equal(counts.complete, 1);
+    assert.equal(counts.external_blockers, 2);
+    assert.equal(counts.open_gates, true);
+    assert.equal(counts.external_blocker_items.length, 2);
+    assert.match(counts.external_blocker_items[0].text, /unrecognized status/i);
+  });
+
+  it('parses Production release gates (all releases) heading and counts closed rows', () => {
+    const counts = parseReleasePlanGateTableCounts(`
+## Production release gates (all releases)
+
+| Gate | Owner | Evidence / artifact | Status |
+|---|---|---|---|
+| Product and API contract accuracy | Product + Backend | Published docs | **Closed** — staging execution |
+| Staging QA / E2E matrix | QA | Accepted matrix | **Closed** |
+`);
+
+    assert.equal(counts.total_items, 2);
+    assert.equal(counts.complete, 2);
+    assert.equal(counts.external_blockers, 0);
+    assert.equal(counts.open_gates, false);
+  });
+
+  it('loadReleaseDocGateCounts release_plan has gate table rows from repo docs', () => {
+    const gates = loadReleaseDocGateCounts();
+    assert.equal(
+      gates.release_plan.total_items,
+      14,
+      `expected release_plan.total_items === 14, got ${JSON.stringify(gates.release_plan)}`,
+    );
   });
 
   it('parses valid P0 disposition rows as complete local tracker dispositions', () => {
@@ -266,13 +345,12 @@ Not a checklist - [ ] fake
   });
 
   it('passes profile into attestation so high-scale-ga requires high-scale-only evidence', () => {
-    const records = safeValidationGaBaselineRecords();
     const safeReport = aggregateProductionReadinessGapAudit(
-      { records, releaseId: 'rel_safe' },
+      { records: safeValidationGaBaselineRecords('rel_safe'), releaseId: 'rel_safe' },
       { profile: 'safe-validation-ga', ...closedChecklistOptions },
     );
     const highReport = aggregateProductionReadinessGapAudit(
-      { records, releaseId: 'rel_high' },
+      { records: safeValidationGaBaselineRecords('rel_high'), releaseId: 'rel_high' },
       { profile: 'high-scale-ga', ...closedChecklistOptions },
     );
 
@@ -355,13 +433,26 @@ Not a checklist - [ ] fake
     );
   });
 
-  it('exits zero when evidence is complete and only external checklist blockers remain', () => {
-    const records = completeEvidenceRecords(PRODUCTION_RELEASE_EVIDENCE_KINDS).map((entry) => ({
-      ...entry,
-      status: 'accepted',
-    }));
+  it('does not count unscoped records toward a filtered release gap audit', () => {
+    const records = stampAcceptedReleaseRecords(
+      completeEvidenceRecords(['third_party_security_review', 'migration_apply']),
+      'rel_A',
+    ).map((record, index) => (index === 1 ? { ...record, release_id: undefined } : record));
     const report = aggregateProductionReadinessGapAudit(
-      { releaseId: 'rel_external_only', records },
+      { releaseId: 'rel_A', records },
+      {
+        requiredKinds: ['third_party_security_review', 'migration_apply'],
+        ...closedChecklistOptions,
+      },
+    );
+    assert.equal(report.evidence_attestation_complete, false);
+    assert.equal(report.production_ready, false);
+    assert.ok(report.required_evidence_kinds.missing.includes('migration_apply'));
+  });
+
+  it('exits zero when evidence is complete and only external checklist blockers remain', () => {
+    const report = aggregateProductionReadinessGapAudit(
+      { releaseId: 'rel_external_only', records: acceptedRecordsForRelease('rel_external_only') },
       {
         releaseChecklistMarkdown: '- [x] OIDC ready. **Remaining (external):** IdP signoff\n',
         releasePlanMarkdown: '- [x] release verification complete\n',
@@ -443,15 +534,10 @@ Not a checklist - [ ] fake
   });
 
   it('builds 100% production readiness scorecard for complete hosted inventory', () => {
-    const records = completeEvidenceRecords(PRODUCTION_RELEASE_EVIDENCE_KINDS).map((entry) => ({
-      ...entry,
-      status: 'accepted',
-    }));
-    records.push({
-      kind: 'staging_e2e_matrix',
-      status: 'accepted',
-      evidence: STAGING_E2E_MATRIX,
-    });
+    const records = stampAcceptedReleaseRecords([
+      ...completeEvidenceRecords(PRODUCTION_RELEASE_EVIDENCE_KINDS),
+      { kind: 'staging_e2e_matrix', evidence: STAGING_E2E_MATRIX },
+    ], 'rel_score');
     const report = aggregateProductionReadinessGapAudit(
       { releaseId: 'rel_score', records },
       {
@@ -484,12 +570,12 @@ Not a checklist - [ ] fake
   });
 
   it('keeps rehearsal evidence from satisfying production readiness', () => {
-    const records = completeEvidenceRecords(PRODUCTION_RELEASE_EVIDENCE_KINDS).map((entry) => ({
-      ...entry,
-      status: 'accepted',
-    }));
     const report = aggregateProductionReadinessGapAudit(
-      { releaseId: 'rel_rehearsal', rehearsal_only: true, records },
+      {
+        releaseId: 'rel_rehearsal',
+        rehearsal_only: true,
+        records: acceptedRecordsForRelease('rel_rehearsal'),
+      },
       {
         ...closedChecklistOptions,
         scorecard: {
@@ -510,12 +596,8 @@ Not a checklist - [ ] fake
   });
 
   it('does not give customer-facing launch 100% without portal browser E2E evidence', () => {
-    const records = completeEvidenceRecords(PRODUCTION_RELEASE_EVIDENCE_KINDS).map((entry) => ({
-      ...entry,
-      status: 'accepted',
-    }));
     const report = aggregateProductionReadinessGapAudit(
-      { releaseId: 'rel_no_portal', records },
+      { releaseId: 'rel_no_portal', records: acceptedRecordsForRelease('rel_no_portal') },
       {
         ...closedChecklistOptions,
         scorecard: {
@@ -592,14 +674,10 @@ Not a checklist - [ ] fake
   });
 
   it('keeps production_ready false when evidence is complete but checklist gates remain open', () => {
-    const records = completeEvidenceRecords(PRODUCTION_RELEASE_EVIDENCE_KINDS).map((entry) => ({
-      ...entry,
-      status: 'accepted',
-    }));
     const report = aggregateProductionReadinessGapAudit(
       {
         releaseId: 'rel_complete_local',
-        records,
+        records: acceptedRecordsForRelease('rel_complete_local'),
       },
       {
         releaseChecklistMarkdown: '- [~] placement review UX still open\n',
@@ -616,12 +694,8 @@ Not a checklist - [ ] fake
   });
 
   it('keeps production_ready false when release-plan table gates remain open', () => {
-    const records = completeEvidenceRecords(PRODUCTION_RELEASE_EVIDENCE_KINDS).map((entry) => ({
-      ...entry,
-      status: 'accepted',
-    }));
     const report = aggregateProductionReadinessGapAudit(
-      { releaseId: 'rel_plan_open', records },
+      { releaseId: 'rel_plan_open', records: acceptedRecordsForRelease('rel_plan_open') },
       {
         releaseChecklistMarkdown: '- [x] checklist closed\n',
         releasePlanMarkdown: `
@@ -665,10 +739,7 @@ Not a checklist - [ ] fake
     const report = aggregateProductionReadinessGapAudit(
       {
         releaseId: 'rel_validate',
-        records: completeEvidenceRecords(resolveReleaseProfileKinds('full')).map((record) => ({
-          ...record,
-          status: 'accepted',
-        })),
+        records: acceptedRecordsForRelease('rel_validate', resolveReleaseProfileKinds('full')),
       },
       {
         releaseChecklistMarkdown: '- [x] OIDC ready. **Deferred (operational config):** IdP signoff\n',
@@ -742,14 +813,13 @@ Not a checklist - [ ] fake
     const report = aggregateProductionReadinessGapAudit(
       {
         releaseId: 'rel_invalid_adapter',
-        records: [{
+        records: stampAcceptedReleaseRecords([{
           kind: 'governed_adapter',
-          status: 'accepted',
           evidence: {
             ...PRODUCTION_RELEASE_EVIDENCE_COMPLETE.governed_adapter,
             adapter_type: 'partner_http',
           },
-        }],
+        }], 'rel_invalid_adapter'),
       },
       {
         requiredKinds: ['governed_adapter'],
@@ -771,9 +841,8 @@ Not a checklist - [ ] fake
     const report = aggregateProductionReadinessGapAudit(
       {
         releaseId: 'rel_incomplete_staging_matrix',
-        records: [{
+        records: stampAcceptedReleaseRecords([{
           kind: 'staging_e2e_matrix',
-          status: 'accepted',
           evidence: {
             ...STAGING_E2E_MATRIX,
             environment: 'local-staging',
@@ -783,7 +852,7 @@ Not a checklist - [ ] fake
               { scenario_id: 'safe_validation_loop', status: 'passed' },
             ],
           },
-        }],
+        }], 'rel_incomplete_staging_matrix'),
       },
       {
         requiredKinds: ['staging_e2e_matrix'],
@@ -808,12 +877,8 @@ Not a checklist - [ ] fake
   });
 
   it('closed checklist and complete accepted evidence yields production_ready and exit code zero', () => {
-    const records = completeEvidenceRecords(PRODUCTION_RELEASE_EVIDENCE_KINDS).map((entry) => ({
-      ...entry,
-      status: 'accepted',
-    }));
     const report = aggregateProductionReadinessGapAudit(
-      { records, releaseId: 'rel_ready' },
+      { records: acceptedRecordsForRelease('rel_ready'), releaseId: 'rel_ready' },
       closedChecklistOptions,
     );
     assert.equal(report.evidence_attestation_complete, true);

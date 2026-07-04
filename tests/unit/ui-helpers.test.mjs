@@ -23,7 +23,10 @@ import {
   renderOnboardingHeartbeatPanel,
   renderOnboardingPlacementTestPanel,
   renderOnboardingWizard,
+  formatStagingAttestationProfileLabel,
   renderReleaseEvidencePanel,
+  resolveReleaseEvidenceBadge,
+  resolveStagingAttestationBadge,
   renderStagingReadinessAttestationPanel,
   renderReportBuilder,
   renderSupportReadinessPanel,
@@ -431,7 +434,9 @@ describe('ui-helpers', () => {
         evidence: { evidence_uri: 'evidence://migrations/runner', runner_evidence_uri: 'ignored' },
       }],
     });
-    assert.match(html, /does <strong>not<\/strong> mean production readiness is complete/);
+    assert.match(html, /Inventory incomplete/);
+    assert.doesNotMatch(html, /Release gates open/);
+    assert.match(html, /does <strong>not<\/strong> prove customer-specific launch by itself/);
     assert.match(html, /rel_test/);
     assert.match(html, /evidence:\/\/migrations\/runner/);
     assert.equal(html.includes('runner_evidence_uri'), false);
@@ -461,7 +466,7 @@ describe('ui-helpers', () => {
     };
     const blockedHtml = renderStagingReadinessAttestationPanel(blocked);
     assert.match(blockedHtml, /staging-readiness-attestation/);
-    assert.match(blockedHtml, /Attestation blocked/);
+    assert.match(blockedHtml, /Inventory incomplete/);
     assert.match(blockedHtml, /docs\/release-checklist\.md/);
     assert.match(blockedHtml, /rel_blocked/);
     assert.match(blockedHtml, /Missing required evidence kind/);
@@ -485,7 +490,23 @@ describe('ui-helpers', () => {
     const readyHtml = renderStagingReadinessAttestationPanel(ready);
     assert.match(readyHtml, /production_ready/);
     assert.match(readyHtml, />true</);
-    assert.match(readyHtml, /promotion gates still open/);
+    assert.match(readyHtml, /Repo evidence complete — customer launch still gated/);
+
+    const profileReady = {
+      ...ready,
+      profile: 'safe-validation-ga',
+      required_evidence_kinds: {
+        required: ['migration_apply'],
+        present: ['migration_apply'],
+        missing: [],
+        invalid: [],
+        rejected: [],
+        profile: 'safe-validation-ga',
+      },
+    };
+    const profileHtml = renderStagingReadinessAttestationPanel(profileReady);
+    assert.match(profileHtml, /Profile inventory complete \(safe-validation-ga\) — customer launch still gated/);
+    assert.doesNotMatch(profileHtml, /Repo evidence complete — customer launch still gated/);
     assert.match(readyHtml, /does <strong>not<\/strong> clear production promotion/);
     assert.equal(readyHtml.includes('raw_dump'), false);
 
@@ -504,6 +525,7 @@ describe('ui-helpers', () => {
     const enriched = {
       ...ready,
       profile: 'safe-validation-ga',
+      customer_production_ready: false,
       release_checklist_gates: {
         combined: { unchecked: 2, in_progress: 5, complete: 10, open_gates: true },
       },
@@ -511,6 +533,14 @@ describe('ui-helpers', () => {
         local_developer_validation_cannot_satisfy: true,
         message: 'SECRET_EXTERNAL_GATE_MESSAGE',
         categories: [{ id: 'soc', label: 'SOC signoff' }],
+      },
+      external_verification: {
+        complete: false,
+        live_external_count: 0,
+        required_domain_count: 5,
+        metadata_only_count: 3,
+        unverified_count: 2,
+        blocker_summary: ['Enterprise IdP/SSO tenant-role mapping and MFA policy: live_external_manifest_required'],
       },
       evidence: { body: 'SECRET_EVIDENCE_BODY', raw_payload: 'packet_dump' },
       notes: 'operator note with tok_secret_abc123',
@@ -523,10 +553,51 @@ describe('ui-helpers', () => {
     assert.match(enrichedHtml, /in progress <strong>5<\/strong>/);
     assert.match(enrichedHtml, /complete <strong>10<\/strong>/);
     assert.match(enrichedHtml, /Local validation cannot satisfy external staging, security, SOC, or legal gates/);
+    assert.match(enrichedHtml, /customer_production_ready/);
+    assert.match(enrichedHtml, />false</);
+    assert.match(enrichedHtml, /External verification:/);
+    assert.match(enrichedHtml, /External verification blockers/);
     assert.equal(enrichedHtml.includes('SECRET_EVIDENCE_BODY'), false);
     assert.equal(enrichedHtml.includes('SECRET_EXTERNAL_GATE_MESSAGE'), false);
     assert.equal(enrichedHtml.includes('tok_secret_abc123'), false);
     assert.equal(enrichedHtml.includes('packet_dump'), false);
+
+    const completeItems = PRODUCTION_RELEASE_EVIDENCE_KINDS.map((kind) => ({
+      kind,
+      status: 'accepted',
+      release_id: 'rel_complete',
+      created_at: '2026-07-02T12:00:00.000Z',
+      validation: { ok: true },
+    }));
+    const completePanel = renderReleaseEvidencePanel({
+      items: completeItems,
+      attestation: {
+        production_ready: true,
+        profile: 'safe-validation-ga',
+        signoff_status: 'evidence_complete',
+      },
+    });
+    assert.match(completePanel, /Profile inventory complete \(safe-validation-ga\) — customer launch still gated/);
+    assert.doesNotMatch(completePanel, /Release gates open/);
+
+    const blockedPanel = renderReleaseEvidencePanel({
+      items: completeItems,
+      attestation: {
+        production_ready: false,
+        signoff_status: 'missing_evidence',
+      },
+    });
+    assert.match(blockedPanel, /Kinds attached — attestation blocked/);
+
+    assert.equal(
+      resolveReleaseEvidenceBadge({ items: [], attestation: null }),
+      '<span class="badge badge--muted">No evidence attached</span>',
+    );
+    assert.equal(formatStagingAttestationProfileLabel('full'), 'full (31 kinds)');
+    assert.match(
+      resolveStagingAttestationBadge({ production_ready: true, profile: 'high-scale-ga' }),
+      /Profile inventory complete \(high-scale-ga\)/,
+    );
 
     const compactEnriched = renderStagingReadinessAttestationPanel(enriched, { compact: true });
     assert.match(compactEnriched, /staging-readiness-attestation-panel--compact/);

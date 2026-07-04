@@ -332,6 +332,19 @@ function formatValidationError(validation) {
   return parts.join('; ');
 }
 
+export function buildProductionNotificationProviderConfigReleaseEvidence(manifest = {}) {
+  return {
+    schema_version: manifest.schema_version,
+    artifact_type: manifest.artifact_type,
+    created_at: manifest.created_at,
+    release_id: manifest.release_id,
+    validation: manifest.validation,
+    providers: manifest.providers,
+    signoff: manifest.signoff,
+    evidence_uri: manifest.evidence_uri,
+  };
+}
+
 export function createNotificationProviderConfigManifest(input = {}) {
   const evidence = input.evidence ?? null;
   const validation = validateNotificationProviderConfigEvidence(evidence);
@@ -360,6 +373,8 @@ export function createNotificationProviderConfigManifest(input = {}) {
       soc: redacted?.soc_signoff ?? null,
       security: redacted?.security_signoff ?? null,
     },
+    evidence_uri: redacted?.evidence_uri
+      ?? `evidence://notifications/provider-config/${redacted?.release_id ?? 'unscoped'}`,
     caveats: [
       'Manifest records metadata-only notification provider configuration evidence.',
       'Passing validation does not prove live email, Slack, Teams, or webhook delivery; staging provider tests and SOC/security signoff are still required.',
@@ -370,6 +385,11 @@ export function createNotificationProviderConfigManifest(input = {}) {
   if (!validation.ok) {
     throw new Error(formatValidationError(validation));
   }
+
+  manifest.production_release_evidence = {
+    kind: 'notification_provider_config',
+    evidence: buildProductionNotificationProviderConfigReleaseEvidence(manifest),
+  };
 
   return manifest;
 }

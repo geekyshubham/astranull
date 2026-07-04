@@ -1432,7 +1432,10 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
     const gate = requirePermission(ctx, 'release_evidence:read');
     if (!gate.ok) return json(res, gate.status, gate.body);
     if (blockPostgresProductionReleaseEvidenceRoute(runtimeConfig, serviceDeps, path, method, res)) return;
-    const payload = await serviceDeps.productionReleaseEvidence.getProductionReleaseEvidenceAttestation(ctx);
+    const releaseId = url.searchParams.get('release_id') ?? undefined;
+    const payload = await serviceDeps.productionReleaseEvidence.getProductionReleaseEvidenceAttestation(ctx, {
+      releaseId,
+    });
     return json(res, 200, payload);
   }
   const releaseEvidenceMatch = path.match(/^\/v1\/production-release-evidence\/([^/]+)$/);

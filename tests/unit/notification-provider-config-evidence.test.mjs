@@ -211,5 +211,8 @@ describe('notification provider config evidence CLI', () => {
     assert.equal(blob.includes('svc_v1.fake.fake.fake'), false);
     assert.equal(blob.includes('webhook_url'), false);
     assert.deepEqual(summary.coverage_gaps, []);
+    assert.equal(summary.production_release_evidence?.kind, 'notification_provider_config');
+    assert.equal(summary.production_release_evidence.evidence.evidence_uri, summary.evidence_uri);
+    assert.ok(summary.production_release_evidence.evidence.providers[0].encrypted_credential_ref_id);
   });
 });

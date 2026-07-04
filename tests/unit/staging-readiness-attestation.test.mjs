@@ -136,7 +136,12 @@ describe('staging readiness attestation', () => {
   it('defaults production_ready to false when required kinds are missing', () => {
     const attestation = aggregateStagingReadinessAttestation({
       releaseId: 'rel_partial',
-      records: [{ kind: 'third_party_security_review', evidence: SECURITY_REVIEW, status: 'accepted' }],
+      records: [{
+        kind: 'third_party_security_review',
+        release_id: 'rel_partial',
+        evidence: SECURITY_REVIEW,
+        status: 'accepted',
+      }],
     }, { requiredKinds: ['third_party_security_review', 'migration_apply'] });
 
     assert.equal(attestation.production_ready, false);
@@ -357,6 +362,53 @@ describe('staging readiness attestation', () => {
     assert.throws(
       () => aggregateStagingReadinessAttestation({ records: [] }, { profile: 'release-99' }),
       /Unknown release profile/,
+    );
+  });
+
+  it('does not count records with missing release_id for a filtered release attestation', () => {
+    const records = acceptedRecords(
+      completeEvidenceRecords(['third_party_security_review', 'migration_apply']),
+    ).map((record, index) => ({
+      ...record,
+      release_id: index === 0 ? 'rel_A' : undefined,
+    }));
+    const attestation = aggregateStagingReadinessAttestation(
+      { records, releaseId: 'rel_A' },
+      { profile: 'safe-validation-ga', requiredKinds: ['third_party_security_review', 'migration_apply'] },
+    );
+    assert.equal(attestation.release_id, 'rel_A');
+    assert.equal(attestation.production_ready, false);
+    assert.ok(attestation.required_evidence_kinds.missing.includes('migration_apply'));
+    assert.equal(attestation.required_evidence_kinds.present.includes('migration_apply'), false);
+    assert.equal(attestation.required_evidence_kinds.present.includes('third_party_security_review'), true);
+  });
+
+  it('rejects mixed release_id inventories without an explicit release filter', () => {
+    const records = acceptedRecords(
+      completeEvidenceRecords(['third_party_security_review', 'migration_apply']),
+    ).map((record, index) => ({
+      ...record,
+      release_id: index === 0 ? 'rel_A' : 'rel_B',
+    }));
+    const attestation = aggregateStagingReadinessAttestation({ records });
+    assert.equal(attestation.production_ready, false);
+    assert.ok(
+      attestation.blocker_summary.some((entry) => entry.includes('Mixed release_id values')),
+    );
+  });
+
+  it('rejects dry-run records during attestation aggregation', () => {
+    const records = acceptedRecords(completeEvidenceRecords(['third_party_security_review'])).map((record) => ({
+      ...record,
+      dry_run: true,
+      submittable: false,
+      status: 'draft',
+    }));
+    const attestation = aggregateStagingReadinessAttestation({ records });
+    assert.equal(attestation.production_ready, false);
+    assert.ok(
+      attestation.required_evidence_kinds.rejected.length > 0
+      || attestation.required_evidence_kinds.invalid.length > 0,
     );
   });
 

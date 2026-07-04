@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import { execSync } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ensureExternalVerificationManifest } from './attach-external-verification-markers.mjs';
+import { aggregateExternalProductionVerification } from '../src/contracts/externalProductionVerification.mjs';
 import { validateProductionReleaseEvidence } from '../src/contracts/productionReleaseEvidence.mjs';
 import {
   aggregateStagingReadinessAttestation,
@@ -18,6 +20,10 @@ const DEFAULT_RELEASE_CHECKLIST = path.join(REPO_ROOT, 'docs/release-checklist.m
 const DEFAULT_RELEASE_PLAN = path.join(REPO_ROOT, 'docs/product/06-release-plan.md');
 const DEFAULT_ENTERPRISE_GAP_BACKLOG = path.join(REPO_ROOT, 'docs/product/08-enterprise-production-gap-backlog.md');
 const DEFAULT_PROGRESS = path.join(REPO_ROOT, 'PROGRESS.md');
+const DEFAULT_EXTERNAL_VERIFICATION_MANIFEST = path.join(
+  REPO_ROOT,
+  'output/external-production-verification.json',
+);
 
 export const EXTERNAL_PRODUCTION_GATE_CATEGORIES = Object.freeze([
   Object.freeze({
@@ -50,6 +56,7 @@ export function parseArgs(argv = []) {
     profile: DEFAULT_STAGING_READINESS_PROFILE,
     validateOnly: false,
     allowExternalBlockersOnly: false,
+    externalVerification: null,
     help: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -65,6 +72,7 @@ export function parseArgs(argv = []) {
     else if (arg === '--profile') opts.profile = next();
     else if (arg === '--validate-only') opts.validateOnly = true;
     else if (arg === '--allow-external-blockers-only') opts.allowExternalBlockersOnly = true;
+    else if (arg === '--external-verification') opts.externalVerification = next();
     else if (arg === '--help' || arg === '-h') opts.help = true;
     else throw new Error(`Unknown argument: ${arg}`);
   }
@@ -73,7 +81,7 @@ export function parseArgs(argv = []) {
 }
 
 const EXTERNAL_REMAINING_PATTERN = /(?:^|[^\w])(?:Remaining\s*\(external\)|Deferred\s*\(operational config\))(?=$|[^\w])/i;
-const RELEASE_PLAN_GATES_HEADING = /^##\s+Open production release gates\b/i;
+const RELEASE_PLAN_GATES_HEADING = /^##\s+(?:Open\s+)?production release gates(?:\s+\([^)]+\))?\b/i;
 const P0_DISPOSITION_HEADING = /^###\s+P0 disposition and signoff map\b/i;
 const NEXT_HEADING = /^##\s+/;
 const NEXT_H2_OR_H3_HEADING = /^#{2,3}\s+/;
@@ -84,6 +92,28 @@ function stripMarkdownInline(value = '') {
     .replace(/\*\*/g, '')
     .replace(/`/g, '')
     .trim();
+}
+
+/** Split a Markdown table row on unescaped `|` delimiters only. */
+export function splitMarkdownTableRowCells(line = '') {
+  const cells = [];
+  let current = '';
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+    if (ch === '\\' && line[i + 1] === '|') {
+      current += '|';
+      i += 1;
+      continue;
+    }
+    if (ch === '|') {
+      cells.push(current);
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  cells.push(current);
+  return cells.slice(1, -1).map(stripMarkdownInline);
 }
 
 export function parseChecklistGateCounts(markdown = '') {
@@ -143,6 +173,7 @@ export function parseReleasePlanGateTableCounts(markdown = '') {
   };
 
   let insideGateSection = false;
+  let sawRows = false;
   for (const line of markdown.split('\n')) {
     if (RELEASE_PLAN_GATES_HEADING.test(line)) {
       insideGateSection = true;
@@ -151,12 +182,13 @@ export function parseReleasePlanGateTableCounts(markdown = '') {
     if (insideGateSection && NEXT_HEADING.test(line)) break;
     if (!insideGateSection || !line.trim().startsWith('|')) continue;
 
-    const cells = line.split('|').slice(1, -1).map(stripMarkdownInline);
+    const cells = splitMarkdownTableRowCells(line);
     if (cells.length < 4) continue;
     const [gate, owner, evidence, status] = cells;
     if (!gate || /^gate$/i.test(gate)) continue;
     if (cells.every((cell) => TABLE_SEPARATOR.test(cell))) continue;
 
+    sawRows = true;
     const normalizedStatus = status.toLowerCase();
     if (/\b(open|blocked|pending|required)\b/.test(normalizedStatus)) {
       counts.external_blockers += 1;
@@ -175,7 +207,36 @@ export function parseReleasePlanGateTableCounts(markdown = '') {
     }
     if (/\b(closed|complete|completed|accepted|done|resolved|signed off|signed-off)\b/.test(normalizedStatus)) {
       counts.complete += 1;
+      continue;
     }
+    if (status.trim()) {
+      counts.external_blockers += 1;
+      const text = `${gate}: unrecognized status "${status}"${owner ? ` (${owner})` : ''}`;
+      const item = {
+        status: 'external_blocker',
+        text,
+        gate,
+        owner,
+        evidence,
+        table_status: status,
+      };
+      counts.open_items.push(item);
+      counts.external_blocker_items.push(item);
+    }
+  }
+
+  if (insideGateSection && !sawRows) {
+    const item = {
+      status: 'external_blocker',
+      text: 'Production release gates table: missing or empty',
+      gate: 'Production release gates table',
+      owner: null,
+      evidence: null,
+      table_status: 'missing',
+    };
+    counts.external_blockers = 1;
+    counts.open_items.push(item);
+    counts.external_blocker_items.push(item);
   }
 
   counts.total_items = counts.complete + counts.external_blockers;
@@ -205,7 +266,7 @@ export function parseP0DispositionGateCounts(markdown = '') {
     if (insideDispositionSection && NEXT_H2_OR_H3_HEADING.test(line)) break;
     if (!insideDispositionSection || !line.trim().startsWith('|')) continue;
 
-    const cells = line.split('|').slice(1, -1).map(stripMarkdownInline);
+    const cells = splitMarkdownTableRowCells(line);
     if (cells.length < 5) continue;
     if (/^p0 gap$/i.test(cells[0]) || cells.every((cell) => TABLE_SEPARATOR.test(cell))) continue;
 
@@ -612,6 +673,12 @@ export function aggregateProductionReadinessGapAudit(input = {}, options = {}) {
   const checklist_gates_open = docGates.combined.open_gates;
   const production_ready = evidence_complete && !checklist_gates_open;
 
+  const externalVerificationManifest = loadExternalVerificationManifest(options);
+  const external_verification = aggregateExternalProductionVerification(records, {
+    manifest: externalVerificationManifest,
+  });
+  const customer_production_ready = production_ready && external_verification.complete === true;
+
   const checklistBlockers = buildChecklistBlockers(docGates);
   const blocker_summary = [
     ...attestation.blocker_summary,
@@ -621,6 +688,12 @@ export function aggregateProductionReadinessGapAudit(input = {}, options = {}) {
     blocker_summary.push(
       'Accepted local evidence inventory is complete, but documented release checklist gates remain open.',
     );
+  }
+  if (production_ready && !customer_production_ready) {
+    blocker_summary.push(
+      'Repo production_ready is true but customer_production_ready is false — live external verification markers are incomplete.',
+    );
+    blocker_summary.push(...external_verification.blocker_summary);
   }
 
   const externalCategories = resolveExternalGateStatuses(records);
@@ -658,6 +731,7 @@ export function aggregateProductionReadinessGapAudit(input = {}, options = {}) {
     release_id: releaseId ?? attestation.release_id ?? null,
     profile,
     production_ready,
+    customer_production_ready,
     evidence_attestation_complete: evidence_complete,
     checklist_gates_open,
     required_evidence_kinds: {
@@ -678,16 +752,31 @@ export function aggregateProductionReadinessGapAudit(input = {}, options = {}) {
     },
     release_checklist_gates: docGates,
     external_gates,
+    external_verification,
     production_readiness_scorecard: scorecard,
     attestation_signoff_status: attestation.signoff_status,
     blocker_summary,
     caveats: [
       'Metadata-only gap audit; does not execute staging workloads, probes, or SOC drills.',
       'production_ready=true requires complete accepted inventory and closed documented checklist gates; local validation still does not replace external signoff evidence.',
+      'customer_production_ready=true additionally requires live_external verification for IdP/MFA, KMS/HSM custody, notification credentials, artifact-pinned deploy/rollback, and retained security/legal/SOC artifacts.',
       'Local evidence validation does not replace staging, security, SOC, or legal signoff.',
       ...attestation.caveats,
     ],
   };
+}
+
+function loadExternalVerificationManifest(options = {}) {
+  if (options.externalVerificationManifest !== undefined) {
+    return options.externalVerificationManifest;
+  }
+  const manifestPath = options.externalVerificationPath ?? DEFAULT_EXTERNAL_VERIFICATION_MANIFEST;
+  if (!existsSync(manifestPath)) return null;
+  try {
+    return JSON.parse(readFileSync(manifestPath, 'utf8'));
+  } catch {
+    return null;
+  }
 }
 
 function scanForbiddenMetadata(value) {
@@ -726,9 +815,11 @@ function formatValidateOnlySummary(report) {
   const gates = report.release_checklist_gates.combined;
   return [
     `production-readiness-gap-audit: production_ready=${report.production_ready}`,
+    `  customer_production_ready=${report.customer_production_ready}`,
     `  evidence: present=${counts.present} missing=${counts.missing} invalid=${counts.invalid} rejected=${counts.rejected}`,
     `  checklist: unchecked=${gates.unchecked} in_progress=${gates.in_progress} complete=${gates.complete}`,
     `  external_gates: local_validation_cannot_satisfy=${report.external_gates.local_developer_validation_cannot_satisfy}`,
+    `  external_verification: complete=${report.external_verification?.complete} live=${report.external_verification?.live_external_count}/${report.external_verification?.required_domain_count}`,
     formatOpenGatePreview(report),
   ].join('\n');
 }
@@ -787,8 +878,16 @@ export async function main(argv = process.argv.slice(2)) {
   } catch {
     // optional attest artifact
   }
+  if (opts.evidence && existsSync(opts.evidence)) {
+    ensureExternalVerificationManifest({
+      out: opts.externalVerification ?? DEFAULT_EXTERNAL_VERIFICATION_MANIFEST,
+      evidence: opts.evidence,
+      releaseId: input.releaseId ?? opts.releaseId ?? null,
+    });
+  }
   const report = aggregateProductionReadinessGapAudit(input, {
     profile: opts.profile,
+    externalVerificationPath: opts.externalVerification ?? DEFAULT_EXTERNAL_VERIFICATION_MANIFEST,
     scorecard: {
       customerPortalBrowserE2e,
     },
@@ -810,7 +909,7 @@ export async function main(argv = process.argv.slice(2)) {
   const gates = report.release_checklist_gates.combined;
   console.log(
     `production-readiness-gap-audit: wrote ${opts.out} `
-    + `(production_ready=${report.production_ready}; evidence missing=${counts.missing} `
+    + `(production_ready=${report.production_ready}; customer_production_ready=${report.customer_production_ready}; evidence missing=${counts.missing} `
     + `invalid=${counts.invalid} rejected=${counts.rejected}; checklist unchecked=${gates.unchecked} `
     + `in_progress=${gates.in_progress} external_blockers=${gates.external_blockers ?? 0})`,
   );

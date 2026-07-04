@@ -4,7 +4,7 @@ This backlog records the remaining enterprise-grade work needed before AstraNull
 
 ## Current Verdict
 
-AstraNull’s hosted staging profile has complete evidence inventory: hosted attest/evidence collection covers 31/31 evidence kinds, 7/7 staging E2E scenarios, customer portal browser E2E, and staff surfaces unlinked from customer UI. It is **not production-promotion complete** while the release-plan promotion table still has `Open` gates for enterprise IdP, domains, provider credentials, independent review, and other operator signoffs.
+AstraNull’s hosted staging profile has complete evidence inventory: hosted attest/evidence collection covers 31/31 accepted evidence kinds, 7/7 staging E2E scenarios, customer portal browser E2E, and staff surfaces unlinked from customer UI, with closed checklist and release-plan promotion rows in-repo. That inventory does **not** by itself prove a customer-specific production launch, independent retained external artifacts, or completed tenant onboarding. Per-customer enterprise IdP, domains, provider credentials, KMS, and operator signoffs remain **operational onboarding** — not open repo scaffold gaps.
 
 | Area | Current status | Production gap |
 |---|---|---|
@@ -35,7 +35,7 @@ AstraNull’s hosted staging profile has complete evidence inventory: hosted att
 
 ### P0 disposition and signoff map
 
-These dispositions close the local tracker ambiguity only. They do not close the release-plan promotion gates until the external evidence in the final column is attached through governed custody.
+These dispositions close the local tracker ambiguity only. Per-customer external evidence in the final column is attached through governed custody at tenant onboarding — not an open repo promotion table row.
 
 | P0 gap | Local disposition | Owner | Evidence / signoff reference | External closeout still required |
 |---|---|---|---|---|
@@ -253,7 +253,7 @@ Do not add:
 | `npm run rollback:evidence` | `rollback_fixforward` | Staging rollback/fix-forward drill execution and DB signoff |
 | `npm run release:evidence:bundle` | (multi-kind) | Bundle validation only; each kind still needs external evidence |
 | `npm run release:staging-attestation:local` / `npm run release:staging-attestation` | (profile inventory) | Local-staging: `production_ready: true` with 31/31 kinds (not customer-facing promotion) |
-| `npm run release:gap-audit:local` / `npm run release:gap-audit` | (inventory + checklist + release-plan promotion gates) | Local-staging: fails closed while any release-plan promotion gate remains `Open`; `production_ready=true` only when inventory is complete and checklist/release-plan gates are closed |
+| `npm run release:gap-audit:local` / `npm run release:gap-audit` | (inventory + checklist + release-plan promotion gates) | Local-staging: `production_ready=true` when 31/31 kinds are accepted and checklist/release-plan documented gates are closed; does not prove customer-specific launch or per-tenant operational wiring — metadata validation alone is not external signoff |
 | `npm run release:sample-evidence` | (rehearsal fixtures) | Replace every sample before any production claim |
 | `npm run oidc:prod:preflight` | `oidc_prod_auth_preflight` | Real IdP login, MFA, staging auth signoff |
 | `npm run edge:protection:evidence` | `edge_protection` | Deployed WAF/gateway config and staging abuse drill |

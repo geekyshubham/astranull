@@ -6,6 +6,10 @@ import {
   PRODUCTION_RELEASE_EVIDENCE_KINDS,
   validateProductionReleaseEvidence,
 } from '../src/contracts/productionReleaseEvidence.mjs';
+import {
+  isNonSubmittableEvidenceRecord,
+  resolveAttestationReleaseScope,
+} from '../src/contracts/releaseEvidenceProvenance.mjs';
 import { redactObject } from '../src/lib/redact.mjs';
 
 const DEFAULT_OUT = 'output/staging-readiness-attestation.json';
@@ -299,6 +303,25 @@ export function assessEvidenceRecord(record) {
   const kind = record?.kind;
   const evidence = record?.evidence ?? {};
   const status = normalizeStatus(record);
+  if (isNonSubmittableEvidenceRecord(record)) {
+    return {
+      kind,
+      required: PRODUCTION_RELEASE_EVIDENCE_KINDS.includes(kind),
+      optional: false,
+      future: false,
+      status,
+      accepted: false,
+      validation: {
+        ok: false,
+        invalid_kind: null,
+        missing_fields: [],
+        forbidden_fields: [],
+        invalid_fields: [{ field: 'provenance', reason: 'non_submittable_evidence' }],
+      },
+      unknown_kind: false,
+      non_submittable: true,
+    };
+  }
   const optionalMeta = optionalKindMeta(kind);
   const contractKind = PRODUCTION_RELEASE_EVIDENCE_KINDS.includes(kind);
   const pendingKind = PENDING_CONTRACT_KIND_SET.has(kind);
@@ -379,12 +402,26 @@ function pickBestAssessment(assessments) {
 export function aggregateStagingReadinessAttestation(input = {}, options = {}) {
   const profile = options.profile ?? DEFAULT_STAGING_READINESS_PROFILE;
   const requiredKinds = options.requiredKinds ?? resolveReleaseProfileKinds(profile);
-  const records = Array.isArray(input.records) ? input.records : [];
-  const releaseId = input.releaseId ?? input.release_id ?? null;
   const inputForbidden = scanForbiddenMetadata(input);
   if (inputForbidden.length > 0) {
     throw new Error(`Input contains forbidden metadata field(s): ${inputForbidden.join(', ')}`);
   }
+
+  const requestedReleaseId = input.releaseId ?? input.release_id ?? null;
+  const scope = input.mixed_release_ids === true
+    ? {
+      releaseId: null,
+      records: [],
+      mixedReleaseIds: true,
+      releaseIds: input.release_ids ?? [],
+    }
+    : resolveAttestationReleaseScope(
+      Array.isArray(input.records) ? input.records : [],
+      requestedReleaseId,
+    );
+  const records = scope.records;
+  const releaseId = scope.releaseId;
+  const mixedReleaseIds = scope.mixedReleaseIds;
 
   const assessmentsByKind = new Map();
   const unknownKinds = [];
@@ -450,6 +487,10 @@ export function aggregateStagingReadinessAttestation(input = {}, options = {}) {
   }
 
   const blockers = [];
+  if (mixedReleaseIds) {
+    const ids = scope.releaseIds?.length ? scope.releaseIds.join(', ') : 'multiple';
+    blockers.push(`Mixed release_id values in attestation scope (${ids}); provide a single release_id filter.`);
+  }
   if (missingRequired.length > 0) {
     blockers.push(`Missing required evidence kind(s): ${missingRequired.join(', ')}`);
   }
@@ -472,7 +513,8 @@ export function aggregateStagingReadinessAttestation(input = {}, options = {}) {
     blockers.push(`Unknown evidence kind(s): ${[...new Set(unknownKinds)].join(', ')}`);
   }
 
-  const evidenceComplete = missingRequired.length === 0
+  const evidenceComplete = !mixedReleaseIds
+    && missingRequired.length === 0
     && invalidRequired.length === 0
     && rejectedRequired.length === 0
     && unknownKinds.length === 0;

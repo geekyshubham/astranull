@@ -71,7 +71,7 @@ npm run release:evidence:bundle -- \
 
 Use `--validate-only` in staging CI or preflight jobs to fail fast without writing an artifact. The bundle utility validates every record with the production evidence contract, drops unknown top-level input fields, and writes metadata-only records plus release caveats. It does not replace security, DB/operator, legal, or release-manager signoff.
 
-Aggregate attestation (still metadata-only; `production_ready: true` means profile inventory is complete — accepted, contract-valid required kinds — not production promotion signoff):
+Aggregate attestation (metadata-only; `production_ready: true` means **profile inventory** is complete — accepted, contract-valid required kinds for the evaluated profile — not production promotion signoff). Pass `--profile full|safe-validation-ga|high-scale-ga`; API mirror: `GET /v1/production-release-evidence/attestation?release_id=<rel>` scopes to one release and rejects mixed-release inventories.
 
 ```bash
 npm run release:staging-attestation -- \
@@ -86,7 +86,7 @@ npm run staging:local:up
 npm run staging:local:attest
 ```
 
-`staging:local:attest` runs seed, Postgres verify, smoke, E2E matrix, evidence collection (31 kinds), `release:gap-audit:local`, `release:staging-attestation:local`, and API evidence submit. Expect `release:staging-attestation:local` to report inventory complete once all evidence kinds are present; expect `release:gap-audit:local` to remain `production_ready=false` until both checklist items and the release-plan promotion gate table are closed.
+`staging:local:attest` runs seed, Postgres verify, smoke, E2E matrix, evidence collection (31 kinds), `release:gap-audit:local`, `release:staging-attestation:local`, and API evidence submit. Collector dry-run output (`collect-release-evidence.mjs --dry-run`) writes `submittable: false` draft records — use only for shape preview, not bundle/submit/API/attestation. Expect `release:staging-attestation:local` to report profile inventory complete once required kinds for the profile are present and accepted; expect `release:gap-audit:local` to report `production_ready=true` only when submittable inventory **and** evidence-derived closed checklist/release-plan rows align. Closed repo inventory does not prove customer-specific launch or per-tenant IdP/domain/provider/KMS onboarding — metadata validators alone are not external signoff.
 
 Cross-check attestation, required kinds from `src/contracts/productionReleaseEvidence.mjs`, and open rows in `docs/release-checklist.md`. The audit exits **nonzero** when `production_ready=false` (missing/invalid inventory and/or open checklist gates). Strict evidence kinds (including `governed_adapter` and kill-switch drill contracts) surface failures as `invalid_fields` during bundle validation and on `/v1/production-release-evidence` as `invalid_evidence_fields`.
 
@@ -119,7 +119,11 @@ Additional metadata-only validators (npm aliases → release kinds in parenthese
 | `npm run rollback:evidence` | `rollback_fixforward` |
 | `npm run release:evidence:bundle` | (multi-kind bundle validation) |
 | `npm run release:staging-attestation` | (profile inventory attestation) |
-| `npm run release:gap-audit` | (inventory + checklist gap summary) |
+| `npm run release:gap-audit` | (inventory + checklist gap summary; emits `customer_production_ready`) |
+| `npm run release:external-verify` | (live external verification domains — IdP/MFA, KMS, notifications, deploy/rollback, security/legal/SOC) |
+| `npm run release:external-verify:attach` | (scaffold `output/external-production-verification.json` custody markers) |
+
+`production_ready=true` on gap audit means repo inventory and documented checklist gates are closed. `customer_production_ready=true` additionally requires every external verification domain at `live_external` tier with retained artifacts in `output/external-production-verification.json`. Run `npm run release:external-verify:attach -- --force` after hosted attest, replace placeholder `custody_uri` values with real retained artifact locations, then re-run `npm run release:external-verify`.
 
 See `package.json` scripts and `src/contracts/productionReleaseEvidence.mjs` for additional kind validators (OIDC preflight, edge protection, SOC drills, probe fleet matrix, Postgres concurrency, and others).
 
@@ -432,7 +436,7 @@ Agent identity file (validation agent): packaged default `/var/lib/astranull/ide
 make verify
 ```
 
-Runs lint, unit tests, integration tests (including security polish), e2e flows, UI smoke, `scripts/safety-check.mjs`, and `scripts/postgres-tenant-query-audit.mjs` using Node directly (no npm on PATH required). Override Node with `make NODE=/path/to/node verify`. Latest local verification: `npm test` 2163 passing; `npm run release:staging-attestation:local` reports complete local-staging inventory, while `npm run release:gap-audit:local` fails closed until release-plan promotion gates are closed. A green local verify is local production-quality evidence — not customer-facing hosted production promotion. See `npm run staging:local:attest` for the full Docker Compose gate.
+Runs lint, unit tests, integration tests (including security polish), e2e flows, UI smoke, `scripts/safety-check.mjs`, and `scripts/postgres-tenant-query-audit.mjs` using Node directly (no npm on PATH required). Override Node with `make NODE=/path/to/node verify`. Latest local verification: `npm test` 2163 passing; `npm run release:staging-attestation:local` and `npm run release:gap-audit:local` report complete local-staging inventory with closed docs gates when 31/31 kinds are accepted. A green local verify is repo hosted-staging/local evidence — not customer-specific production launch, independent retained external artifacts, or tenant onboarding configuration. See `npm run staging:local:attest` for the full Docker Compose gate.
 
 Agent update releases require `distribution: { manifest_url, signature_url, artifact_url }` on `POST /v1/agent-updates`; agents polling `GET /v1/agents/:id/update` receive `download` with the same three URLs. In Postgres mode the route family persists through `runtime.services.agentUpdates`; developer validation uses the JSON store. Host apply: `agents/linux/astranull-agent.mjs --download-and-apply-update` (see [`docs/agent/07-agent-lifecycle.md`](agent/07-agent-lifecycle.md)). Production still requires CDN/mirror custody runbooks, unattended daemon restart, and fleet rollout drills.
 

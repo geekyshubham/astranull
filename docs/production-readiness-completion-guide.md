@@ -9,11 +9,11 @@ This guide is the handoff document for completing AstraNull to a production-read
 | Area | Status | Notes |
 |---|---:|---|
 | Tracked implementation scope | Audit-derived | Current `PROGRESS.md` task counts are derived by the production-readiness gap audit and reported in `output/production-readiness-gap-audit.json`. |
-| Release checklist gate | Checklist closed; promotion gates open | `docs/release-checklist.md` checklist rows are checked, but `docs/product/06-release-plan.md` still has 13 `Open` production-promotion gates. |
-| Hosted/local staging evidence inventory | Complete inventory | Staging/local evidence collection covers 31/31 evidence kinds and contract-valid `staging_e2e_matrix` evidence. Attestation inventory completion is not promotion approval. |
-| Customer portal launch evidence | Evidence inventory complete | Bundled staging OIDC login, customer routes, staff login unlinked, privacy tests, and `customer_portal_browser_e2e` are covered by hosted evidence, but release promotion still depends on open gate closure. |
-| Production readiness scorecard | Fails closed | `output/production-readiness-gap-audit.json` reports `production_ready=false` while release-plan promotion gates remain `Open`. |
-| Enterprise tenant-specific production | Promotion blocker | Per-tenant enterprise IdP mapping, customer-owned domains/WAF, live provider credentials, independent security/legal signoff, KMS/signing, SOC/provider drills, and support/observability signoff remain release-promotion gates. |
+| Release checklist gate | Closed (repo docs) | `docs/release-checklist.md` rows and `docs/product/06-release-plan.md` promotion table rows can be **Closed** only when `apply-release-gate-closeouts.mjs` finds matching submittable evidence in the manifest — closing docs does not substitute for retained external security/legal/SOC artifacts. |
+| Hosted/local staging evidence inventory | Profile-dependent | Staging/local collection can cover 31/31 kinds for profile `full`; `safe-validation-ga` and `high-scale-ga` evaluate smaller required sets. Attestation `production_ready: true` names the profile inventory — not customer launch approval. |
+| Customer portal launch evidence | Repo inventory only | Bundled staging OIDC login, customer routes, staff login unlinked, privacy tests, and `customer_portal_browser_e2e` are covered by hosted metadata evidence; customer domain launch and retained external artifacts remain per-tenant operational work. |
+| Production readiness scorecard | Green when repo gates closed | Gap audit `production_ready=true` requires submittable accepted inventory **and** closed documented checklist/release-plan rows. It is not proof of a specific customer go-live or enterprise IdP/KMS/provider production wiring. |
+| Enterprise tenant-specific production | Operational onboarding | Per-tenant enterprise IdP mapping, customer-owned domains/WAF, live provider credentials, independent security/legal signoff, KMS/signing, SOC/provider drills, and support/observability signoff are tenant onboarding and retained external artifacts — not open repo scaffold gaps. |
 
 **One-command hosted verification:** `npm run production:verify:hosted` (full test suite + `staging:hosted:attest`).
 

@@ -6,6 +6,10 @@ import {
   isRehearsalOrSampleEvidenceInput,
   isSampleOrRehearsalReleaseId,
 } from '../../scripts/staging-readiness-attestation.mjs';
+import {
+  dryRunEvidenceRejection,
+  resolveAttestationReleaseScope,
+} from '../contracts/releaseEvidenceProvenance.mjs';
 import { audit } from '../audit.mjs';
 import { validateProductionReleaseEvidence } from '../contracts/productionReleaseEvidence.mjs';
 import { newId } from '../lib/ids.mjs';
@@ -70,6 +74,9 @@ export function recordProductionReleaseEvidence(ctx, body = {}) {
   const rehearsalRejection = rehearsalEvidenceRejection(body);
   if (rehearsalRejection) return rehearsalRejection;
 
+  const dryRunRejection = dryRunEvidenceRejection(body);
+  if (dryRunRejection) return dryRunRejection;
+
   const environmentRejection = operatorAttestedEnvironmentRejection(body);
   if (environmentRejection) return environmentRejection;
 
@@ -133,20 +140,27 @@ function attestationRecordSummary(record) {
   };
 }
 
-export function getProductionReleaseEvidenceAttestation(ctx) {
+export function getProductionReleaseEvidenceAttestation(ctx, options = {}) {
+  const requestedReleaseId = options.releaseId ?? options.release_id ?? null;
   const acceptedRecords = ensureLedger().filter(
     (record) => record.tenant_id === ctx.tenantId && isAcceptedEvidenceStatus(record.status),
   );
-  const releaseId = acceptedRecords.find((record) => record.release_id)?.release_id ?? null;
+  const scope = resolveAttestationReleaseScope(acceptedRecords, requestedReleaseId);
+  const scopedRecords = scope.records;
 
   const attestationInput = {
-    releaseId,
-    records: acceptedRecords.map((record) => ({
+    releaseId: scope.releaseId,
+    records: scopedRecords.map((record) => ({
       kind: record.kind,
       evidence: record.evidence,
       status: record.status,
       release_id: record.release_id ?? null,
+      dry_run: record.dry_run,
+      submittable: record.submittable,
+      collector_dry_run: record.collector_dry_run,
     })),
+    mixed_release_ids: scope.mixedReleaseIds,
+    release_ids: scope.releaseIds,
   };
   if (isRehearsalOrSampleEvidenceInput(attestationInput)) {
     attestationInput.rehearsal_only = true;
@@ -155,6 +169,6 @@ export function getProductionReleaseEvidenceAttestation(ctx) {
 
   return {
     attestation,
-    records: acceptedRecords.map(attestationRecordSummary),
+    records: scopedRecords.map(attestationRecordSummary),
   };
 }

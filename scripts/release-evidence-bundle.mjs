@@ -6,6 +6,10 @@ import {
   PRODUCTION_RELEASE_EVIDENCE_KINDS,
   validateProductionReleaseEvidence,
 } from '../src/contracts/productionReleaseEvidence.mjs';
+import {
+  assertSubmittableEvidencePayload,
+  assertSubmittableEvidenceRecord,
+} from '../src/contracts/releaseEvidenceProvenance.mjs';
 import { redactObject, redactString } from '../src/lib/redact.mjs';
 import {
   isRehearsalOrSampleEvidenceInput,
@@ -114,6 +118,10 @@ export function validateEvidenceRecord(record) {
 export function createReleaseEvidenceBundle(input = {}, options = {}) {
   const records = Array.isArray(input.records) ? input.records : [];
   if (records.length === 0) throw new Error('At least one evidence record is required.');
+  assertSubmittableEvidencePayload(input, 'Bundle input');
+  for (const record of records) {
+    assertSubmittableEvidenceRecord(record, 'Bundle record');
+  }
   assertProductionBundleInput(
     {
       rehearsal_only: input.rehearsal_only,

@@ -6,6 +6,10 @@ import {
   isRehearsalOrSampleEvidenceInput,
   isSampleOrRehearsalReleaseId,
 } from '../../../scripts/staging-readiness-attestation.mjs';
+import {
+  dryRunEvidenceRejection,
+  resolveAttestationReleaseScope,
+} from '../../contracts/releaseEvidenceProvenance.mjs';
 import { validateProductionReleaseEvidence } from '../../contracts/productionReleaseEvidence.mjs';
 import { newId } from '../../lib/ids.mjs';
 import { redactObject } from '../../lib/redact.mjs';
@@ -122,6 +126,9 @@ export function createPostgresProductionReleaseEvidenceServices(repositories, op
       const rehearsalRejection = rehearsalEvidenceRejection(body);
       if (rehearsalRejection) return rehearsalRejection;
 
+      const dryRunRejection = dryRunEvidenceRejection(body);
+      if (dryRunRejection) return dryRunRejection;
+
       const environmentRejection = operatorAttestedEnvironmentRejection(body);
       if (environmentRejection) return environmentRejection;
 
@@ -167,19 +174,26 @@ export function createPostgresProductionReleaseEvidenceServices(repositories, op
       return releaseEvidenceRepo.getProductionReleaseEvidence(ctx, id);
     },
 
-    async getProductionReleaseEvidenceAttestation(ctx) {
+    async getProductionReleaseEvidenceAttestation(ctx, options = {}) {
+      const requestedReleaseId = options.releaseId ?? options.release_id ?? null;
       const allRecords = await releaseEvidenceRepo.listProductionReleaseEvidence(ctx);
       const acceptedRecords = allRecords.filter((record) => isAcceptedEvidenceStatus(record.status));
-      const releaseId = acceptedRecords.find((record) => record.release_id)?.release_id ?? null;
+      const scope = resolveAttestationReleaseScope(acceptedRecords, requestedReleaseId);
+      const scopedRecords = scope.records;
 
       const attestationInput = {
-        releaseId,
-        records: acceptedRecords.map((record) => ({
+        releaseId: scope.releaseId,
+        records: scopedRecords.map((record) => ({
           kind: record.kind,
           evidence: record.evidence,
           status: record.status,
           release_id: record.release_id ?? null,
+          dry_run: record.dry_run,
+          submittable: record.submittable,
+          collector_dry_run: record.collector_dry_run,
         })),
+        mixed_release_ids: scope.mixedReleaseIds,
+        release_ids: scope.releaseIds,
       };
       if (isRehearsalOrSampleEvidenceInput(attestationInput)) {
         attestationInput.rehearsal_only = true;
@@ -188,7 +202,7 @@ export function createPostgresProductionReleaseEvidenceServices(repositories, op
 
       return {
         attestation,
-        records: acceptedRecords.map(attestationRecordSummary),
+        records: scopedRecords.map(attestationRecordSummary),
       };
     },
   };

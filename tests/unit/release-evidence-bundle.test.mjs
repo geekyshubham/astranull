@@ -280,6 +280,31 @@ describe('release evidence bundle utility', () => {
     );
   });
 
+  it('rejects dry-run and draft records from bundles', () => {
+    assert.throws(
+      () => createReleaseEvidenceBundle({
+        release_id: 'rel_prod',
+        dry_run: true,
+        submittable: false,
+        records: [{ kind: 'third_party_security_review', evidence: SECURITY_REVIEW }],
+      }),
+      /non-submittable/,
+    );
+    assert.throws(
+      () => createReleaseEvidenceBundle({
+        release_id: 'rel_prod',
+        records: [{
+          kind: 'third_party_security_review',
+          evidence: SECURITY_REVIEW,
+          status: 'draft',
+          dry_run: true,
+          submittable: false,
+        }],
+      }),
+      /non-submittable/,
+    );
+  });
+
   it('rejects evidence.rehearsal_only on records', () => {
     assert.throws(
       () => createReleaseEvidenceBundle({

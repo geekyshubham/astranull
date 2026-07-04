@@ -10,7 +10,10 @@ import {
 import { aggregateProductionReadinessGapAudit } from '../../scripts/production-readiness-gap-audit.mjs';
 import { runLiveOidcStagingLogin } from '../../scripts/run-live-oidc-staging-login.mjs';
 import { runOperatorRunbookExercise } from '../../scripts/run-operator-runbook-exercise.mjs';
-import { completeEvidenceRecords } from '../fixtures/productionReleaseEvidenceComplete.mjs';
+import {
+  completeEvidenceRecords,
+  stampAcceptedReleaseRecords,
+} from '../fixtures/productionReleaseEvidenceComplete.mjs';
 import { resolveReleaseProfileKinds } from '../../scripts/staging-readiness-attestation.mjs';
 import { request } from '../helpers/http.mjs';
 import { freshStore } from '../helpers/reset.mjs';
@@ -19,21 +22,29 @@ let baseUrl;
 let server;
 let originalFetch;
 
-function completeAcceptedRecords() {
-  return completeEvidenceRecords(resolveReleaseProfileKinds('full')).map((record) => ({
-    ...record,
-    status: 'accepted',
-  }));
+function completeAcceptedRecords(releaseId = 'rel-e2e-local') {
+  return stampAcceptedReleaseRecords(
+    completeEvidenceRecords(resolveReleaseProfileKinds('full')),
+    releaseId,
+  );
 }
+
+const closeoutManifest = {
+  releaseId: 'rel-e2e-flow',
+  inventoryComplete: true,
+  kindsPresent: new Set(completeAcceptedRecords().map((record) => record.kind)),
+  manifestPath: 'output/release-evidence/records.json',
+};
 
 const closedChecklistMarkdown = applyReleaseChecklistCloseouts(
   '- [x] OIDC ready. **Deferred (operational config):** IdP signoff\n',
+  closeoutManifest,
 );
 const closedReleasePlanMarkdown = applyReleasePlanCloseouts(`
 ## Open production release gates
 | Gate | Owner | Evidence | Status |
 | Product and API contract accuracy | Product | docs | **Open** |
-`);
+`, closeoutManifest);
 
 async function reserveLocalPort() {
   const probe = net.createServer();
@@ -122,7 +133,7 @@ describe('production readiness e2e flow', () => {
     const report = aggregateProductionReadinessGapAudit(
       {
         releaseId: 'rel-e2e-local',
-        records: completeAcceptedRecords(),
+        records: completeAcceptedRecords('rel-e2e-local'),
       },
       {
         releaseChecklistMarkdown: closedChecklistMarkdown,
@@ -139,7 +150,7 @@ describe('production readiness e2e flow', () => {
     const report = aggregateProductionReadinessGapAudit(
       {
         releaseId: 'rel-e2e-open',
-        records: completeAcceptedRecords(),
+        records: completeAcceptedRecords('rel-e2e-open'),
       },
       {
         releaseChecklistMarkdown: '- [x] OIDC. **Deferred (operational config):** pending IdP\n',

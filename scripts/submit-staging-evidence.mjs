@@ -7,6 +7,10 @@ import {
   PRODUCTION_RELEASE_EVIDENCE_REQUIREMENTS,
 } from '../src/contracts/productionReleaseEvidence.mjs';
 import {
+  assertSubmittableEvidencePayload,
+  assertSubmittableEvidenceRecord,
+} from '../src/contracts/releaseEvidenceProvenance.mjs';
+import {
   createReleaseEvidenceBundle,
   parseInputJson,
   validateEvidenceRecord,
@@ -167,7 +171,7 @@ export function validateRecordPromotionEnvironment(record, options = {}) {
   }
 }
 
-export function operatorAttestedEnvironmentRejection(body = {}) {
+export function operatorAttestedEnvironmentRejection(body = {}, options = {}) {
   const kind = body.kind;
   const evidence = body.evidence ?? {};
   if (isSimulatedEnvironment(evidence.environment)) {
@@ -177,18 +181,26 @@ export function operatorAttestedEnvironmentRejection(body = {}) {
       environment: evidence.environment,
     };
   }
-  if (EVIDENCE_KINDS_WITH_ENVIRONMENT_FIELD.includes(kind)) {
-    if (
-      !isOperatorAttestedEnvironment(evidence.environment)
-      && !isLocalStagingSimulatorEnvironment(evidence.environment)
-    ) {
-      return {
-        error: 'invalid_promotion_environment',
-        status: 400,
-        environment: evidence.environment ?? null,
-        allowed: [...OPERATOR_ATTESTED_ENVIRONMENTS, ...LOCAL_STAGING_SIMULATOR_ENVIRONMENTS],
-      };
-    }
+  if (!EVIDENCE_KINDS_WITH_ENVIRONMENT_FIELD.includes(kind)) {
+    return null;
+  }
+  const allowLocalStaging = options.allowLocalStaging === true;
+  if (
+    !isOperatorAttestedEnvironment(evidence.environment)
+    && !(allowLocalStaging && isLocalStagingSimulatorEnvironment(evidence.environment))
+  ) {
+    const allowed = allowLocalStaging
+      ? [...OPERATOR_ATTESTED_ENVIRONMENTS, ...LOCAL_STAGING_SIMULATOR_ENVIRONMENTS]
+      : [...OPERATOR_ATTESTED_ENVIRONMENTS];
+    const error = isLocalStagingSimulatorEnvironment(evidence.environment)
+      ? 'local_staging_evidence_rejected'
+      : 'invalid_promotion_environment';
+    return {
+      error,
+      status: 400,
+      environment: evidence.environment ?? null,
+      allowed,
+    };
   }
   return null;
 }
@@ -196,6 +208,11 @@ export function operatorAttestedEnvironmentRejection(body = {}) {
 export function validateOperatorAttestedRecords(input = {}, options = {}) {
   const records = Array.isArray(input.records) ? input.records : [];
   if (records.length === 0) throw new Error('At least one evidence record is required.');
+
+  if (input.dry_run === true || input.submittable === false) {
+    throw new Error('Dry-run or non-submittable evidence cannot be submitted.');
+  }
+  assertSubmittableEvidencePayload(input, 'Submission payload');
 
   const allowRehearsal = options.allowRehearsal === true;
   const profile = options.profile ?? PRODUCTION_PROMOTION_PROFILE;
@@ -224,6 +241,7 @@ export function validateOperatorAttestedRecords(input = {}, options = {}) {
 
   const validatedRecords = [];
   for (const record of records) {
+    assertSubmittableEvidenceRecord(record, 'Submission record');
     assertAcceptedRecordStatus(record);
     validateRecordPromotionEnvironment(record, promotionOptions);
     const validated = validateEvidenceRecord(record);

@@ -343,8 +343,8 @@ describe('ui and api smoke', () => {
       'release evidence attestation route',
     );
     assert.ok(
-      uiHelpers.text.includes('does <strong>not</strong> mean production readiness is complete'),
-      'release evidence must not imply production readiness complete',
+      uiHelpers.text.includes('does <strong>not</strong> prove customer-specific launch by itself'),
+      'release evidence must not imply customer-specific launch by itself',
     );
     assert.ok(uiHelpers.text.includes('renderPlacementDiagnosticsPanel'));
     assert.ok(uiHelpers.text.includes('extractPlacementDiagnosticsFromReadiness'));

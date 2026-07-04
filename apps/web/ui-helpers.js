@@ -1182,13 +1182,95 @@ export function summarizeReleaseEvidenceValidation(validation) {
   return parts.length ? `Invalid — ${parts.join('; ')}` : 'Invalid';
 }
 
+function isAcceptedReleaseEvidenceStatus(status) {
+  const normalized = typeof status === 'string' ? status.trim().toLowerCase() : 'accepted';
+  return normalized === 'accepted' || normalized === 'approved';
+}
+
+function isSubmittableReleaseEvidenceItem(item = {}) {
+  if (item.dry_run === true || item.submittable === false || item.collector_dry_run === true) {
+    return false;
+  }
+  return isAcceptedReleaseEvidenceStatus(item.status);
+}
+
+const STAGING_READINESS_PROFILE_LABELS = Object.freeze({
+  full: 'full (31 kinds)',
+  'safe-validation-ga': 'safe-validation-ga',
+  'high-scale-ga': 'high-scale-ga',
+});
+
 /**
- * @param {Array<{ kind?: string }>} items
+ * @param {string|null|undefined} profile
+ */
+export function formatStagingAttestationProfileLabel(profile) {
+  if (typeof profile !== 'string' || !profile.trim()) return null;
+  const normalized = profile.trim();
+  return STAGING_READINESS_PROFILE_LABELS[normalized] ?? normalized;
+}
+
+/**
+ * @param {Record<string, unknown>|null|undefined} attestation
+ */
+export function resolveStagingAttestationBadge(attestation) {
+  const productionReady = attestation?.production_ready === true;
+  const profileLabel = formatStagingAttestationProfileLabel(
+    typeof attestation?.profile === 'string' ? attestation.profile : null,
+  );
+  if (productionReady && profileLabel) {
+    return `<span class="badge badge--warn">Profile inventory complete (${esc(profileLabel)}) — customer launch still gated</span>`;
+  }
+  if (productionReady) {
+    return '<span class="badge badge--warn">Repo evidence complete — customer launch still gated</span>';
+  }
+  const signoffStatus = typeof attestation?.signoff_status === 'string'
+    ? attestation.signoff_status
+    : null;
+  if (signoffStatus === 'missing_evidence' || signoffStatus === 'rehearsal_only') {
+    return '<span class="badge badge--warn">Inventory incomplete</span>';
+  }
+  return '<span class="badge badge--warn">Attestation blocked</span>';
+}
+
+/**
+ * @param {{
+ *   items?: Array<Record<string, unknown>>,
+ *   attestation?: Record<string, unknown>|null,
+ * }} input
+ */
+export function resolveReleaseEvidenceBadge(input = {}) {
+  const items = Array.isArray(input.items) ? input.items : [];
+  const coverage = computeReleaseEvidenceCoverage(items);
+  const productionReady = input.attestation?.production_ready === true;
+  const profileLabel = formatStagingAttestationProfileLabel(
+    typeof input.attestation?.profile === 'string' ? input.attestation.profile : null,
+  );
+
+  if (items.length === 0) {
+    return '<span class="badge badge--muted">No evidence attached</span>';
+  }
+  if (!coverage.kindsComplete) {
+    return '<span class="badge badge--warn">Inventory incomplete</span>';
+  }
+  if (productionReady && profileLabel) {
+    return `<span class="badge badge--warn">Profile inventory complete (${esc(profileLabel)}) — customer launch still gated</span>`;
+  }
+  if (productionReady) {
+    return '<span class="badge badge--warn">Repo evidence complete — customer launch still gated</span>';
+  }
+  return '<span class="badge badge--warn">Kinds attached — attestation blocked</span>';
+}
+
+/**
+ * @param {Array<{ kind?: string, status?: string, dry_run?: boolean, submittable?: boolean, collector_dry_run?: boolean }>} items
  */
 export function computeReleaseEvidenceCoverage(items = []) {
-  const recorded = new Set(
-    items.map((item) => item?.kind).filter((kind) => typeof kind === 'string' && kind),
-  );
+  const recorded = new Set();
+  for (const item of items) {
+    if (typeof item?.kind !== 'string' || !item.kind) continue;
+    if (!isSubmittableReleaseEvidenceItem(item)) continue;
+    recorded.add(item.kind);
+  }
   const missing = PRODUCTION_RELEASE_EVIDENCE_KINDS.filter((kind) => !recorded.has(kind));
   return {
     expected: PRODUCTION_RELEASE_EVIDENCE_KINDS.length,
@@ -1205,7 +1287,7 @@ function truncateUri(uri, max = 72) {
 }
 
 const STAGING_ATTESTATION_GATE_BANNER = `<p class="release-evidence-gate muted">
-  Staging readiness attestation summarizes metadata-only evidence inventory. It does <strong>not</strong> clear production promotion —
+  Staging readiness attestation summarizes metadata-only evidence inventory. It does <strong>not</strong> clear production promotion or customer-specific launch by itself —
   operator, security, legal, and SOC gates in <code>docs/release-checklist.md</code> remain authoritative.
 </p>`;
 
@@ -1270,9 +1352,9 @@ export function renderStagingReadinessAttestationPanel(attestation, opts = {}) {
     ? attestation.profile.trim()
     : null;
   const blockers = Array.isArray(attestation.blocker_summary) ? attestation.blocker_summary : [];
-  const statusBadge = productionReady
-    ? '<span class="badge badge--warn">Evidence inventory complete — promotion gates still open</span>'
-    : '<span class="badge badge--warn">Attestation blocked</span>';
+  const statusBadge = resolveStagingAttestationBadge(attestation);
+  const customerProductionReady = attestation.customer_production_ready === true;
+  const externalVerification = attestation.external_verification;
 
   const countsLine = `<p class="staging-attestation-counts">
     ${statusBadge}
@@ -1284,6 +1366,7 @@ export function renderStagingReadinessAttestationPanel(attestation, opts = {}) {
 
   const metaGrid = `<dl class="staging-attestation-meta">
     <div><dt>production_ready</dt><dd><code>${productionReady ? 'true' : 'false'}</code></dd></div>
+    <div><dt>customer_production_ready</dt><dd><code>${customerProductionReady ? 'true' : 'false'}</code></dd></div>
     <div><dt>signoff_status</dt><dd><code>${esc(signoffStatus)}</code></dd></div>
     <div><dt>release_id</dt><dd><code>${esc(String(releaseId))}</code></dd></div>
     ${profile ? `<div><dt>profile</dt><dd><code>${esc(profile)}</code></dd></div>` : ''}
@@ -1306,6 +1389,24 @@ export function renderStagingReadinessAttestationPanel(attestation, opts = {}) {
 
   const externalGateWarn = attestation.external_gates?.local_developer_validation_cannot_satisfy === true
     ? '<p class="staging-attestation-external-gate-warn">Local validation cannot satisfy external staging, security, SOC, or legal gates.</p>'
+    : '';
+
+  const externalVerificationLine = externalVerification && typeof externalVerification === 'object'
+    ? `<p class="staging-attestation-external-verification">
+    External verification:
+    live <strong>${Number(externalVerification.live_external_count) || 0}</strong>
+    / ${Number(externalVerification.required_domain_count) || 0}
+    · metadata-only <strong>${Number(externalVerification.metadata_only_count) || 0}</strong>
+    · unverified <strong>${Number(externalVerification.unverified_count) || 0}</strong>
+  </p>`
+    : '';
+  const externalVerificationBlockers = Array.isArray(externalVerification?.blocker_summary)
+    && externalVerification.blocker_summary.length > 0
+    && !customerProductionReady
+    ? `<details class="staging-attestation-external-verification-blockers" open>
+      <summary class="muted">External verification blockers (${externalVerification.blocker_summary.length})</summary>
+      <ul class="staging-attestation-blocker-list">${externalVerification.blocker_summary.map((line) => `<li>${esc(line)}</li>`).join('')}</ul>
+    </details>`
     : '';
 
   const blockerList = blockers.length
@@ -1348,7 +1449,9 @@ export function renderStagingReadinessAttestationPanel(attestation, opts = {}) {
     ${metaGrid}
     ${checklistGatesLine}
     ${externalGateWarn}
+    ${externalVerificationLine}
     <p class="muted">Summary only — evidence bodies, secrets, and raw payloads are never rendered in this panel.</p>
+    ${externalVerificationBlockers}
     ${blockerList}
     ${missingDetails}
     ${invalidDetails}
@@ -1359,6 +1462,7 @@ export function renderStagingReadinessAttestationPanel(attestation, opts = {}) {
 /**
  * @param {{
  *   items?: Array<Record<string, unknown>>,
+ *   attestation?: Record<string, unknown>|null,
  *   loadError?: string|null,
  *   permissionDenied?: boolean,
  *   compact?: boolean,
@@ -1367,9 +1471,13 @@ export function renderStagingReadinessAttestationPanel(attestation, opts = {}) {
 export function renderReleaseEvidencePanel(opts = {}) {
   const items = Array.isArray(opts.items) ? opts.items : [];
   const coverage = computeReleaseEvidenceCoverage(items);
+  const statusBadge = resolveReleaseEvidenceBadge({
+    items,
+    attestation: opts.attestation ?? null,
+  });
   const sorted = items.slice().sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
   const gateBanner = `<p class="release-evidence-gate muted">
-    Metadata-only release evidence supports review. It does <strong>not</strong> mean production readiness is complete —
+    Metadata-only release evidence supports review. It does <strong>not</strong> prove customer-specific launch by itself —
     staging, legal, SOC, and security signoffs in <code>docs/release-checklist.md</code> remain governing gates.
   </p>`;
 
@@ -1390,7 +1498,7 @@ export function renderReleaseEvidencePanel(opts = {}) {
   }
 
   const coverageLine = `<p class="release-evidence-coverage">
-    <span class="badge badge--warn">Release gates open</span>
+    ${statusBadge}
     Accepted kinds recorded: <strong>${coverage.recorded}</strong> / ${coverage.expected}
     ${coverage.kindsComplete ? '' : ` · ${coverage.missing.length} kind(s) still unattached`}
   </p>`;

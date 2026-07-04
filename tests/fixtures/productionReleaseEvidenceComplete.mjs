@@ -636,3 +636,14 @@ export function completeEvidenceRecords(kinds) {
     evidence: PRODUCTION_RELEASE_EVIDENCE_COMPLETE[kind],
   }));
 }
+
+export function stampAcceptedReleaseRecords(records, releaseId, status = 'accepted') {
+  const normalizedReleaseId = releaseId === null || releaseId === undefined
+    ? null
+    : String(releaseId).trim();
+  return records.map((record) => ({
+    ...record,
+    status: record.status ?? status,
+    ...(normalizedReleaseId ? { release_id: normalizedReleaseId } : {}),
+  }));
+}
