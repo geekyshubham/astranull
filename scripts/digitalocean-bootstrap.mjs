@@ -97,6 +97,13 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error(err instanceof Error ? err.message : String(err));
+  const message = err instanceof Error ? err.message : String(err);
+  if (/GitHub user not authenticated/i.test(message)) {
+    console.error(`${message}\n`);
+    console.error('Link GitHub to DigitalOcean, then re-run: npm run do:bootstrap');
+    console.error('https://cloud.digitalocean.com/apps/github/install');
+    process.exit(1);
+  }
+  console.error(message);
   process.exit(1);
 });
