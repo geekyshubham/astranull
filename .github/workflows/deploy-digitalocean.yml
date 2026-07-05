@@ -11,6 +11,7 @@ concurrency:
 
 permissions:
   contents: read
+  packages: write
 
 jobs:
   verify:
@@ -44,9 +45,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push container image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ops/digitalocean/Dockerfile
+          push: true
+          tags: ghcr.io/${{ github.repository }}:latest
+
       - name: Deploy to App Platform
         uses: digitalocean/app_action/deploy@v2
         env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          GHCR_CREDENTIALS: ${{ secrets.GHCR_CREDENTIALS }}
           ASTRANULL_SECRET_ENCRYPTION_KEY: ${{ secrets.ASTRANULL_SECRET_ENCRYPTION_KEY }}
           ASTRANULL_PROBE_WORKER_SECRET: ${{ secrets.ASTRANULL_PROBE_WORKER_SECRET }}
         with:

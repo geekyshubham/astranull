@@ -1,5 +1,5 @@
 # DigitalOcean App Platform spec — deployed by GitHub Actions (digitalocean/app_action/deploy@v2).
-# Source is uploaded from the Actions runner; no DigitalOcean↔GitHub OAuth link required.
+# Image is built in CI and pushed to GHCR; no DigitalOcean↔GitHub OAuth link required.
 name: astranull
 region: nyc
 
@@ -22,8 +22,12 @@ databases:
 
 services:
   - name: web
-    dockerfile_path: ops/digitalocean/Dockerfile
-    source_dir: /
+    image:
+      registry_type: GHCR
+      registry: geekyshubham
+      repository: astranull
+      registry_credentials: ${GHCR_CREDENTIALS}
+      digest: ${IMAGE_DIGEST}
     http_port: 8080
     instance_count: 1
     instance_size_slug: basic-xxs
