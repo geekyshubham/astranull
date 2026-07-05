@@ -1,0 +1,46 @@
+name: Deploy DigitalOcean
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-digitalocean
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Lint
+        run: node scripts/lint.mjs
+
+      - name: Unit tests
+        run: node --test tests/unit/*.test.mjs
+
+      - name: Integration tests
+        run: node --test tests/integration/*.test.mjs
+
+      - name: Safety check
+        run: node scripts/safety-check.mjs
+
+  deploy:
+    needs: verify
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to App Platform
+        uses: digitalocean/app_action@v2
+        with:
+          app_name: astranull
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+          deploy_live: true

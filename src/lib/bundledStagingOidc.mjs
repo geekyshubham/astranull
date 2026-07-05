@@ -30,6 +30,10 @@ export function resolvePublicBaseUrl(env = process.env) {
     env.ASTRANULL_PUBLIC_BASE_URL ?? env.ASTRANULL_HOSTED_STAGING_BASE_URL ?? '',
   ).trim().replace(/\/$/, '');
   if (explicit) return explicit;
+  for (const key of ['APP_URL', 'DIGITALOCEAN_APP_URL']) {
+    const platformUrl = String(env[key] ?? '').trim().replace(/\/$/, '');
+    if (platformUrl) return platformUrl;
+  }
   const railwayStatic = String(env.RAILWAY_STATIC_URL ?? env.RAILWAY_SERVICE_CONTROL_PLANE_URL ?? '').trim().replace(/\/$/, '');
   if (railwayStatic) return railwayStatic;
   const railwayDomain = String(env.RAILWAY_PUBLIC_DOMAIN ?? '').trim();

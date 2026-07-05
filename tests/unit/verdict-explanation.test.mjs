@@ -1,26 +1,27 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
-  formatPlacementConfidenceFromVerdict,
-  renderFindingVerdictExplanation,
-  renderVerdictExplanation,
+  buildVerdictExplanationFields,
+  normalizeVerdictKey,
   summarizeExternalProbeEvidence,
-} from '../../apps/web/verdict-explanation.mjs';
+  summarizePlacementConfidence,
+  trafficHopState,
+} from '../../apps/web/react/src/lib/verdict-explanation.ts';
 
-describe('verdict-explanation', () => {
+describe('verdict-explanation (React portal)', () => {
   it('summarizeExternalProbeEvidence reads external_result from metadata', () => {
-    const html = summarizeExternalProbeEvidence([
+    const summary = summarizeExternalProbeEvidence([
       {
         signal_type: 'probe_result',
         timestamp: '2026-01-01T00:00:00Z',
         metadata: { external_result: 'tcp_connect_ok' },
       },
     ]);
-    assert.match(html, /external_result tcp_connect_ok/);
+    assert.match(summary, /external_result tcp_connect_ok/);
   });
 
-  it('renderVerdictExplanation prefers backend placement_confidence', () => {
-    const html = renderVerdictExplanation(
+  it('buildVerdictExplanationFields prefers backend placement_confidence', () => {
+    const fields = buildVerdictExplanationFields(
       {
         remediation_template: 'Fix edge path.',
         verdict: {
@@ -31,60 +32,54 @@ describe('verdict-explanation', () => {
         },
         correlation: { nonce_hash: 'n1' },
       },
-      {
-        items: [
-          { signal_type: 'probe_result', metadata: { external_result: 'ok' } },
-          { signal_type: 'agent_observation', nonce_hash: 'n1', agent_id: 'ag_1' },
-        ],
-      },
+      [
+        { signal_type: 'probe_result', metadata: { external_result: 'ok' } },
+        { signal_type: 'agent_observation', nonce_hash: 'n1', agent_id: 'ag_1' },
+      ],
     );
-    assert.match(html, /Why this verdict\?/);
-    assert.match(html, /External probe evidence/);
-    assert.match(html, /high/);
-    assert.match(html, /packet_metadata/);
-    assert.match(html, /bypassable/);
-    assert.match(html, /Fix edge path\./);
+
+    const labels = fields.map((field) => field.label);
+    assert.deepEqual(labels, [
+      'External probe evidence',
+      'Internal agent evidence',
+      'Observation mode',
+      'Placement confidence',
+      'Conclusion',
+      'Remediation',
+    ]);
+    const placement = fields.find((field) => field.label === 'Placement confidence');
+    assert.match(placement?.value ?? '', /high/);
+    assert.match(placement?.value ?? '', /packet_metadata/);
+    const conclusion = fields.find((field) => field.label === 'Conclusion');
+    assert.match(conclusion?.value ?? '', /bypassable/);
+    const remediation = fields.find((field) => field.label === 'Remediation');
+    assert.equal(remediation?.value, 'Fix edge path.');
   });
 
-  it('renderFindingVerdictExplanation uses finding heading and remediation', () => {
-    const html = renderFindingVerdictExplanation(
-      {
-        id: 'find_1',
-        test_run_id: 'run_1',
-        remediation_template: 'Restrict origin ingress.',
-        notes: 'fallback',
-      },
-      {
-        check_id: 'chk_1',
-        remediation_template: 'Run-level template.',
-        verdict: {
-          verdict: 'penetrated',
-          confidence: 'medium',
-          explanation: 'Reach confirmed.',
-        },
-        correlation: {},
-      },
-      { items: [{ signal_type: 'probe_result', metadata: { external_result: 'reach' } }] },
-    );
-    assert.match(html, /Why this finding\?/);
-    assert.match(html, /Restrict origin ingress\./);
-    assert.equal(html.includes('Run-level template.'), false);
+  it('buildVerdictExplanationFields returns empty array without verdict payload', () => {
+    assert.deepEqual(buildVerdictExplanationFields({}, []), []);
+    assert.deepEqual(buildVerdictExplanationFields(null, []), []);
   });
 
-  it('renderFindingVerdictExplanation without test run shows notes and remediation only', () => {
-    const html = renderFindingVerdictExplanation(
-      { notes: 'Declared gap.', remediation_template: 'Close ingress.' },
-      null,
-      null,
+  it('summarizePlacementConfidence falls back when backend placement is absent', () => {
+    const supported = summarizePlacementConfidence(
+      [{ signal_type: 'agent_observation', nonce_hash: 'n1' }],
+      [],
+      undefined,
     );
-    assert.match(html, /no linked test run/i);
-    assert.match(html, /Declared gap\./);
-    assert.match(html, /Close ingress\./);
-    assert.equal(html.includes('External probe evidence'), false);
+    assert.match(supported, /supported by job-bound agent observation/);
+
+    const limited = summarizePlacementConfidence(
+      [],
+      [{ signal_type: 'agent_no_observation' }],
+      undefined,
+    );
+    assert.match(limited, /limited/);
   });
 
-  it('formatPlacementConfidenceFromVerdict returns null for invalid input', () => {
-    assert.equal(formatPlacementConfidenceFromVerdict(null), null);
-    assert.equal(formatPlacementConfidenceFromVerdict('high'), null);
+  it('normalizeVerdictKey and trafficHopState support visualization helpers', () => {
+    assert.equal(normalizeVerdictKey('misplaced_agent'), 'misplaced');
+    assert.equal(trafficHopState('origin', 'bypassable'), 'danger');
+    assert.equal(trafficHopState('edge', 'protected'), 'ok');
   });
 });

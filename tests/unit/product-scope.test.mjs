@@ -58,11 +58,13 @@ describe('product scope and no-access-first promise', () => {
     assert.ok(overview.includes('no-access-first'), 'platform overview should state no-access-first');
   });
 
-  it('surfaces no-access-first promise copy in the web app', () => {
-    const appJs = readUtf8('apps/web/app.js');
-    assertContainsMarkers(appJs, 'apps/web/app.js');
-    assert.ok(appJs.includes('PLATFORM_PROMISE'), 'apps/web/app.js should define PLATFORM_PROMISE');
-    assert.ok(appJs.includes('No-access-first'), 'apps/web/app.js should label no-access-first in UI copy');
+  it('surfaces no-access-first promise copy in the React portal', () => {
+    const publicPages = readUtf8('apps/web/react/src/pages/public-pages.tsx');
+    const reactBundle = readUtf8('apps/web/react-app.js');
+    assertContainsMarkers(reactBundle, 'apps/web/react-app.js');
+    assert.ok(publicPages.includes('No-access-first'), 'public landing should label no-access-first in UI copy');
+    assert.ok(reactBundle.includes('No-access-first'), 'React bundle should surface no-access-first copy');
+    assert.ok(publicPages.includes('cloud keys'), 'public landing should describe no-access-first positioning');
   });
 
   it('keeps implementation free of cloud SDK defaults and inventory-discovery feature paths', () => {

@@ -4,6 +4,7 @@ import {
   getBundledStagingJwksDocument,
   mintBundledStagingOidcJwt,
   resolveBundledStagingOidcIssuer,
+  resolvePublicBaseUrl,
 } from '../../src/lib/bundledStagingOidc.mjs';
 import { resolveDeploymentProfile } from '../../src/lib/deploymentProfile.mjs';
 import { loadRuntimeConfig } from '../../src/config.mjs';
@@ -20,6 +21,17 @@ describe('bundled staging OIDC', () => {
     const token = mintBundledStagingOidcJwt({ role: 'admin', tenantId: 'ten_demo', userId: 'usr_admin' }, env);
     assert.match(token, /^eyJ/);
     assert.match(resolveBundledStagingOidcIssuer(env), /^https:\/\/staging\.example\.test\/staging-oidc$/);
+  });
+
+  it('resolvePublicBaseUrl prefers explicit and platform URLs', () => {
+    assert.equal(
+      resolvePublicBaseUrl({ ASTRANULL_PUBLIC_BASE_URL: 'https://astranull.site' }),
+      'https://astranull.site',
+    );
+    assert.equal(
+      resolvePublicBaseUrl({ APP_URL: 'https://astranull.site/' }),
+      'https://astranull.site',
+    );
   });
 
   it('maps bundled OIDC flag to hosted-staging deployment profile', () => {

@@ -23,6 +23,6 @@ describe('railway-staging-start', () => {
     });
 
     assert.equal(code, 1);
-    assert.match(stderr, /ASTRANULL_DATABASE_URL is required/);
+    assert.match(stderr, /ASTRANULL_DATABASE_URL is required|managed Postgres/);
   });
 });

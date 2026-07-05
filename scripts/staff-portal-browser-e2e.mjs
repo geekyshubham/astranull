@@ -50,9 +50,9 @@ async function runStaffBrowserE2e(baseUrl) {
 
   const page = await browser.newPage();
   try {
-    const staffModuleResp = await page.request.get(`${baseUrl}/staff-login.mjs`);
+    const staffModuleResp = await page.request.get(`${baseUrl}/react-app.js`);
     const staffCt = staffModuleResp.headers()['content-type'] ?? '';
-    if (!/javascript/i.test(staffCt)) fail('staff-login.mjs mime', staffCt || 'missing content-type');
+    if (!/javascript/i.test(staffCt)) fail('react-app.js mime', staffCt || 'missing content-type');
 
     await page.goto(`${baseUrl}/internal/admin/login`, { waitUntil: 'networkidle', timeout: 60000 });
     await page.waitForSelector('#staffLoginSubmit', { timeout: 15000 });

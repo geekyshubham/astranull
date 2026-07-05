@@ -42,7 +42,7 @@ Unless noted, responses are JSON. Errors use `{ "error": "<code>", "message"?: "
 
 ## API rate limiting (service layer)
 
-A fixed-window limiter applies to all `/v1/*` and `/internal/*` requests before auth and handlers run. These paths are **not** limited: `GET /health`, `GET /ready`, `GET /metrics`, and static UI (`/`, `/app.js`, `/styles.css`).
+A fixed-window limiter applies to all `/v1/*` and `/internal/*` requests before auth and handlers run. These paths are **not** limited: `GET /health`, `GET /ready`, `GET /metrics`, and static UI (`/`, `/react-app.js`, `/react-app.css`).
 
 | Variable | Default | Bounds | Notes |
 |---|---|---|---|
@@ -60,7 +60,7 @@ When limited, the API returns HTTP `429` with JSON `{ "error": "rate_limited" }`
 | GET | `/health` | — | Liveness: `{ status, service }` (`service` is `astranull`). |
 | GET | `/ready` | — | Readiness for deploy gates: `{ status, service, auth_mode, persistence, probe_mode, probe_worker_secret_configured, timestamp }` (no secrets or database URLs); `503` with `status: not_ready` when the store is unavailable. |
 | GET | `/metrics` | — | Metrics endpoint. The in-process route is unauthenticated; production deployments must restrict scrape access at the gateway/network layer per observability policy. |
-| GET | `/`, `/app.js`, `/styles.css` | — | Static web UI. |
+| GET | `/`, `/react-app.js`, `/react-app.css` | — | React SPA shell and bundle assets. |
 | GET | `/v1/public/site-config` | — | Public landing/login/signup configuration with no secrets. |
 | POST | `/v1/auth/bundled-staging-login` | — | Bundled staging login exchange for hosted/local staging. Not a production enterprise IdP substitute. |
 | POST | `/v1/signup-requests` | — | Public account request intake. Returns `201 { request }`, `400 validation_failed`, `403 signup_disabled`, `409 duplicate_request`, or `429 rate_limited`. |

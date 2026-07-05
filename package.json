@@ -19,6 +19,7 @@
   "scripts": {
     "start": "node src/index.mjs",
     "railway:staging:start": "node scripts/railway-staging-start.mjs",
+    "do:app:spec": "doctl apps spec validate ops/digitalocean/app.yaml",
     "migration:apply:evidence": "node scripts/migration-apply-evidence.mjs",
     "operator:runbook:evidence": "node scripts/operator-runbook-evidence.mjs",
     "migrate:postgres": "node scripts/migrate-postgres.mjs",

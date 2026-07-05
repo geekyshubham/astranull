@@ -54,7 +54,7 @@ function startProbeWorker(env) {
 async function main() {
   const env = { ...process.env };
   if (!String(env.ASTRANULL_DATABASE_URL ?? '').trim()) {
-    console.error('railway-staging-start: ASTRANULL_DATABASE_URL is required (link Railway Postgres).');
+    console.error('hosted-control-plane-start: ASTRANULL_DATABASE_URL is required (link managed Postgres).');
     process.exitCode = 1;
     return;
   }

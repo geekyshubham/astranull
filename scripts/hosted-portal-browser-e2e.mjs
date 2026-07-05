@@ -18,7 +18,7 @@ const CUSTOMER_ROUTES = [
   'audit', 'release-evidence', 'settings',
 ];
 
-const CUSTOMER_ASSETS = ['/login.mjs', '/portal-auth.mjs', '/verdict-explanation.mjs'];
+const CUSTOMER_ASSETS = ['/react-app.js', '/react-app.css'];
 const STAFF_LEAK_RE = /\/internal\/admin|staff-login|Internal management sign-in|AstraNull staff\?/i;
 
 function parseArgs(argv = []) {
