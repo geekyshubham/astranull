@@ -236,7 +236,8 @@ export async function probeOriginLeakScan(job, deps = {}) {
 }
 
 /**
- * P0 — CDN/WAF bypass: HTTP to direct IP with Host/SNI of protected hostname.
+ * P0 — CDN/WAF bypass: HTTPS to direct IP with TLS SNI + Host of protected hostname.
+ * Injectable deps.fetchFn uses HTTP+Host for bounded test/verification consumers.
  */
 export async function probeHostSniBypass(job, deps = {}) {
   const kind = 'host_sni_bypass';
@@ -249,15 +250,17 @@ export async function probeHostSniBypass(job, deps = {}) {
   const started = Date.now();
   const timeoutMs = job.constraints?.timeout_ms ?? 5000;
   const headers = {
+    Host: hostname,
     ...(job.nonce ? { 'x-astranull-nonce': job.nonce } : {}),
     ...(job.probe_profile?.marker ? { 'x-astranull-marker': String(job.probe_profile.marker) } : {}),
   };
-  const useHttps = job.probe_profile?.use_https !== false;
+  const hasInjectedFetch = typeof deps.fetchFn === 'function';
+  const useHttps = !hasInjectedFetch && job.probe_profile?.use_https !== false;
   const { res, error } = useHttps
     ? await httpsHeadWithSni(directIp, hostname, { headers, timeoutMs }, deps)
     : await boundedFetch(`http://${directIp}/`, {
       timeoutMs,
-      fetchOptions: { method: 'HEAD', headers: { Host: hostname, ...headers }, redirect: 'manual' },
+      fetchOptions: { method: 'HEAD', headers, redirect: 'manual' },
     }, deps);
 
   const durationMs = Date.now() - started;

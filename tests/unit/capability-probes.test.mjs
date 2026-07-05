@@ -45,7 +45,24 @@ describe('capability probes P0/P1', () => {
     assert.ok(outcome.metadata.leak_signals.some((s) => s.startsWith('subdomain_origin_divergence:')));
   });
 
-  it('host/SNI bypass uses HTTPS with TLS SNI to direct IP', async () => {
+  it('host/SNI bypass detects direct IP reachability via injectable fetchFn', async () => {
+    const outcome = await probeHostSniBypass(
+      job({
+        probe_profile: {
+          kind: 'host_sni_bypass',
+          protected_host: 'edge.example.test',
+          direct_ip: '198.51.100.7',
+        },
+      }),
+      {
+        fetchFn: async () => ({ status: 200, headers: { get: () => null } }),
+      },
+    );
+    assert.equal(outcome.external_result, 'connected');
+    assert.equal(outcome.metadata.bypass_signal, true);
+  });
+
+  it('host/SNI bypass uses HTTPS with TLS SNI when no fetchFn is injected', async () => {
     let captured = null;
     const outcome = await probeHostSniBypass(
       job({
@@ -59,10 +76,7 @@ describe('capability probes P0/P1', () => {
         httpsRequestFn: (opts, cb) => {
           captured = opts;
           return {
-            on(event, handler) {
-              if (event === 'timeout' || event === 'error') return this;
-              return this;
-            },
+            on() { return this; },
             end() {
               cb({ statusCode: 200, headers: {}, resume() {} });
             },
@@ -72,7 +86,6 @@ describe('capability probes P0/P1', () => {
     );
     assert.equal(captured.host, '198.51.100.7');
     assert.equal(captured.servername, 'edge.example.test');
-    assert.equal(outcome.external_result, 'connected');
     assert.equal(outcome.metadata.bypass_signal, true);
   });
 
