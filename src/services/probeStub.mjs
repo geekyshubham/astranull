@@ -56,6 +56,21 @@ export function simulateProbeResult(check, target, overrideProfile) {
       dry_run: check.probe_profile?.scenario === 'kill_switch_readiness',
       note: 'Simulated ops readiness validation on control plane.',
     });
+  } else if (probeProfileKind === 'tls_session') {
+    Object.assign(baseMetadata, {
+      probe_kind: 'tls_session',
+      tls_protocol: 'TLSv1.3',
+      cipher: 'TLS_AES_128_GCM_SHA256',
+      authorized: true,
+      note: 'Simulated bounded TLS session.',
+    });
+  } else if (probeProfileKind === 'http2_settings') {
+    Object.assign(baseMetadata, {
+      probe_kind: 'http2_settings',
+      max_concurrent_streams: 100,
+      enable_push: false,
+      note: 'Simulated HTTP/2 SETTINGS read.',
+    });
   } else {
     baseMetadata.note = 'Metadata-only safe probe simulation — no live traffic to customer targets.';
   }

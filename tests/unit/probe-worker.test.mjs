@@ -596,6 +596,25 @@ describe('executeProbeForJob routing', () => {
     assert.equal(outcome.metadata.probe_kind, 'udp_probe');
   });
 
+  it('executeProbeForJob handles ownership_challenge', async () => {
+    const { executeProbeForJob } = await import('../../workers/probe-worker.mjs');
+    const job = baseJob({
+      probe_profile: {
+        kind: 'ownership_challenge',
+        marker: 'astranull-ownership-challenge',
+        max_requests: 1,
+        timeout_ms: 2000,
+      },
+      target: { kind: 'fqdn', value: 'example.test' },
+      vector_family: 'ownership',
+      nonce_hash: 'sha256:abc',
+    });
+    const outcome = await executeProbeForJob(job);
+    assert.equal(outcome.metadata.probe_kind, 'ownership_challenge');
+    assert.notEqual(outcome.metadata.error_class, 'unsupported_check');
+    assert.ok(['connected', 'blocked', 'timeout', 'error'].includes(outcome.external_result));
+  });
+
   it('routes alert_webhook_ping when webhook URL is missing', async () => {
     const { executeProbeForJob } = await import('../../workers/probe-worker.mjs');
     const job = baseJob({
@@ -607,6 +626,34 @@ describe('executeProbeForJob routing', () => {
     const outcome = await executeProbeForJob(job);
     assert.equal(outcome.external_result, 'error');
     assert.equal(outcome.metadata.error_class, 'missing_webhook_url');
+  });
+
+  it('routes tls_session profile kind to bounded TLS probe', async () => {
+    const { executeProbeForJob } = await import('../../workers/probe-worker.mjs');
+    const job = baseJob({
+      check_id: 'tls.idle_connection_timeout.safe',
+      vector_family: 'tls',
+      probe_profile: { kind: 'tls_session', max_requests: 1, timeout_ms: 50 },
+      target: { kind: 'fqdn', value: '127.0.0.1:9' },
+      constraints: { timeout_ms: 50, max_requests: 1 },
+    });
+    const outcome = await executeProbeForJob(job);
+    assert.equal(outcome.metadata.probe_kind, 'tls_session');
+    assert.ok(['connected', 'blocked', 'timeout', 'error'].includes(outcome.external_result));
+  });
+
+  it('routes http2_settings profile kind to bounded HTTP/2 SETTINGS probe', async () => {
+    const { executeProbeForJob } = await import('../../workers/probe-worker.mjs');
+    const job = baseJob({
+      check_id: 'protocol.http2_stream_concurrency.safe',
+      vector_family: 'protocol',
+      probe_profile: { kind: 'http2_settings', max_requests: 1, timeout_ms: 50 },
+      target: { kind: 'fqdn', value: '127.0.0.1:9' },
+      constraints: { timeout_ms: 50, max_requests: 1 },
+    });
+    const outcome = await executeProbeForJob(job);
+    assert.equal(outcome.metadata.probe_kind, 'http2_settings');
+    assert.ok(['connected', 'blocked', 'timeout', 'error'].includes(outcome.external_result));
   });
 
   it('uses worker version constant in processJob attestation', async () => {

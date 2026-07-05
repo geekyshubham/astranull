@@ -13,6 +13,7 @@ import {
 import { enrichProbeMetadataWithWafCatalog } from '../lib/wafProductCatalog.mjs';
 import { getStore, persistStore } from '../store.mjs';
 import { recordEvidence } from './evidence.mjs';
+import * as ownershipVerification from './ownershipVerification.mjs';
 
 const PROBE_WORKER_SIG_VERSION = 'pw1';
 
@@ -89,6 +90,64 @@ export function createProbeJob(ctx, run, check, target, probeProfile, runtimeCon
     resource_type: 'probe_job',
     resource_id: job.id,
     metadata: { test_run_id: run.id, check_id: check.check_id },
+  });
+  persistStore();
+  return job;
+}
+
+export function createOwnershipChallengeJob(ctx, { verification }, runtimeConfig) {
+  if (runtimeConfig?.probeMode !== 'signed-worker' || !runtimeConfig?.probeWorkerSecret) {
+    return null;
+  }
+
+  const run = {
+    id: verification.id,
+    tenant_id: ctx.tenantId,
+    safety_constraints: { max_events: 1, max_duration_seconds: 30 },
+  };
+  const check = {
+    check_id: 'ownership.challenge',
+    vector_family: 'ownership',
+    title: 'Ownership challenge',
+    probe_profile: {
+      kind: 'ownership_challenge',
+      max_requests: 1,
+      timeout_ms: 5000,
+      marker: 'astranull-ownership-challenge',
+    },
+  };
+  const target = {
+    id: verification.agent_id,
+    kind: 'fqdn',
+    value: verification.declared_fqdn,
+  };
+
+  const job = buildSignedProbeJobRecord({
+    run,
+    check,
+    target,
+    probeProfile: undefined,
+    probeWorkerSecret: runtimeConfig.probeWorkerSecret,
+    now: new Date(),
+    newId: () => newId('pjob'),
+  });
+  job.ownership_verification_id = verification.id;
+  job.nonce_hash = verification.challenge_nonce_hash;
+  job.job_signature = signProbeJob(job, runtimeConfig.probeWorkerSecret);
+
+  getStore().probeJobs.push(job);
+
+  audit({
+    tenant_id: ctx.tenantId,
+    actor_user_id: ctx.userId,
+    actor_role: ctx.role,
+    action: 'probe_job.created',
+    resource_type: 'probe_job',
+    resource_id: job.id,
+    metadata: {
+      ownership_verification_id: verification.id,
+      check_id: 'ownership.challenge',
+    },
   });
   persistStore();
   return job;
@@ -212,6 +271,62 @@ export function ingestProbeResult(workerCtx, jobId, body, runtimeConfig) {
   if (!job) return { error: 'job_not_found', status: 404 };
   if (workerCtx?.tenantId && job.tenant_id !== workerCtx.tenantId) {
     return { error: 'job_not_found', status: 404 };
+  }
+
+  if (job.ownership_verification_id) {
+    if (job.status === 'completed') {
+      return { error: 'job_not_open', status: 409 };
+    }
+    if (job.status === 'leased' && job.leased_by !== workerCtx.workerId) {
+      return {
+        error: 'job_leased_to_another_worker',
+        status: 403,
+        message: 'This probe job is leased to a different worker.',
+      };
+    }
+    if (job.status !== 'pending' && job.status !== 'leased') {
+      return { error: 'job_not_open', status: 409 };
+    }
+    if (body == null || typeof body !== 'object' || Array.isArray(body)) {
+      return {
+        error: 'invalid_body',
+        status: 400,
+        message: 'Probe result body must be a JSON object.',
+      };
+    }
+    const validated = validateProbeResultBody(body, job.constraints ?? {});
+    if (!validated.ok) {
+      return {
+        error: validated.error,
+        status: validated.status,
+        message: validated.message,
+      };
+    }
+    const now = new Date().toISOString();
+    job.status = 'completed';
+    job.completed_at = now;
+
+    ownershipVerification.recordOwnershipSignalByNonce(
+      { tenantId: job.tenant_id },
+      { source: 'probe', nonce_hash: job.nonce_hash },
+    );
+
+    audit({
+      tenant_id: job.tenant_id,
+      actor_user_id: workerCtx.workerId,
+      actor_role: 'probe_worker',
+      action: 'probe_job.result_ingested',
+      resource_type: 'probe_job',
+      resource_id: job.id,
+      metadata: { ownership_verification_id: job.ownership_verification_id },
+    });
+
+    persistStore();
+    return {
+      ownership_verification_id: job.ownership_verification_id,
+      job_id: job.id,
+      tenant_id: job.tenant_id,
+    };
   }
 
   const runForJob = store.testRuns.find(

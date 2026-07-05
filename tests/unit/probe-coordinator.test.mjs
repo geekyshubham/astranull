@@ -10,6 +10,7 @@ import {
   signProbeWorkerRequest,
   verifyProbeJobSignature,
 } from '../../src/services/probeCoordinator.mjs';
+import { createOwnershipChallenge } from '../../src/services/ownershipVerification.mjs';
 import {
   finalizeTestRun,
   ingestObservation,
@@ -971,5 +972,60 @@ describe('ready endpoint probe metadata', () => {
     assert.equal(res.json.probe_worker_secret_configured, true);
     assert.equal(res.json.probe_worker_secret, undefined);
     assert.equal(res.json.ASTRANULL_PROBE_WORKER_SECRET, undefined);
+  });
+});
+
+describe('ownership challenge probe jobs', () => {
+  const ownershipCtx = { tenantId: 'ten_demo', userId: 'u1', role: 'owner' };
+  const workerCtx = { workerId: 'worker-own', role: 'probe_worker', tenantId: 'ten_demo' };
+
+  afterEach(() => {
+    freshStore();
+  });
+
+  it('dispatches signed ownership job and records probe signal on ingest', () => {
+    freshStore();
+    const store = getStore();
+    if (!Array.isArray(store.ownershipVerifications)) {
+      store.ownershipVerifications = [];
+    }
+    store.agents.push({
+      id: 'agent_1',
+      tenant_id: 'ten_demo',
+      name: 'canary',
+      status: 'online',
+      target_group_id: 'tg_1',
+      probe_endpoint: { declared_fqdn: 'origin.test' },
+      last_token_validation_status: 'valid',
+    });
+
+    const runtimeConfig = runtimeSignedWorker();
+    const created = createOwnershipChallenge(
+      ownershipCtx,
+      { target_group_id: 'tg_1', agent_id: 'agent_1' },
+      runtimeConfig,
+    );
+    assert.equal(created.error, undefined);
+
+    const verification = created.verification;
+    const job = getStore().probeJobs.find(
+      (j) => j.ownership_verification_id === verification.id,
+    );
+    assert.ok(job);
+    assert.equal(job.check_id, 'ownership.challenge');
+    assert.equal(job.probe_profile.kind, 'ownership_challenge');
+    assert.equal(job.nonce_hash, verification.challenge_nonce_hash);
+
+    const body = {
+      external_result: 'connected',
+      safety_attestation: compliantSafetyAttestation(job),
+    };
+    const ingested = ingestProbeResult(workerCtx, job.id, body, runtimeConfig);
+    assert.equal(ingested.error, undefined);
+    assert.equal(ingested.ownership_verification_id, verification.id);
+
+    const updated = getStore().ownershipVerifications.find((v) => v.id === verification.id);
+    assert.equal(updated.probe_observed, true);
+    assert.equal(updated.status, 'challenge_sent');
   });
 });

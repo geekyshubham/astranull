@@ -442,9 +442,9 @@ correlate with an agent observation).
 ### Phase 1 — Foundation
 - [ ] `probe_endpoint` claim on heartbeat + server validation gate (§6, checks 1-9).
 - [ ] Agent reads `ASTRANULL_PUBLIC_FQDN` / `ASTRANULL_PUBLIC_IP`; cloud-metadata discovery.
-- [ ] `ownership_challenge` probe kind + correlation rule + `ownership_verifications` store/APIs.
-- [ ] Block probe scheduling when `token_valid === false` or agent revoked.
-- [ ] `validation_mode` per target group; UI ownership confirmation step.
+- [x] `ownership_challenge` probe kind + correlation rule + `ownership_verifications` store/APIs. *(AG-017: dev/in-memory store — signed `ownership_challenge` job dispatch reusing the challenge nonce_hash, auto probe-signal on probe-result ingest, auto agent-signal on `ownership_observation` event, correlation → `agent_verified`; reference probe worker executes the challenge. **Pending:** Postgres parity for `ownership_verifications` + staging fleet evidence.)*
+- [x] Block probe scheduling when `token_valid === false` or agent revoked. *(challenge creation rejects `agent_token_invalid` / non-online agents.)*
+- [x] `validation_mode` per target group; UI ownership confirmation step. *(AG-017/AG-018: `validation_mode` on target groups + build-verified portal panel — validation-mode toggle, DNS TXT issue/verify, ownership-verification confirm. **Pending:** browser/e2e coverage.)*
 - [ ] UI deploy commands (env-var only) for image + standalone; token-health + endpoint on the Agents row.
 
 ### Phase 2 — Image + easy deploy
@@ -453,9 +453,9 @@ correlate with an agent observation).
 - [ ] Integration test: register → heartbeat → challenge → observation → verdict.
 
 ### Phase 3 — External-only path
-- [ ] External-only run path with `external_only` confidence labeling.
-- [ ] DNS TXT ownership verification.
-- [ ] "Deploy agent to strengthen verdict" CTA on external-only findings.
+- [x] External-only run path with `external_only` confidence labeling. *(AG-018: `correlateExternalOnlyVerdict` + `finalizeVerdictIfReady` external-only branch — verdicts carry `confidence: external_only`, `placement: unverified`, `strengthen_hint: deploy_agent`; finalizes on external probe evidence without requiring an agent observation. **Pending:** live signed-worker fleet on customer edges.)*
+- [x] DNS TXT ownership verification. *(AG-018: `src/services/dnsOwnership.mjs` issues `_astranull-challenge.<domain>` TXT tokens and verifies via an injectable resolver; success sets `ownership_status: dns_verified`. **Pending:** production resolver hardening.)*
+- [x] "Deploy agent to strengthen verdict" CTA on external-only findings. *(build-verified portal callout on external-only findings.)*
 
 ### Phase 4 — Hardening + attack-simulation expansion
 - [ ] Distroless / read-only-root image profile; cosign signing; CI secret scan on layers.

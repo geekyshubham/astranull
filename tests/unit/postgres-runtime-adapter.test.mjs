@@ -56,6 +56,7 @@ import {
   POSTGRES_WAF_DRIFT_SERVICE_METHODS,
   WAF_DRIFT_REPOSITORY_METHODS,
 } from '../../src/persistence/postgres/wafDriftServiceAdapters.mjs';
+import { OWNERSHIP_VERIFICATION_REPOSITORY_METHODS } from '../../src/persistence/postgres/ownershipVerificationServiceAdapters.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -172,6 +173,13 @@ function createHarness(overrides = {}) {
           upsertKillSwitch: async () => ({ active: false }),
         };
       }
+      if (key === 'ownershipVerifications') {
+        const repo = {};
+        for (const method of OWNERSHIP_VERIFICATION_REPOSITORY_METHODS) {
+          repo[method] = async () => null;
+        }
+        return repo;
+      }
       if (key === 'highScale') {
         const repo = {};
         for (const method of HIGH_SCALE_REPOSITORY_METHODS) {
@@ -270,6 +278,7 @@ describe('postgres runtime adapter', () => {
       'agentUpdates',
       'probeJobs',
       'killSwitch',
+      'ownershipVerifications',
       'highScale',
       'productionReleaseEvidence',
       'retention',

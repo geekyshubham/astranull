@@ -87,6 +87,35 @@ function getNestedItem(item: DataItem | null | undefined, path: string[]) {
   return current && typeof current === 'object' && !Array.isArray(current) ? current as DataItem : null;
 }
 
+function isExternalOnlyVerdictSignal(entity: DataItem | null | undefined) {
+  if (!entity) return false;
+  const topConfidence = getString(entity, ['confidence'], '');
+  const topHint = getString(entity, ['strengthen_hint'], '');
+  const topPlacement = getString(entity, ['placement'], '');
+  const verdictConfidence = getNestedString(entity, ['verdict', 'confidence'], '');
+  const verdictHint = getNestedString(entity, ['verdict', 'strengthen_hint'], '');
+  const verdictPlacement = getNestedString(entity, ['verdict', 'placement'], '');
+  return (
+    topConfidence === 'external_only'
+    || topHint === 'deploy_agent'
+    || topPlacement === 'unverified'
+    || verdictConfidence === 'external_only'
+    || verdictHint === 'deploy_agent'
+    || verdictPlacement === 'unverified'
+  );
+}
+
+function ownershipStatusBadgeTone(status: string): BadgeProps['tone'] {
+  const key = normalizeStatusKey(status);
+  if (key === 'user_confirmed' || key === 'agent_verified' || key === 'dns_verified') return 'success';
+  if (key === 'unverified') return 'warn';
+  return 'muted';
+}
+
+function validationModeBadgeTone(mode: string): BadgeProps['tone'] {
+  return normalizeStatusKey(mode) === 'external_only' ? 'warn' : 'info';
+}
+
 type ReportExportPreview = {
   reportId: string;
   format: string;
@@ -1453,10 +1482,31 @@ function TargetGroupDetailView({
   const [expectedBehaviorDefault, setExpectedBehaviorDefault] = useState(
     () => getString(entity, ['expected_behavior_default'], 'must_block_before_origin')
   );
+  const [dnsChallenge, setDnsChallenge] = useState<DataItem | null>(null);
+  const [dnsVerifyResult, setDnsVerifyResult] = useState<DataItem | null>(null);
+  const [ownershipVerifications, setOwnershipVerifications] = useState<DataItem[]>([]);
+  const [ownershipVerificationsLoading, setOwnershipVerificationsLoading] = useState(false);
+
+  const validationMode = getString(entity, ['validation_mode'], 'agent_assisted');
+  const ownershipStatus = getString(entity, ['ownership_status'], 'unverified');
 
   useEffect(() => {
     setExpectedBehaviorDefault(getString(entity, ['expected_behavior_default'], 'must_block_before_origin'));
   }, [entityId, entity]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setOwnershipVerificationsLoading(true);
+    requestJson(config, session, '/v1/ownership-verifications')
+      .then((payload) => {
+        if (cancelled) return;
+        const items = Array.isArray((payload as DataItem).items) ? (payload as DataItem).items as DataItem[] : [];
+        setOwnershipVerifications(items.filter((item) => getString(item, ['target_group_id'], '') === entityId));
+      })
+      .catch(() => { if (!cancelled) setOwnershipVerifications([]); })
+      .finally(() => { if (!cancelled) setOwnershipVerificationsLoading(false); });
+    return () => { cancelled = true; };
+  }, [config, session, entityId]);
 
   const targets = getNestedArray(entity, ['targets']);
   const relatedRuns = data.runs.filter((run) => getString(run, ['target_group_id'], '') === entityId);
@@ -1582,6 +1632,47 @@ function TargetGroupDetailView({
       method: 'DELETE'
     }), 'Target group archived.');
     window.location.hash = '#target-groups';
+  }
+
+  async function refreshOwnershipVerifications() {
+    setOwnershipVerificationsLoading(true);
+    try {
+      const payload = await requestJson(config, session, '/v1/ownership-verifications') as DataItem;
+      const items = Array.isArray(payload.items) ? payload.items as DataItem[] : [];
+      setOwnershipVerifications(items.filter((item) => getString(item, ['target_group_id'], '') === entityId));
+    } catch {
+      setOwnershipVerifications([]);
+    } finally {
+      setOwnershipVerificationsLoading(false);
+    }
+  }
+
+  async function setValidationMode(mode: 'agent_assisted' | 'external_only') {
+    if (mode === validationMode) return;
+    await runGroupAction(`validation-mode-${entityId}`, () => requestJson(config, session, `/v1/target-groups/${entityId}`, {
+      method: 'PATCH',
+      body: { validation_mode: mode }
+    }), 'Validation mode updated.');
+  }
+
+  async function issueDnsOwnershipChallenge() {
+    await runGroupAction(`dns-issue-${entityId}`, async () => {
+      const result = await requestJson(config, session, `/v1/target-groups/${entityId}/dns-ownership`, { method: 'POST' }) as DataItem;
+      setDnsChallenge(result);
+      setDnsVerifyResult(null);
+    }, 'DNS TXT challenge issued.');
+  }
+
+  async function verifyDnsOwnership() {
+    await runGroupAction(`dns-verify-${entityId}`, async () => {
+      const result = await requestJson(config, session, `/v1/target-groups/${entityId}/dns-ownership/verify`, { method: 'POST' }) as DataItem;
+      setDnsVerifyResult(result);
+    }, 'DNS ownership verification completed.');
+  }
+
+  async function confirmOwnershipVerification(verificationId: string) {
+    await runGroupAction(`confirm-ownership-${verificationId}`, () => requestJson(config, session, `/v1/ownership-verifications/${encodeURIComponent(verificationId)}/confirm`, { method: 'POST' }), 'Ownership confirmed.');
+    await refreshOwnershipVerifications();
   }
 
   return (
@@ -1755,41 +1846,160 @@ function TargetGroupDetailView({
         </div>
       ) : null}
       {tab === 'settings' ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>Group settings</CardTitle>
-            <CardDescription>Patch declaration metadata without changing unrelated inventory.</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <form key={entityId} className="product-form" onSubmit={handlePatchGroup}>
-              <label>
-                <span>Name</span>
-                <input name="name" defaultValue={getString(entity, ['name'])} />
-              </label>
-              <label>
-                <span>Timezone</span>
-                <input name="timezone" defaultValue={getString(entity, ['timezone'], 'UTC')} />
-              </label>
-              <label className="full">
-                <span>Description</span>
-                <textarea name="description" rows={3} defaultValue={getString(entity, ['description'], '')} />
-              </label>
-              <Select
-                className="full"
-                label="Default expected behavior"
-                value={expectedBehaviorDefault}
-                options={TARGET_GROUP_EXPECTED_BEHAVIOR_OPTIONS.map((option) => ({ value: option.value, label: option.label }))}
-                onChange={setExpectedBehaviorDefault}
-                disabled={busy !== ''}
-              />
-              <div className="form-actions full">
-                <Button type="submit" loading={busy === `patch-target-group-${entityId}`} disabled={busy !== ''}>Save settings</Button>
-                <AnchorButton size="sm" variant="secondary" href="#target-groups">Manage targets</AnchorButton>
-                <Button type="button" variant="danger" disabled={busy !== ''} onClick={() => void archiveGroup()}>Archive group</Button>
+        <div className="stack-tight">
+          <Card>
+            <CardHeader>
+              <CardTitle>Ownership &amp; validation</CardTitle>
+              <CardDescription>Confirm you control this scope and choose how AstraNull validates it.</CardDescription>
+            </CardHeader>
+            <CardContent className="stack-tight">
+              <div className="kv-list">
+                <div>
+                  <span>Validation mode</span>
+                  <Badge tone={validationModeBadgeTone(validationMode)}>{formatFactorLabel(validationMode)}</Badge>
+                </div>
+                <div>
+                  <span>Ownership status</span>
+                  <Badge tone={ownershipStatusBadgeTone(ownershipStatus)}>{formatFactorLabel(ownershipStatus)}</Badge>
+                </div>
               </div>
-            </form>
-          </CardContent>
-        </Card>
+              <div className="row-actions">
+                <Button
+                  size="sm"
+                  variant={validationMode === 'agent_assisted' ? 'default' : 'secondary'}
+                  loading={busy === `validation-mode-${entityId}`}
+                  disabled={busy !== ''}
+                  onClick={() => void setValidationMode('agent_assisted')}
+                >
+                  Agent-assisted
+                </Button>
+                <Button
+                  size="sm"
+                  variant={validationMode === 'external_only' ? 'default' : 'secondary'}
+                  loading={busy === `validation-mode-${entityId}`}
+                  disabled={busy !== ''}
+                  onClick={() => void setValidationMode('external_only')}
+                >
+                  External only
+                </Button>
+              </div>
+              {validationMode === 'external_only' ? (
+                <p className="muted small">
+                  External-only mode: AstraNull scans the declared FQDN/IP only. Verdicts are labeled external_only (edge evidence, origin not proven). Deploy an agent to strengthen.
+                </p>
+              ) : null}
+              <Card>
+                <CardHeader>
+                  <CardTitle>DNS TXT ownership</CardTitle>
+                  <CardDescription>Publish a TXT record to prove DNS control of the declared FQDN.</CardDescription>
+                </CardHeader>
+                <CardContent className="stack-tight">
+                  <div className="row-actions">
+                    <Button size="sm" variant="secondary" loading={busy === `dns-issue-${entityId}`} disabled={busy !== ''} onClick={() => void issueDnsOwnershipChallenge()}>
+                      Issue DNS TXT challenge
+                    </Button>
+                    <Button size="sm" variant="default" loading={busy === `dns-verify-${entityId}`} disabled={busy !== '' || !dnsChallenge} onClick={() => void verifyDnsOwnership()}>
+                      Verify DNS ownership
+                    </Button>
+                  </div>
+                  {dnsChallenge ? (
+                    <div className="stack-tight">
+                      <p className="muted small">Add this TXT record at your DNS provider, then run verification.</p>
+                      <pre className="codeblock">{`Name: ${getString(dnsChallenge, ['record_name'], '—')}\nType: TXT\nValue: ${getString(dnsChallenge, ['record_value'], '—')}`}</pre>
+                      <p className="muted small">Challenge status: <strong>{getString(dnsChallenge, ['status'], 'pending')}</strong></p>
+                    </div>
+                  ) : null}
+                  {dnsVerifyResult ? (
+                    <p className="muted small">
+                      Verification: <Badge tone={getString(dnsVerifyResult, ['status'], '') === 'verified' ? 'success' : 'danger'}>{getString(dnsVerifyResult, ['status'], '—')}</Badge>
+                      {' · '}
+                      Ownership: <Badge tone={ownershipStatusBadgeTone(getString(dnsVerifyResult, ['ownership_status'], ownershipStatus))}>{formatFactorLabel(getString(dnsVerifyResult, ['ownership_status'], ownershipStatus))}</Badge>
+                    </p>
+                  ) : null}
+                </CardContent>
+              </Card>
+              <Card>
+                <CardHeader>
+                  <CardTitle>Ownership verifications</CardTitle>
+                  <CardDescription>Probe and agent observations used to confirm declared FQDN ownership.</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  {ownershipVerificationsLoading ? <DetailLoadingPlaceholder label="Loading ownership verifications…" variant="compact" /> : null}
+                  {!ownershipVerificationsLoading && ownershipVerifications.length === 0 ? (
+                    <EmptyState icon={ShieldCheck} title="No ownership verifications yet." body="Run validation with declared FQDNs or complete DNS TXT verification to populate records." />
+                  ) : null}
+                  {!ownershipVerificationsLoading && ownershipVerifications.length > 0 ? (
+                    <div className="stack-tight">
+                      {ownershipVerifications.map((item) => {
+                        const verificationId = getString(item, ['id'], '');
+                        const status = getString(item, ['status'], 'unknown');
+                        const confirmedBy = getString(item, ['confirmed_by_user_id'], '');
+                        const probeObserved = item.probe_observed === true;
+                        const agentObserved = item.agent_observed === true;
+                        return (
+                          <div key={verificationId || getString(item, ['declared_fqdn'], '')} className="kv-list">
+                            <div><span>Declared FQDN</span><strong>{getString(item, ['declared_fqdn'], '—')}</strong></div>
+                            <div><span>Status</span><Badge tone={status === 'verified' ? 'success' : status === 'failed' ? 'danger' : 'muted'}>{formatFactorLabel(status)}</Badge></div>
+                            <div><span>Probe observed</span><Badge tone={probeObserved ? 'success' : 'muted'}>{probeObserved ? 'yes' : 'no'}</Badge></div>
+                            <div><span>Agent observed</span><Badge tone={agentObserved ? 'success' : 'muted'}>{agentObserved ? 'yes' : 'no'}</Badge></div>
+                            {status === 'verified' && !confirmedBy && verificationId ? (
+                              <div className="form-actions">
+                                <Button
+                                  size="sm"
+                                  variant="default"
+                                  loading={busy === `confirm-ownership-${verificationId}`}
+                                  disabled={busy !== ''}
+                                  onClick={() => void confirmOwnershipVerification(verificationId)}
+                                >
+                                  Confirm ownership
+                                </Button>
+                              </div>
+                            ) : null}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : null}
+                </CardContent>
+              </Card>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader>
+              <CardTitle>Group settings</CardTitle>
+              <CardDescription>Patch declaration metadata without changing unrelated inventory.</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <form key={entityId} className="product-form" onSubmit={handlePatchGroup}>
+                <label>
+                  <span>Name</span>
+                  <input name="name" defaultValue={getString(entity, ['name'])} />
+                </label>
+                <label>
+                  <span>Timezone</span>
+                  <input name="timezone" defaultValue={getString(entity, ['timezone'], 'UTC')} />
+                </label>
+                <label className="full">
+                  <span>Description</span>
+                  <textarea name="description" rows={3} defaultValue={getString(entity, ['description'], '')} />
+                </label>
+                <Select
+                  className="full"
+                  label="Default expected behavior"
+                  value={expectedBehaviorDefault}
+                  options={TARGET_GROUP_EXPECTED_BEHAVIOR_OPTIONS.map((option) => ({ value: option.value, label: option.label }))}
+                  onChange={setExpectedBehaviorDefault}
+                  disabled={busy !== ''}
+                />
+                <div className="form-actions full">
+                  <Button type="submit" loading={busy === `patch-target-group-${entityId}`} disabled={busy !== ''}>Save settings</Button>
+                  <AnchorButton size="sm" variant="secondary" href="#target-groups">Manage targets</AnchorButton>
+                  <Button type="button" variant="danger" disabled={busy !== ''} onClick={() => void archiveGroup()}>Archive group</Button>
+                </div>
+              </form>
+            </CardContent>
+          </Card>
+        </div>
       ) : null}
       </>
       ) : null}
@@ -2111,6 +2321,18 @@ function FindingDetailView({
       <>
       <Tabs value={tab} options={tabOptions} onChange={setTab} className="tabs-wrap" />
       {tab === 'summary' ? (
+        <>
+        {isExternalOnlyVerdictSignal(entity) ? (
+          <Card>
+            <CardHeader>
+              <CardTitle>Strengthen this verdict</CardTitle>
+              <CardDescription>This verdict is based on external-only edge evidence. Deploy the AstraNull agent on the target path to prove whether traffic reached origin.</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <AnchorButton size="sm" variant="default" href="#agents">Deploy agent to strengthen</AnchorButton>
+            </CardContent>
+          </Card>
+        ) : null}
         <Card>
           <CardHeader>
             <CardTitle>Finding summary</CardTitle>
@@ -2137,6 +2359,7 @@ function FindingDetailView({
             </div>
           </CardContent>
         </Card>
+        </>
       ) : null}
       {tab === 'explanation' ? (
         <Card>

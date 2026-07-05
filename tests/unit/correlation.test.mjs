@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { correlateVerdict } from '../../src/services/correlation.mjs';
+import { correlateExternalOnlyVerdict, correlateVerdict } from '../../src/services/correlation.mjs';
 
 describe('correlation truth table', () => {
   it('protected when blocked and not observed', () => {
@@ -47,5 +47,36 @@ describe('correlation truth table', () => {
       agentBound: true,
     });
     assert.equal(r.verdict, 'misplaced_agent');
+  });
+});
+
+describe('correlateExternalOnlyVerdict', () => {
+  it('edge_protected when blocked with external_only confidence', () => {
+    const r = correlateExternalOnlyVerdict({
+      externalResult: 'blocked',
+      expectedBehavior: 'must_block_before_origin',
+    });
+    assert.equal(r.verdict, 'edge_protected');
+    assert.equal(r.confidence, 'external_only');
+    assert.equal(r.placement, 'unverified');
+  });
+
+  it('edge_exposed when connected with external_only confidence', () => {
+    const r = correlateExternalOnlyVerdict({
+      externalResult: 'connected',
+      expectedBehavior: 'must_block_before_origin',
+    });
+    assert.equal(r.verdict, 'edge_exposed');
+    assert.equal(r.confidence, 'external_only');
+    assert.equal(r.createsFinding, true);
+  });
+
+  it('inconclusive for unknown external result', () => {
+    const r = correlateExternalOnlyVerdict({
+      externalResult: 'weird',
+      expectedBehavior: 'must_block_before_origin',
+    });
+    assert.equal(r.verdict, 'inconclusive');
+    assert.equal(r.confidence, 'external_only');
   });
 });

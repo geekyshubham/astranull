@@ -4,6 +4,7 @@ import { newId } from '../lib/ids.mjs';
 import { incMetric } from '../lib/metrics.mjs';
 import { getStore, persistStore } from '../store.mjs';
 import { recordEvidence } from './evidence.mjs';
+import { recordOwnershipSignalByNonce } from './ownershipVerification.mjs';
 
 const EVENT_RAW_FIELD_DENYLIST = new Set([
   'packet_payload',
@@ -105,6 +106,13 @@ export function ingestEvent(ctx, body) {
   };
   store.events.push(record);
   store.ingestedEventIds[key] = record;
+
+  if (record.signal_type === 'ownership_observation' && record.nonce_hash) {
+    recordOwnershipSignalByNonce(
+      { tenantId },
+      { source: 'agent', nonce_hash: record.nonce_hash },
+    );
+  }
 
   if (body.evidence) {
     recordEvidence(ctx, {

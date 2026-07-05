@@ -3,7 +3,9 @@ import { describe, it } from 'node:test';
 import {
   parseNetworkEndpoint,
   probeAlertWebhookPing,
+  probeHttp2Settings,
   probeQuicReachability,
+  probeTlsSession,
   probeUdpDatagram,
   resolveAlertWebhookUrl,
 } from '../../src/lib/safeNetworkProbes.mjs';
@@ -126,5 +128,143 @@ describe('safe network probes', () => {
     assert.equal(outcome.external_result, 'connected');
     assert.equal(outcome.metadata.alert_delivery_ok, true);
     assert.equal(outcome.metadata.response_status, 204);
+  });
+
+  it('probeTlsSession reports connected after secureConnect', async () => {
+    const outcome = await probeTlsSession(
+      baseJob({
+        probe_profile: { kind: 'tls_session', max_requests: 1, timeout_ms: 1000 },
+        vector_family: 'tls',
+        target: { kind: 'fqdn', value: 'edge.example.test' },
+      }),
+      {
+        connectFn: () => {
+          const handlers = {};
+          const socket = {
+            once(event, fn) {
+              handlers[event] = fn;
+            },
+            getProtocol: () => 'TLSv1.3',
+            getCipher: () => ({ name: 'TLS_AES_128_GCM_SHA256' }),
+            authorized: true,
+            end() {},
+            destroy() {},
+          };
+          queueMicrotask(() => handlers.secureConnect?.());
+          return socket;
+        },
+      },
+    );
+    assert.equal(outcome.external_result, 'connected');
+    assert.equal(outcome.metadata.tls_protocol, 'TLSv1.3');
+    assert.equal(outcome.metadata.cipher, 'TLS_AES_128_GCM_SHA256');
+    assert.equal(outcome.metadata.authorized, true);
+    assert.equal(outcome.requests_sent, 1);
+  });
+
+  it('probeTlsSession reports blocked on connect refusal', async () => {
+    const outcome = await probeTlsSession(
+      baseJob({
+        probe_profile: { kind: 'tls_session', max_requests: 1, timeout_ms: 1000 },
+        target: { kind: 'fqdn', value: 'edge.example.test' },
+      }),
+      {
+        connectFn: () => {
+          const handlers = {};
+          const socket = {
+            once(event, fn) {
+              handlers[event] = fn;
+            },
+            end() {},
+            destroy() {},
+          };
+          queueMicrotask(() => {
+            handlers.error?.(Object.assign(new Error('refused'), { code: 'ECONNREFUSED' }));
+          });
+          return socket;
+        },
+      },
+    );
+    assert.equal(outcome.external_result, 'blocked');
+    assert.equal(outcome.metadata.error_class, 'ECONNREFUSED');
+  });
+
+  it('probeTlsSession reports timeout when secureConnect never fires', async () => {
+    const outcome = await probeTlsSession(
+      baseJob({
+        constraints: { timeout_ms: 50, max_requests: 1 },
+        probe_profile: { kind: 'tls_session', max_requests: 1, timeout_ms: 50 },
+        target: { kind: 'fqdn', value: 'edge.example.test' },
+      }),
+      {
+        connectFn: () => ({
+          once() {},
+          end() {},
+          destroy() {},
+        }),
+      },
+    );
+    assert.equal(outcome.external_result, 'timeout');
+    assert.equal(outcome.metadata.error_class, 'timeout');
+  });
+
+  it('probeHttp2Settings reports connected after remoteSettings', async () => {
+    const outcome = await probeHttp2Settings(
+      baseJob({
+        probe_profile: { kind: 'http2_settings', max_requests: 1, timeout_ms: 1000 },
+        vector_family: 'protocol',
+        target: { kind: 'fqdn', value: 'edge.example.test' },
+      }),
+      {
+        connectFn: () => {
+          const handlers = {};
+          const session = {
+            once(event, fn) {
+              handlers[event] = fn;
+            },
+            close() {},
+            destroy() {},
+          };
+          queueMicrotask(() => {
+            handlers.remoteSettings?.({
+              maxConcurrentStreams: 128,
+              enablePush: false,
+            });
+          });
+          return session;
+        },
+      },
+    );
+    assert.equal(outcome.external_result, 'connected');
+    assert.equal(outcome.metadata.max_concurrent_streams, 128);
+    assert.equal(outcome.metadata.enable_push, false);
+    assert.equal(outcome.requests_sent, 1);
+  });
+
+  it('probeHttp2Settings reports blocked on session error', async () => {
+    const outcome = await probeHttp2Settings(
+      baseJob({
+        probe_profile: { kind: 'http2_settings', max_requests: 1, timeout_ms: 1000 },
+        target: { kind: 'url', value: 'https://edge.example.test/' },
+      }),
+      {
+        connectFn: () => {
+          const handlers = {};
+          const session = {
+            once(event, fn) {
+              handlers[event] = fn;
+            },
+            close() {},
+            destroy() {},
+          };
+          queueMicrotask(() => {
+            handlers.error?.(Object.assign(new Error('unreachable'), { code: 'EHOSTUNREACH' }));
+          });
+          return session;
+        },
+      },
+    );
+    assert.equal(outcome.external_result, 'blocked');
+    assert.equal(outcome.metadata.error_class, 'EHOSTUNREACH');
   });
 });

@@ -7,7 +7,7 @@ import { newId } from '../lib/ids.mjs';
 import { enrichProbeMetadataWithWafCatalog } from '../lib/wafProductCatalog.mjs';
 import { getStore, persistStore } from '../store.mjs';
 import { enqueueAgentJob } from './agents.mjs';
-import { correlateVerdict, withinCorrelationWindow } from './correlation.mjs';
+import { correlateExternalOnlyVerdict, correlateVerdict, withinCorrelationWindow } from './correlation.mjs';
 import { upsertFindingFromVerdict } from './findings.mjs';
 import { executeOpsReadinessProbe, isOpsReadinessProbeKind } from '../lib/opsReadinessValidation.mjs';
 import { simulateProbeResult } from './probeStub.mjs';
@@ -755,6 +755,10 @@ function finalizeVerdictIfReady(run, agent, options = {}) {
   if (store.verdicts.some((v) => v.test_run_id === run.id)) return store.verdicts.find((v) => v.test_run_id === run.id);
   if (!hasExternalProbeEvidence(run)) return null;
   const target = store.targets.find((t) => t.id === run.target_id);
+  const group = store.targetGroups.find(
+    (g) => g.id === run.target_group_id && g.tenant_id === run.tenant_id,
+  );
+  const externalOnly = group?.validation_mode === 'external_only';
   const probeEvent = store.events.find(
     (e) =>
       e.test_run_id === run.id &&
@@ -774,22 +778,28 @@ function finalizeVerdictIfReady(run, agent, options = {}) {
     options.agentObserved !== undefined ? options.agentObserved : Boolean(matchingObs);
 
   if (
-    !options.finalizedWithoutObservation &&
-    !matchingObs &&
-    !isCollectionWindowExpired(run)
+    !externalOnly
+    && !options.finalizedWithoutObservation
+    && !matchingObs
+    && !isCollectionWindowExpired(run)
   ) {
     return null;
   }
 
-  const result = correlateVerdict({
-    externalResult: run.probe_external_result ?? probeEvent?.metadata?.external_result,
-    agentObserved,
-    expectedBehavior: target?.expected_behavior ?? 'must_block_before_origin',
-    agentOnline: agent?.status === 'online',
-    agentBound: Boolean(
-      agent && (agent.target_group_id === run.target_group_id || !agent.target_group_id),
-    ),
-  });
+  const externalResult = run.probe_external_result ?? probeEvent?.metadata?.external_result;
+  const expectedBehavior = target?.expected_behavior ?? 'must_block_before_origin';
+
+  const result = externalOnly
+    ? correlateExternalOnlyVerdict({ externalResult, expectedBehavior })
+    : correlateVerdict({
+      externalResult,
+      agentObserved,
+      expectedBehavior,
+      agentOnline: agent?.status === 'online',
+      agentBound: Boolean(
+        agent && (agent.target_group_id === run.target_group_id || !agent.target_group_id),
+      ),
+    });
 
   const evidenceIds = store.events
     .filter((e) => e.test_run_id === run.id)
@@ -816,6 +826,10 @@ function finalizeVerdictIfReady(run, agent, options = {}) {
     severity: result.severity,
     created_at: new Date().toISOString(),
   };
+  if (externalOnly) {
+    verdict.placement = result.placement ?? 'unverified';
+    verdict.strengthen_hint = result.strengthen_hint;
+  }
   store.verdicts.push(verdict);
   run.status = 'verdicted';
   run.completed_at = new Date().toISOString();

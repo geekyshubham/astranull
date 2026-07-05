@@ -2,6 +2,7 @@ import { audit } from '../audit.mjs';
 import { generateNonce, hashNonce } from '../lib/crypto.mjs';
 import { newId } from '../lib/ids.mjs';
 import { getStore, persistStore } from '../store.mjs';
+import { createOwnershipChallengeJob } from './probeCoordinator.mjs';
 import { isArchivedTargetGroup } from './targetGroups.mjs';
 
 const OPEN_STATUSES = new Set(['challenge_sent', 'verified']);
@@ -26,18 +27,58 @@ function findVerification(ctx, id) {
   ) ?? null;
 }
 
+function findOpenVerificationByNonce(tenantId, nonce_hash) {
+  return getStore().ownershipVerifications.find(
+    (v) =>
+      v.tenant_id === tenantId
+      && v.challenge_nonce_hash === nonce_hash
+      && OPEN_STATUSES.has(v.status),
+  ) ?? null;
+}
+
 function auditVerification(ctx, id, action) {
   audit({
     tenant_id: ctx.tenantId,
-    actor_user_id: ctx.userId,
-    actor_role: ctx.role,
+    actor_user_id: ctx.userId ?? null,
+    actor_role: ctx.role ?? 'system',
     action,
     resource_type: 'ownership_verification',
     resource_id: id,
   });
 }
 
-export function createOwnershipChallenge(ctx, body) {
+function applyOwnershipSignal(ctx, record, { source, nonce_hash }) {
+  if (!OPEN_STATUSES.has(record.status)) {
+    return { error: 'ownership_verification_not_open', status: 409 };
+  }
+  if (nonce_hash !== record.challenge_nonce_hash) {
+    return { error: 'nonce_mismatch', status: 400 };
+  }
+
+  if (source === 'probe') {
+    record.probe_observed = true;
+  } else if (source === 'agent') {
+    record.agent_observed = true;
+  } else {
+    return { error: 'invalid_source', status: 400 };
+  }
+
+  if (record.probe_observed && record.agent_observed && record.status === 'challenge_sent') {
+    const now = new Date().toISOString();
+    record.status = 'verified';
+    record.verified_at = now;
+    const group = findTargetGroup(ctx, record.target_group_id);
+    if (group) {
+      group.ownership_status = 'agent_verified';
+    }
+    auditVerification(ctx, record.id, 'ownership_verification.agent_verified');
+  }
+
+  persistStore();
+  return { verification: record };
+}
+
+function validateOwnershipChallengeInputs(ctx, body) {
   const targetGroupId = body.target_group_id;
   const agentId = body.agent_id;
 
@@ -69,6 +110,53 @@ export function createOwnershipChallenge(ctx, body) {
     return { error: 'declared_fqdn_not_in_target_group', status: 400 };
   }
 
+  return { group, agent, targetGroupId, agentId, declaredFqdn };
+}
+
+export function verifyOwnershipSetup(ctx, body, _runtimeConfig) {
+  const validated = validateOwnershipChallengeInputs(ctx, body);
+  if (validated.error) {
+    return {
+      dry_run: true,
+      ready: false,
+      error: validated.error,
+      status: validated.status,
+    };
+  }
+
+  const { targetGroupId, agentId, declaredFqdn } = validated;
+  audit({
+    tenant_id: ctx.tenantId,
+    actor_user_id: ctx.userId ?? null,
+    actor_role: ctx.role ?? 'system',
+    action: 'ownership_verification.setup_verified',
+    resource_type: 'ownership_verification',
+    resource_id: targetGroupId,
+  });
+
+  return {
+    dry_run: true,
+    ready: true,
+    target_group_id: targetGroupId,
+    agent_id: agentId,
+    declared_fqdn: declaredFqdn,
+    checks: {
+      agent_online: true,
+      agent_bound: true,
+      token_valid: true,
+      fqdn_declared: true,
+    },
+  };
+}
+
+export function createOwnershipChallenge(ctx, body, runtimeConfig) {
+  const validated = validateOwnershipChallengeInputs(ctx, body);
+  if (validated.error) {
+    return { error: validated.error, status: validated.status };
+  }
+
+  const { group, targetGroupId, agentId, declaredFqdn } = validated;
+
   const nonce = generateNonce();
   const challenge_nonce_hash = hashNonce(nonce);
   const id = newId('own');
@@ -91,6 +179,14 @@ export function createOwnershipChallenge(ctx, body) {
   };
   getStore().ownershipVerifications.push(record);
   auditVerification(ctx, id, 'ownership_verification.challenge_created');
+
+  if (runtimeConfig?.probeMode === 'signed-worker' && runtimeConfig.probeWorkerSecret) {
+    const job = createOwnershipChallengeJob(ctx, { verification: record }, runtimeConfig);
+    if (job) {
+      record.probe_job_id = job.id;
+    }
+  }
+
   persistStore();
   return { verification: record, nonce };
 }
@@ -98,35 +194,13 @@ export function createOwnershipChallenge(ctx, body) {
 export function recordOwnershipSignal(ctx, id, { source, nonce_hash }) {
   const record = findVerification(ctx, id);
   if (!record) return { error: 'ownership_verification_not_found', status: 404 };
+  return applyOwnershipSignal(ctx, record, { source, nonce_hash });
+}
 
-  if (!OPEN_STATUSES.has(record.status)) {
-    return { error: 'ownership_verification_not_open', status: 409 };
-  }
-  if (nonce_hash !== record.challenge_nonce_hash) {
-    return { error: 'nonce_mismatch', status: 400 };
-  }
-
-  if (source === 'probe') {
-    record.probe_observed = true;
-  } else if (source === 'agent') {
-    record.agent_observed = true;
-  } else {
-    return { error: 'invalid_source', status: 400 };
-  }
-
-  if (record.probe_observed && record.agent_observed && record.status === 'challenge_sent') {
-    const now = new Date().toISOString();
-    record.status = 'verified';
-    record.verified_at = now;
-    const group = findTargetGroup(ctx, record.target_group_id);
-    if (group) {
-      group.ownership_status = 'agent_verified';
-    }
-    auditVerification(ctx, id, 'ownership_verification.agent_verified');
-  }
-
-  persistStore();
-  return { verification: record };
+export function recordOwnershipSignalByNonce({ tenantId }, { source, nonce_hash }) {
+  const record = findOpenVerificationByNonce(tenantId, nonce_hash);
+  if (!record) return { error: 'ownership_verification_not_found', status: 404 };
+  return applyOwnershipSignal({ tenantId }, record, { source, nonce_hash });
 }
 
 export function confirmOwnership(ctx, id) {

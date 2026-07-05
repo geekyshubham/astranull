@@ -90,6 +90,46 @@ export function correlateVerdict({
   };
 }
 
+export function correlateExternalOnlyVerdict({ externalResult, expectedBehavior }) {
+  const blocked = externalResult === 'blocked' || externalResult === 'timeout';
+  const connected = externalResult === 'connected' || externalResult === 'allowed';
+
+  if (expectedBehavior === 'must_block_before_origin') {
+    if (blocked) {
+      return {
+        verdict: 'edge_protected',
+        confidence: 'external_only',
+        placement: 'unverified',
+        explanation:
+          'External-only probe was blocked at the edge; origin reachability not proven without an agent.',
+        createsFinding: false,
+        strengthen_hint: 'deploy_agent',
+      };
+    }
+    if (connected) {
+      return {
+        verdict: 'edge_exposed',
+        confidence: 'external_only',
+        placement: 'unverified',
+        explanation:
+          'External-only probe reached the declared path; deploy an agent to confirm whether traffic reached origin.',
+        createsFinding: true,
+        severity: 'medium',
+        strengthen_hint: 'deploy_agent',
+      };
+    }
+  }
+
+  return {
+    verdict: 'inconclusive',
+    confidence: 'external_only',
+    placement: 'unverified',
+    explanation: 'Insufficient external-only evidence.',
+    createsFinding: false,
+    strengthen_hint: 'deploy_agent',
+  };
+}
+
 export function withinCorrelationWindow(probeTs, obsTs, windowMs = 120_000) {
   const a = new Date(probeTs).getTime();
   const b = new Date(obsTs).getTime();

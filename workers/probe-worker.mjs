@@ -11,7 +11,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   probeAlertWebhookPing,
+  probeHttp2Settings,
   probeQuicReachability,
+  probeTlsSession,
   probeUdpDatagram,
 } from '../src/lib/safeNetworkProbes.mjs';
 import { enrichProbeMetadataWithWafCatalog } from '../src/lib/wafProductCatalog.mjs';
@@ -666,6 +668,13 @@ export async function executeProbeForJob(job) {
   if (profileKind === 'alert_webhook_ping') {
     return probeAlertWebhookPing(job);
   }
+  if (profileKind === 'ownership_challenge') {
+    const res = await probeHttpHead(job);
+    res.metadata = { ...res.metadata, probe_kind: 'ownership_challenge' };
+    return res;
+  }
+  if (profileKind === 'tls_session') return probeTlsSession(job);
+  if (profileKind === 'http2_settings') return probeHttp2Settings(job);
   const vectorFamily = job.vector_family;
   if (DNS_VECTOR_FAMILIES.has(vectorFamily)) return probeDns(job);
   if (TCP_VECTOR_FAMILIES.has(vectorFamily)) return probeTcpConnect(job);

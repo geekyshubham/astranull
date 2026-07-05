@@ -33,6 +33,7 @@ export const TENANT_SCOPED_TABLES = Object.freeze([
   'agents',
   'test_runs',
   'probe_jobs',
+  'ownership_verifications',
   'agent_jobs',
   'events',
   'verdicts',

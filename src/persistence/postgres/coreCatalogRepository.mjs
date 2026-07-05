@@ -63,6 +63,9 @@ function mapTargetGroupRow(row) {
     safety_policy: normalizeSafetyPolicy(row.safety_policy),
     created_at: toIso(row.created_at),
     ...(row.archived_at ? { archived_at: toIso(row.archived_at) } : {}),
+    validation_mode: row.validation_mode ?? 'agent_assisted',
+    ownership_status: row.ownership_status ?? 'unverified',
+    dns_ownership: row.dns_ownership ?? null,
   };
 }
 
@@ -279,7 +282,8 @@ export function createCoreCatalogRepository(pool) {
       return withTenantContext(pool, ctx.tenantId, async (client) => {
         const { rows } = await client.query(
           `SELECT id, tenant_id, environment_id, name, description, expected_behavior_default,
-                  timezone, safe_test_windows, safety_policy, archived_at, created_at
+                  timezone, safe_test_windows, safety_policy, archived_at, validation_mode,
+                  ownership_status, dns_ownership, created_at
            FROM target_groups
            WHERE tenant_id = $1 AND archived_at IS NULL
            ORDER BY created_at`,
@@ -293,7 +297,8 @@ export function createCoreCatalogRepository(pool) {
       return withTenantContext(pool, ctx.tenantId, async (client) => {
         const { rows } = await client.query(
           `SELECT id, tenant_id, environment_id, name, description, expected_behavior_default,
-                  timezone, safe_test_windows, safety_policy, archived_at, created_at
+                  timezone, safe_test_windows, safety_policy, archived_at, validation_mode,
+                  ownership_status, dns_ownership, created_at
            FROM target_groups
            WHERE id = $1 AND tenant_id = $2 AND archived_at IS NULL`,
           [id, ctx.tenantId],
@@ -329,11 +334,13 @@ export function createCoreCatalogRepository(pool) {
         const { rows } = await client.query(
           `INSERT INTO target_groups (
              id, tenant_id, environment_id, name, description, expected_behavior_default,
-             timezone, safe_test_windows, safety_policy, created_at
+             timezone, safe_test_windows, safety_policy, validation_mode, ownership_status,
+             dns_ownership, created_at
            )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10::timestamptz)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12::jsonb, $13::timestamptz)
            RETURNING id, tenant_id, environment_id, name, description, expected_behavior_default,
-                     timezone, safe_test_windows, safety_policy, created_at`,
+                     timezone, safe_test_windows, safety_policy, validation_mode, ownership_status,
+                     dns_ownership, created_at`,
           [
             id,
             ctx.tenantId,
@@ -344,6 +351,9 @@ export function createCoreCatalogRepository(pool) {
             record.timezone,
             JSON.stringify(record.safe_test_windows),
             JSON.stringify(record.safety_policy),
+            body.validation_mode ?? 'agent_assisted',
+            body.ownership_status ?? 'unverified',
+            body.dns_ownership == null ? null : JSON.stringify(body.dns_ownership),
             now,
           ],
         );
@@ -392,7 +402,8 @@ export function createCoreCatalogRepository(pool) {
       return withTenantContext(pool, ctx.tenantId, async (client) => {
         const existing = await client.query(
           `SELECT id, tenant_id, environment_id, name, description, expected_behavior_default,
-                  timezone, safe_test_windows, safety_policy, archived_at, created_at
+                  timezone, safe_test_windows, safety_policy, archived_at, validation_mode,
+                  ownership_status, dns_ownership, created_at
            FROM target_groups
            WHERE id = $1 AND tenant_id = $2 AND archived_at IS NULL`,
           [id, ctx.tenantId],
@@ -446,7 +457,8 @@ export function createCoreCatalogRepository(pool) {
            SET ${sets.join(', ')}
            WHERE id = $${idParam} AND tenant_id = $${tenantParam} AND archived_at IS NULL
            RETURNING id, tenant_id, environment_id, name, description, expected_behavior_default,
-                     timezone, safe_test_windows, safety_policy, archived_at, created_at`,
+                     timezone, safe_test_windows, safety_policy, archived_at, validation_mode,
+                     ownership_status, dns_ownership, created_at`,
           params,
         );
         return mapTargetGroupRow(rows[0] ?? null);

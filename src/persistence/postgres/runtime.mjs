@@ -18,6 +18,11 @@ import { createNotificationRepository } from './notificationRepository.mjs';
 import { createAgentUpdateRepository } from './agentUpdateRepository.mjs';
 import { createProbeJobRepository } from './probeJobRepository.mjs';
 import { createKillSwitchRepository } from './killSwitchRepository.mjs';
+import { createOwnershipVerificationRepository } from './ownershipVerificationRepository.mjs';
+import {
+  createPostgresDnsOwnershipServices,
+  createPostgresOwnershipVerificationServices,
+} from './ownershipVerificationServiceAdapters.mjs';
 import { createHighScaleRepository } from './highScaleRepository.mjs';
 import { createProductionReleaseEvidenceRepository } from './productionReleaseEvidenceRepository.mjs';
 import { createRetentionRepository } from './retentionRepository.mjs';
@@ -68,6 +73,7 @@ export const POSTGRES_RUNTIME_REPOSITORY_KEYS = Object.freeze([
   'agentUpdates',
   'probeJobs',
   'killSwitch',
+  'ownershipVerifications',
   'highScale',
   'productionReleaseEvidence',
   'retention',
@@ -95,6 +101,7 @@ const DEFAULT_REPOSITORY_FACTORIES = {
   agentUpdates: createAgentUpdateRepository,
   probeJobs: createProbeJobRepository,
   killSwitch: createKillSwitchRepository,
+  ownershipVerifications: createOwnershipVerificationRepository,
   highScale: createHighScaleRepository,
   productionReleaseEvidence: createProductionReleaseEvidenceRepository,
   retention: createRetentionRepository,
@@ -215,6 +222,16 @@ export async function createPostgresRuntime(env = process.env, options = {}) {
     const wafDriftServices = createPostgresWafDriftServices(repositories);
     const wafCoverageRollupServices = createPostgresWafCoverageRollupServices(repositories);
     const internalManagementServices = createPostgresInternalManagementServices(repositories);
+    const ownershipVerification = createPostgresOwnershipVerificationServices({
+      repositories,
+      agentControl: repositories.agentControl,
+      probeJobs: repositories.probeJobs,
+      audit: repositories.audit,
+    });
+    const dnsOwnership = createPostgresDnsOwnershipServices({
+      repositories,
+      audit: repositories.audit,
+    });
     const services = {
       ...catalogServices,
       ...authServices,
@@ -240,6 +257,8 @@ export async function createPostgresRuntime(env = process.env, options = {}) {
       actionItems: actionItemServices,
       internalManagement: internalManagementServices,
       signupIntake: internalManagementServices,
+      ownershipVerification,
+      dnsOwnership,
       audit: repositories.audit,
     };
 

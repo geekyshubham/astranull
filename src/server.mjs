@@ -30,6 +30,7 @@ import * as highScale from './services/highScale.mjs';
 import * as reports from './services/reports.mjs';
 import * as targetGroups from './services/targetGroups.mjs';
 import * as ownershipVerification from './services/ownershipVerification.mjs';
+import * as dnsOwnership from './services/dnsOwnership.mjs';
 import * as testPolicies from './services/testPolicies.mjs';
 import * as testRuns from './services/testRuns.mjs';
 import * as tokens from './services/tokens.mjs';
@@ -83,6 +84,7 @@ function defaultServiceDeps() {
     tenants,
     targetGroups,
     ownershipVerification,
+    dnsOwnership,
     testPolicies,
     subscriptions,
     tokens,
@@ -1694,19 +1696,66 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
     return json(res, 200, result);
   }
 
+  const dnsOwnershipVerifyMatch = path.match(/^\/v1\/target-groups\/([^/]+)\/dns-ownership\/verify$/);
+  const dnsOwnershipIssueMatch = path.match(/^\/v1\/target-groups\/([^/]+)\/dns-ownership$/);
+  if (dnsOwnershipVerifyMatch || dnsOwnershipIssueMatch) {
+    if (!serviceDeps.dnsOwnership) {
+      return respondPostgresRouteNotWired(res);
+    }
+    if (dnsOwnershipVerifyMatch && method === 'POST') {
+      const gate = requirePermission(ctx, 'target_group:write');
+      if (!gate.ok) return json(res, gate.status, gate.body);
+      const result = await serviceDeps.dnsOwnership.verifyDnsOwnership(ctx, {
+        target_group_id: dnsOwnershipVerifyMatch[1],
+      });
+      if (result.error) return json(res, result.status ?? 400, result);
+      return json(res, 200, result);
+    }
+    if (dnsOwnershipIssueMatch && method === 'POST') {
+      const gate = requirePermission(ctx, 'target_group:write');
+      if (!gate.ok) return json(res, gate.status, gate.body);
+      const result = await serviceDeps.dnsOwnership.issueDnsOwnershipChallenge(ctx, {
+        target_group_id: dnsOwnershipIssueMatch[1],
+      });
+      if (result.error) return json(res, result.status ?? 400, result);
+      return json(res, 201, result);
+    }
+  }
+
   const ownershipConfirmMatch = path.match(/^\/v1\/ownership-verifications\/([^/]+)\/confirm$/);
   const ownershipIdMatch = path.match(/^\/v1\/ownership-verifications\/([^/]+)$/);
   const isOwnershipPath =
-    path === '/v1/ownership-verifications' || ownershipConfirmMatch || ownershipIdMatch;
+    path === '/v1/ownership-verifications'
+    || path === '/v1/ownership-verifications/verify-setup'
+    || ownershipConfirmMatch
+    || ownershipIdMatch;
   if (isOwnershipPath) {
     if (!serviceDeps.ownershipVerification) {
       return respondPostgresRouteNotWired(res);
+    }
+    if (path === '/v1/ownership-verifications/verify-setup' && method === 'POST') {
+      const gate = requirePermission(ctx, 'target_group:read');
+      if (!gate.ok) return json(res, gate.status, gate.body);
+      const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+      const result = await serviceDeps.ownershipVerification.verifyOwnershipSetup(
+        ctx,
+        body,
+        runtimeConfig,
+      );
+      if (result.ready === false && result.error) {
+        return json(res, result.status ?? 400, result);
+      }
+      return json(res, 200, result);
     }
     if (path === '/v1/ownership-verifications' && method === 'POST') {
       const gate = requirePermission(ctx, 'target_group:write');
       if (!gate.ok) return json(res, gate.status, gate.body);
       const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
-      const result = await serviceDeps.ownershipVerification.createOwnershipChallenge(ctx, body);
+      const result = await serviceDeps.ownershipVerification.createOwnershipChallenge(
+        ctx,
+        body,
+        runtimeConfig,
+      );
       if (result.error) return json(res, result.status ?? 400, result);
       return json(res, 201, result);
     }
@@ -1727,7 +1776,7 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
       if (result.error) return json(res, result.status ?? 400, result);
       return json(res, 200, result);
     }
-    if (ownershipIdMatch && method === 'GET') {
+    if (ownershipIdMatch && method === 'GET' && ownershipIdMatch[1] !== 'verify-setup') {
       const gate = requirePermission(ctx, 'target_group:read');
       if (!gate.ok) return json(res, gate.status, gate.body);
       const record = await serviceDeps.ownershipVerification.getOwnershipVerification(

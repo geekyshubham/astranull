@@ -9,6 +9,9 @@ export const ALLOWED_PROBE_PROFILE_KINDS = Object.freeze([
   'quic_reachability',
   'alert_webhook_ping',
   'ops_readiness',
+  'ownership_challenge',
+  'tls_session',
+  'http2_settings',
 ]);
 
 const ALLOWED_OPS_READINESS_SCENARIOS = new Set(['runbook_contacts', 'kill_switch_readiness']);
@@ -695,7 +698,7 @@ export const CHECK_CATALOG = [
     evidence_required: ['probe_result', 'health_signal'],
     stop_conditions: ['max_events_reached', 'max_duration_elapsed', 'customer_cancel', 'tenant_kill_switch'],
     verdict_logic: 'Metadata marker documents declared failover nameservers; correlate with probe DNS health for declared zone.',
-    probe_profile: { kind: 'metadata_marker', max_requests: 1, timeout_ms: 5000, marker: 'astranull-safe-marker' },
+    probe_profile: { kind: 'dns_resolve', max_requests: 2, timeout_ms: 5000 },
     safety_constraints: { max_events: 3, max_duration_seconds: 60, max_concurrent_runs_per_target_group: 1 },
     default_expected_behavior: 'must_block_before_origin',
     probe_simulation_profile: 'external_blocked',
@@ -865,7 +868,7 @@ export const CHECK_CATALOG = [
     evidence_required: ['probe_result', 'health_signal'],
     stop_conditions: ['max_events_reached', 'max_duration_elapsed', 'customer_cancel', 'tenant_kill_switch'],
     verdict_logic: 'Metadata marker documents idle timeout intent; correlate with single connect/HEAD lifecycle.',
-    probe_profile: { kind: 'metadata_marker', max_requests: 1, timeout_ms: 5000, marker: 'astranull-safe-marker' },
+    probe_profile: { kind: 'tls_session', max_requests: 1, timeout_ms: 5000 },
     safety_constraints: { max_events: 3, max_duration_seconds: 90, max_concurrent_runs_per_target_group: 1 },
     default_expected_behavior: 'must_block_before_origin',
     probe_simulation_profile: 'external_blocked',
@@ -899,7 +902,7 @@ export const CHECK_CATALOG = [
     evidence_required: ['probe_result'],
     stop_conditions: ['max_events_reached', 'max_duration_elapsed', 'customer_cancel', 'tenant_kill_switch'],
     verdict_logic: 'Metadata marker plus single HEAD documents advertised stream/concurrency controls.',
-    probe_profile: { kind: 'metadata_marker', max_requests: 1, timeout_ms: 5000, marker: 'astranull-safe-marker' },
+    probe_profile: { kind: 'http2_settings', max_requests: 1, timeout_ms: 5000 },
     safety_constraints: { max_events: 3, max_duration_seconds: 90, max_concurrent_runs_per_target_group: 1 },
     default_expected_behavior: 'must_block_before_origin',
     probe_simulation_profile: 'external_blocked',

@@ -1317,19 +1317,60 @@ function coerceProbeListenPort(value) {
   return port;
 }
 
+const CLOUD_METADATA_TIMEOUT_MS = 1000;
+
+function isTruthyCloudMetadataFlag(value) {
+  if (value === undefined || value === null || value === '') {
+    return false;
+  }
+  const normalized = String(value).trim().toLowerCase();
+  return normalized === '1' || normalized === 'true';
+}
+
+async function fetchCloudMetadataPublicIp(env, fetchFn) {
+  const provider = String(env.ASTRANULL_CLOUD_METADATA_PROVIDER ?? 'aws').trim().toLowerCase();
+  let url;
+  /** @type {Record<string, string>} */
+  const headers = {};
+  if (provider === 'gcp') {
+    url = 'http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip';
+    headers['Metadata-Flavor'] = 'Google';
+  } else {
+    url = 'http://169.254.169.254/latest/meta-data/public-ipv4';
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), CLOUD_METADATA_TIMEOUT_MS);
+  try {
+    const response = await fetchFn(url, { headers, signal: controller.signal });
+    if (!response.ok) {
+      return null;
+    }
+    const text = await response.text();
+    const ip = trimProbeEndpointString(text);
+    return ip || null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
- * Build probe_endpoint heartbeat claim from operator-supplied env/CLI (no cloud metadata).
+ * Build probe_endpoint heartbeat claim from operator-supplied env/CLI with optional cloud metadata.
  * @param {{ env?: Record<string, string|undefined>, args?: Record<string, unknown> }} [source]
- * @returns {Record<string, unknown>|null}
+ * @param {{ fetchFn?: typeof fetch }} [deps]
+ * @returns {Promise<Record<string, unknown>|null>}
  */
-export function buildProbeEndpoint(source = {}) {
+export async function buildProbeEndpoint(source = {}, deps = {}) {
   const env = source.env ?? process.env;
   const agentArgs = source.args ?? {};
+  const fetchFn = deps.fetchFn ?? fetch;
 
   const declaredFqdn = trimProbeEndpointString(
     agentArgs.publicFqdn ?? env.ASTRANULL_PUBLIC_FQDN,
   );
-  const declaredIp = trimProbeEndpointString(
+  let declaredIp = trimProbeEndpointString(
     agentArgs.publicIp ?? env.ASTRANULL_PUBLIC_IP,
   );
   const listenPort = coerceProbeListenPort(
@@ -1338,6 +1379,15 @@ export function buildProbeEndpoint(source = {}) {
   const pathPrefix = trimProbeEndpointString(
     agentArgs.canaryPathPrefix ?? env.ASTRANULL_CANARY_PATH_PREFIX,
   );
+
+  let discoveredVia = 'operator_env';
+  if (!declaredIp && isTruthyCloudMetadataFlag(env.ASTRANULL_CLOUD_METADATA)) {
+    const metadataIp = await fetchCloudMetadataPublicIp(env, fetchFn);
+    if (metadataIp) {
+      declaredIp = metadataIp;
+      discoveredVia = 'cloud_metadata';
+    }
+  }
 
   if (!declaredFqdn && !declaredIp) {
     return null;
@@ -1356,7 +1406,7 @@ export function buildProbeEndpoint(source = {}) {
   if (pathPrefix) {
     out.path_prefix = pathPrefix;
   }
-  out.discovered_via = 'operator_env';
+  out.discovered_via = discoveredVia;
   return out;
 }
 
@@ -2059,7 +2109,7 @@ async function register(token, tokenFile) {
 
 async function heartbeat(agentId) {
   const body = { version: AGENT_VERSION };
-  const probeEndpoint = buildProbeEndpoint({ args });
+  const probeEndpoint = await buildProbeEndpoint({ args });
   if (probeEndpoint) {
     body.probe_endpoint = probeEndpoint;
   }

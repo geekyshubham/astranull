@@ -60,6 +60,8 @@ export function createTargetGroup(ctx, body) {
     safe_test_windows: Array.isArray(body.safe_test_windows) ? body.safe_test_windows : [],
     safety_policy: normalizeSafetyPolicy(body.safety_policy),
     ownership_status: 'unverified',
+    validation_mode:
+      body.validation_mode === 'external_only' ? 'external_only' : 'agent_assisted',
     created_at: new Date().toISOString(),
   };
   getStore().targetGroups.push(record);
@@ -119,6 +121,10 @@ export function patchTargetGroup(ctx, id, body = {}) {
   if (body.timezone !== undefined) group.timezone = String(body.timezone).trim() || 'UTC';
   if (Array.isArray(body.safe_test_windows)) group.safe_test_windows = body.safe_test_windows;
   if (body.safety_policy !== undefined) group.safety_policy = normalizeSafetyPolicy(body.safety_policy);
+  if (body.validation_mode !== undefined) {
+    group.validation_mode =
+      body.validation_mode === 'external_only' ? 'external_only' : 'agent_assisted';
+  }
 
   audit({
     tenant_id: ctx.tenantId,

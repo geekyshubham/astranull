@@ -4,6 +4,8 @@
 
 import dgram from 'node:dgram';
 import dns from 'node:dns/promises';
+import http2 from 'node:http2';
+import tls from 'node:tls';
 
 const SAFE_UDP_PAYLOAD_PREFIX = 'ASTRANULL:udp:';
 const SAFE_ALERT_PAYLOAD_TYPE = 'astranull_alert_workflow_ping';
@@ -186,6 +188,228 @@ function resolveHttpUrl(job) {
   if (/^https?:\/\//i.test(value)) return value;
   if (job.target?.kind === 'url') return value;
   return `https://${value.replace(/^\/+/, '')}/`;
+}
+
+const TLS_BLOCKED_CODES = new Set(['ECONNREFUSED', 'EHOSTUNREACH', 'ENOTFOUND', 'ENETUNREACH']);
+
+function classifyNetworkProbeError(err, durationMs, job, probeKind) {
+  const code = err?.code ?? '';
+  if (code === 'ETIMEOUT') {
+    return {
+      external_result: 'timeout',
+      metadata: withProfileKind(job, {
+        probe_kind: probeKind,
+        error_class: 'timeout',
+        duration_ms: durationMs,
+      }),
+      requests_sent: 1,
+      duration_ms: durationMs,
+    };
+  }
+  if (TLS_BLOCKED_CODES.has(code)) {
+    return {
+      external_result: 'blocked',
+      metadata: withProfileKind(job, {
+        probe_kind: probeKind,
+        error_class: code,
+        duration_ms: durationMs,
+      }),
+      requests_sent: 1,
+      duration_ms: durationMs,
+    };
+  }
+  return {
+    external_result: 'error',
+    metadata: withProfileKind(job, {
+      probe_kind: probeKind,
+      error_class: code || 'probe_failed',
+      duration_ms: durationMs,
+    }),
+    requests_sent: 1,
+    duration_ms: durationMs,
+  };
+}
+
+/**
+ * @param {typeof tls.connect} connectFn
+ * @param {{ host: string, port: number }} endpoint
+ * @param {number} timeoutMs
+ */
+function openTlsSession(connectFn, endpoint, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const socket = connectFn({
+      host: endpoint.host,
+      port: endpoint.port,
+      servername: endpoint.host,
+      rejectUnauthorized: false,
+    });
+
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      reject(Object.assign(new Error('timeout'), { code: 'ETIMEOUT' }));
+    }, timeoutMs);
+
+    const settle = (err, result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (err) {
+        socket.destroy();
+        reject(err);
+        return;
+      }
+      socket.end();
+      resolve(result);
+    };
+
+    socket.once('secureConnect', () => {
+      settle(null, {
+        tls_protocol: socket.getProtocol(),
+        cipher: socket.getCipher()?.name ?? null,
+        authorized: socket.authorized,
+      });
+    });
+    socket.once('error', (err) => settle(err));
+  });
+}
+
+/**
+ * @param {typeof http2.connect} connectFn
+ * @param {string} url
+ * @param {number} timeoutMs
+ */
+function readHttp2RemoteSettings(connectFn, url, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const session = connectFn(url);
+
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      session.close();
+      session.destroy();
+      reject(Object.assign(new Error('timeout'), { code: 'ETIMEOUT' }));
+    }, timeoutMs);
+
+    const settle = (err, settings) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      session.close();
+      if (err) {
+        session.destroy();
+        reject(err);
+        return;
+      }
+      resolve(settings);
+    };
+
+    const captureSettings = (settings) => {
+      settle(null, {
+        max_concurrent_streams: settings.maxConcurrentStreams ?? null,
+        enable_push: settings.enablePush ?? null,
+      });
+    };
+
+    session.once('remoteSettings', captureSettings);
+    session.once('connect', () => {
+      if (settled) return;
+      const remote = session.remoteSettings;
+      if (remote && Object.keys(remote).length > 0) {
+        captureSettings(remote);
+      }
+    });
+    session.once('error', (err) => settle(err));
+  });
+}
+
+/**
+ * @param {Record<string, unknown>} job
+ * @param {{ connectFn?: typeof tls.connect }} deps
+ */
+export async function probeTlsSession(job, deps = {}) {
+  const connectFn = deps.connectFn ?? tls.connect;
+  const host = resolveHostForJob(job);
+  if (!host) {
+    return {
+      external_result: 'error',
+      metadata: withProfileKind(job, {
+        probe_kind: 'tls_session',
+        error_class: 'unsupported_target',
+      }),
+      requests_sent: 0,
+      duration_ms: 0,
+    };
+  }
+
+  const port = parseNetworkEndpoint(job)?.port ?? 443;
+  const timeoutMs = job.constraints?.timeout_ms ?? 5000;
+  const started = Date.now();
+
+  try {
+    const sessionInfo = await openTlsSession(connectFn, { host, port }, timeoutMs);
+    const durationMs = Date.now() - started;
+    return {
+      external_result: 'connected',
+      metadata: withProfileKind(job, {
+        probe_kind: 'tls_session',
+        tls_protocol: sessionInfo.tls_protocol,
+        cipher: sessionInfo.cipher,
+        authorized: sessionInfo.authorized,
+        duration_ms: durationMs,
+      }),
+      requests_sent: 1,
+      duration_ms: durationMs,
+    };
+  } catch (err) {
+    const durationMs = Date.now() - started;
+    return classifyNetworkProbeError(err, durationMs, job, 'tls_session');
+  }
+}
+
+/**
+ * @param {Record<string, unknown>} job
+ * @param {{ connectFn?: typeof http2.connect }} deps
+ */
+export async function probeHttp2Settings(job, deps = {}) {
+  const connectFn = deps.connectFn ?? http2.connect;
+  const httpUrl = resolveHttpUrl(job);
+  if (!httpUrl) {
+    return {
+      external_result: 'error',
+      metadata: withProfileKind(job, {
+        probe_kind: 'http2_settings',
+        error_class: 'unsupported_target',
+      }),
+      requests_sent: 0,
+      duration_ms: 0,
+    };
+  }
+
+  const timeoutMs = job.constraints?.timeout_ms ?? 5000;
+  const started = Date.now();
+
+  try {
+    const settings = await readHttp2RemoteSettings(connectFn, httpUrl, timeoutMs);
+    const durationMs = Date.now() - started;
+    return {
+      external_result: 'connected',
+      metadata: withProfileKind(job, {
+        probe_kind: 'http2_settings',
+        max_concurrent_streams: settings.max_concurrent_streams,
+        enable_push: settings.enable_push,
+        duration_ms: durationMs,
+      }),
+      requests_sent: 1,
+      duration_ms: durationMs,
+    };
+  } catch (err) {
+    const durationMs = Date.now() - started;
+    return classifyNetworkProbeError(err, durationMs, job, 'http2_settings');
+  }
 }
 
 /**

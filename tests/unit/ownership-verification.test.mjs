@@ -5,7 +5,10 @@ import {
   confirmOwnership,
   createOwnershipChallenge,
   recordOwnershipSignal,
+  recordOwnershipSignalByNonce,
+  verifyOwnershipSetup,
 } from '../../src/services/ownershipVerification.mjs';
+import { ingestEvent } from '../../src/services/events.mjs';
 import { freshStore } from '../helpers/reset.mjs';
 import { getStore } from '../../src/store.mjs';
 
@@ -158,6 +161,41 @@ describe('ownership verification', () => {
     assert.equal(group.ownership_status, 'user_confirmed');
   });
 
+  it('ingestEvent ownership_observation verifies after probe signal via nonce correlation', () => {
+    freshStore();
+    seedOnlineAgent();
+
+    const created = createOwnershipChallenge(ctx, {
+      target_group_id: 'tg_1',
+      agent_id: 'agent_1',
+    });
+    const nonceHash = created.verification.challenge_nonce_hash;
+
+    const probe = recordOwnershipSignalByNonce(
+      { tenantId: ctx.tenantId },
+      { source: 'probe', nonce_hash: nonceHash },
+    );
+    assert.equal(probe.verification.probe_observed, true);
+    assert.equal(probe.verification.status, 'challenge_sent');
+
+    const ingested = ingestEvent(ctx, {
+      event_id: 'e-own-1',
+      signal_type: 'ownership_observation',
+      nonce_hash: nonceHash,
+    });
+    assert.equal(ingested.error, undefined);
+
+    const verification = getStore().ownershipVerifications.find(
+      (v) => v.id === created.verification.id,
+    );
+    assert.equal(verification.status, 'verified');
+    assert.ok(verification.verified_at);
+    assert.equal(verification.agent_observed, true);
+
+    const group = getStore().targetGroups.find((g) => g.id === 'tg_1');
+    assert.equal(group.ownership_status, 'agent_verified');
+  });
+
   it('confirmOwnership rejects before verified', () => {
     freshStore();
     seedOnlineAgent();
@@ -170,5 +208,62 @@ describe('ownership verification', () => {
     const result = confirmOwnership(ctx, created.verification.id);
     assert.equal(result.error, 'ownership_not_verified');
     assert.equal(result.status, 409);
+  });
+
+  it('verifyOwnershipSetup returns ready for a valid setup without persisting', () => {
+    freshStore();
+    seedOnlineAgent();
+
+    const result = verifyOwnershipSetup(ctx, {
+      target_group_id: 'tg_1',
+      agent_id: 'agent_1',
+    });
+
+    assert.equal(result.dry_run, true);
+    assert.equal(result.ready, true);
+    assert.equal(result.target_group_id, 'tg_1');
+    assert.equal(result.agent_id, 'agent_1');
+    assert.equal(result.declared_fqdn, 'origin.test');
+    assert.deepEqual(result.checks, {
+      agent_online: true,
+      agent_bound: true,
+      token_valid: true,
+      fqdn_declared: true,
+    });
+    assert.equal(getStore().ownershipVerifications.length, 0);
+    const audit = getStore().auditLog.find(
+      (e) => e.action === 'ownership_verification.setup_verified',
+    );
+    assert.ok(audit);
+  });
+
+  it('verifyOwnershipSetup returns agent_not_online when agent is offline', () => {
+    freshStore();
+    seedOnlineAgent({ status: 'offline' });
+
+    const result = verifyOwnershipSetup(ctx, {
+      target_group_id: 'tg_1',
+      agent_id: 'agent_1',
+    });
+
+    assert.equal(result.dry_run, true);
+    assert.equal(result.ready, false);
+    assert.equal(result.error, 'agent_not_online');
+    assert.equal(result.status, 409);
+  });
+
+  it('verifyOwnershipSetup returns target_group_not_found for missing group', () => {
+    freshStore();
+    seedOnlineAgent();
+
+    const result = verifyOwnershipSetup(ctx, {
+      target_group_id: 'tg_missing',
+      agent_id: 'agent_1',
+    });
+
+    assert.equal(result.dry_run, true);
+    assert.equal(result.ready, false);
+    assert.equal(result.error, 'target_group_not_found');
+    assert.equal(result.status, 404);
   });
 });

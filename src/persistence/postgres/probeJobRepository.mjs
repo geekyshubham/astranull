@@ -2,7 +2,8 @@ import { withTenantContext } from './tenantContext.mjs';
 
 const PROBE_JOB_COLUMNS = `id, tenant_id, test_run_id, target_id, check_id, vector_family, status,
   nonce_hash, nonce_for_worker, probe_profile, constraints_json, target_descriptor_json,
-  worker_metadata_json, job_signature, leased_at, leased_by, completed_at, created_at`;
+  worker_metadata_json, job_signature, leased_at, leased_by, completed_at, ownership_verification_id,
+  created_at`;
 
 const PROBE_JOB_COLUMNS_QUALIFIED = PROBE_JOB_COLUMNS.split(',')
   .map((column) => `j.${column.trim()}`)
@@ -53,6 +54,9 @@ export function mapProbeJobRow(row) {
     leased_by: row.leased_by ?? null,
     completed_at: row.completed_at == null ? null : toIso(row.completed_at),
     created_at: toIso(row.created_at),
+    ...(row.ownership_verification_id != null
+      ? { ownership_verification_id: row.ownership_verification_id }
+      : {}),
   };
 }
 
@@ -167,15 +171,17 @@ export function createProbeJobRepository(pool) {
       );
 
       return withTenantContext(pool, tenantId, async (client) => {
+        const ownershipVerificationId = record.ownership_verification_id ?? null;
         const { rows } = await client.query(
           `INSERT INTO probe_jobs (
              id, tenant_id, test_run_id, target_id, check_id, vector_family, status,
              nonce_hash, nonce_for_worker, probe_profile, constraints_json,
-             target_descriptor_json, worker_metadata_json, job_signature, created_at
+             target_descriptor_json, worker_metadata_json, job_signature,
+             ownership_verification_id, created_at
            )
            VALUES (
              $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12::jsonb, $13::jsonb,
-             $14, $15::timestamptz
+             $14, $15, $16::timestamptz
            )
            RETURNING ${PROBE_JOB_COLUMNS}`,
           [
@@ -193,6 +199,7 @@ export function createProbeJobRepository(pool) {
             targetDescriptorJson,
             workerMetadataJson,
             record.job_signature ?? null,
+            ownershipVerificationId,
             record.created_at,
           ],
         );
