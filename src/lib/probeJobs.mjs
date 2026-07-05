@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { buildProbeProfile, WAF_SAFE_PROBE_METADATA_KEYS } from '../contracts/checks.mjs';
 import { generateNonce, hashNonce } from '../lib/crypto.mjs';
+import { stableStringify } from './agentUpdates.mjs';
 
 const DEFAULT_MAX_REQUESTS = 1;
 const DEFAULT_TIMEOUT_CAP_MS = 5000;
@@ -83,7 +84,7 @@ export function targetDescriptor(target) {
 }
 
 function canonicalJobSigningPayload(job) {
-  return JSON.stringify({
+  return stableStringify({
     check_id: job.check_id,
     constraints: job.constraints,
     id: job.id,

@@ -248,6 +248,36 @@ describe('probe job signature verification', () => {
     assert.equal(verifyProbeJobSignature(job, WORKER_SECRET), false);
   });
 
+  it('accepts signed job after postgres-style JSON key reordering', () => {
+    const job = baseJob();
+    const signature = signProbeJob(job, WORKER_SECRET);
+    const reordered = {
+      ...job,
+      job_signature: signature,
+      probe_profile: {
+        kind: job.probe_profile.kind,
+        marker: job.probe_profile.marker,
+        max_requests: job.probe_profile.max_requests,
+        method: job.probe_profile.method,
+        timeout_ms: job.probe_profile.timeout_ms,
+      },
+      constraints: {
+        max_concurrent_runs_per_target_group: job.constraints.max_concurrent_runs_per_target_group,
+        max_duration_seconds: job.constraints.max_duration_seconds,
+        max_events: job.constraints.max_events,
+        max_requests: job.constraints.max_requests,
+        timeout_ms: job.constraints.timeout_ms,
+      },
+      target: {
+        expected_behavior: job.target.expected_behavior,
+        id: job.target.id,
+        kind: job.target.kind,
+        value: job.target.value,
+      },
+    };
+    assert.equal(verifyProbeJobSignature(reordered, WORKER_SECRET), true);
+  });
+
   it('processJob returns invalid_job_signature without executing probe', async () => {
     const job = baseJob();
     job.target = { ...job.target, value: 'tampered.example' };
