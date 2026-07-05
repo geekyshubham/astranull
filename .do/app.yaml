@@ -1,0 +1,87 @@
+# DigitalOcean App Platform spec — deployed by GitHub Actions (digitalocean/app_action/deploy@v2).
+# Source is uploaded from the Actions runner; no DigitalOcean↔GitHub OAuth link required.
+name: astranull
+region: nyc
+
+domains:
+  - domain: astranull.site
+    type: PRIMARY
+  - domain: www.astranull.site
+    type: ALIAS
+
+alerts:
+  - rule: DEPLOYMENT_FAILED
+  - rule: DOMAIN_FAILED
+
+databases:
+  - name: astranull-db
+    engine: PG
+    version: "16"
+    size: db-s-dev
+    num_nodes: 1
+
+services:
+  - name: web
+    dockerfile_path: ops/digitalocean/Dockerfile
+    source_dir: /
+    http_port: 8080
+    instance_count: 1
+    instance_size_slug: basic-xxs
+    health_check:
+      http_path: /health
+      initial_delay_seconds: 90
+      period_seconds: 15
+      timeout_seconds: 10
+      success_threshold: 1
+      failure_threshold: 5
+    envs:
+      - key: NODE_ENV
+        scope: RUN_TIME
+        value: production
+      - key: PORT
+        scope: RUN_TIME
+        value: "8080"
+      - key: ASTRANULL_PUBLIC_BASE_URL
+        scope: RUN_TIME
+        value: https://astranull.site
+      - key: ASTRANULL_PERSISTENCE_MODE
+        scope: RUN_TIME
+        value: postgres
+      - key: ASTRANULL_DEPLOYMENT_PROFILE
+        scope: RUN_TIME
+        value: hosted-staging
+      - key: ASTRANULL_BUNDLED_STAGING_OIDC
+        scope: RUN_TIME
+        value: "1"
+      - key: ASTRANULL_AUTH_MODE
+        scope: RUN_TIME
+        value: oidc-jwt
+      - key: ASTRANULL_PUBLIC_LOGIN_URL
+        scope: RUN_TIME
+        value: /login
+      - key: ASTRANULL_PROBE_MODE
+        scope: RUN_TIME
+        value: signed-worker
+      - key: ASTRANULL_HIGH_SCALE_ADAPTER_MODE
+        scope: RUN_TIME
+        value: disabled
+      - key: ASTRANULL_AGENT_IDENTITY_MODE
+        scope: RUN_TIME
+        value: bearer
+      - key: ASTRANULL_WAF_POSTURE_ENABLED
+        scope: RUN_TIME
+        value: "1"
+      - key: ASTRANULL_CONNECTORS_ENABLED
+        scope: RUN_TIME
+        value: "0"
+      - key: ASTRANULL_DATABASE_URL
+        scope: RUN_TIME
+        value: ${astranull-db.DATABASE_URL}
+      - key: ASTRANULL_SECRET_ENCRYPTION_KEY
+        scope: RUN_TIME
+        type: SECRET
+        value: ${ASTRANULL_SECRET_ENCRYPTION_KEY}
+      - key: ASTRANULL_PROBE_WORKER_SECRET
+        scope: RUN_TIME
+        type: SECRET
+        value: ${ASTRANULL_PROBE_WORKER_SECRET}

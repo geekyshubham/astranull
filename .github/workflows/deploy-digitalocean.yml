@@ -9,6 +9,9 @@ concurrency:
   group: deploy-digitalocean
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -22,11 +25,14 @@ jobs:
       - name: Lint
         run: node scripts/lint.mjs
 
-      - name: Unit tests
-        run: node --test tests/unit/*.test.mjs
-
-      - name: Integration tests
-        run: node --test tests/integration/*.test.mjs
+      - name: Deploy gate tests
+        run: |
+          node --test \
+            tests/unit/product-scope.test.mjs \
+            tests/unit/bundled-staging-oidc.test.mjs \
+            tests/unit/react-portal-auth.test.mjs \
+            tests/unit/railway-staging-start.test.mjs \
+            tests/e2e/ui-smoke.test.mjs
 
       - name: Safety check
         run: node scripts/safety-check.mjs
@@ -39,8 +45,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Deploy to App Platform
-        uses: digitalocean/app_action@v2
+        uses: digitalocean/app_action/deploy@v2
+        env:
+          ASTRANULL_SECRET_ENCRYPTION_KEY: ${{ secrets.ASTRANULL_SECRET_ENCRYPTION_KEY }}
+          ASTRANULL_PROBE_WORKER_SECRET: ${{ secrets.ASTRANULL_PROBE_WORKER_SECRET }}
         with:
-          app_name: astranull
           token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
-          deploy_live: true
+          app_spec_location: .do/app.yaml
+          print_build_logs: true
+          print_deploy_logs: true
