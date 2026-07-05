@@ -7,6 +7,26 @@ import { describe, it } from 'node:test';
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const START_SCRIPT = path.join(REPO_ROOT, 'scripts/railway-staging-start.mjs');
 
+describe('railway-staging-start probe worker URL', () => {
+  it('prefers loopback for in-container polling unless overridden', async () => {
+    const mod = await import('../../scripts/railway-staging-start.mjs');
+    assert.equal(
+      mod.resolveProbeWorkerApiUrl(
+        { ASTRANULL_PUBLIC_BASE_URL: 'https://astranull-qteog.ondigitalocean.app', PORT: '8080' },
+        '8080',
+      ),
+      'http://127.0.0.1:8080',
+    );
+    assert.equal(
+      mod.resolveProbeWorkerApiUrl(
+        { ASTRANULL_PROBE_WORKER_API_URL: 'http://127.0.0.1:9090' },
+        '8080',
+      ),
+      'http://127.0.0.1:9090',
+    );
+  });
+});
+
 describe('railway-staging-start', () => {
   it('refuses to start without ASTRANULL_DATABASE_URL', async () => {
     const child = spawn(process.execPath, [START_SCRIPT], {

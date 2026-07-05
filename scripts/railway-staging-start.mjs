@@ -37,18 +37,62 @@ function runNode(args, options = {}) {
   });
 }
 
-function startProbeWorker(env) {
-  if (env.ASTRANULL_PROBE_MODE !== 'signed-worker') return null;
-  const port = env.PORT ?? '3000';
-  const apiUrl = env.ASTRANULL_PUBLIC_BASE_URL
-    ?? (env.RAILWAY_PUBLIC_DOMAIN ? `https://${env.RAILWAY_PUBLIC_DOMAIN}` : `http://127.0.0.1:${port}`);
-  const workerEnv = {
+export function resolveProbeWorkerApiUrl(env, port) {
+  const loopback = `http://127.0.0.1:${port}`;
+  const explicit = String(env.ASTRANULL_PROBE_WORKER_API_URL ?? '').trim().replace(/\/$/, '');
+  if (explicit) return explicit;
+  return loopback;
+}
+
+function buildProbeWorkerEnv(env, port) {
+  return {
     ...env,
-    ASTRANULL_API_URL: apiUrl,
+    ASTRANULL_API_URL: resolveProbeWorkerApiUrl(env, port),
     ASTRANULL_PROBE_TENANT_ID: env.ASTRANULL_PROBE_TENANT_ID ?? 'ten_demo',
     ASTRANULL_PROBE_POLL_INTERVAL_MS: env.ASTRANULL_PROBE_POLL_INTERVAL_MS ?? '5000',
   };
-  return runNode(['workers/probe-worker.mjs'], { env: workerEnv, detached: true, stdio: 'ignore' });
+}
+
+async function waitForHealth(port, options = {}) {
+  const maxMs = options.maxMs ?? 120_000;
+  const url = `http://127.0.0.1:${port}/health`;
+  const start = Date.now();
+  while (Date.now() - start < maxMs) {
+    try {
+      const res = await fetch(url);
+      if (res.ok) return;
+    } catch {
+      /* API not listening yet */
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  throw new Error(`railway-staging-start: timed out waiting for ${url}`);
+}
+
+function startProbeWorkerSupervised(env, port) {
+  if (env.ASTRANULL_PROBE_MODE !== 'signed-worker') return null;
+  const workerEnv = buildProbeWorkerEnv(env, port);
+
+  const launch = () => {
+    const child = spawn(process.execPath, ['workers/probe-worker.mjs'], {
+      cwd: REPO_ROOT,
+      env: workerEnv,
+      stdio: 'inherit',
+    });
+    child.on('exit', (code, signal) => {
+      if (code === 0 && !signal) return;
+      console.error(
+        `railway-staging-start: probe worker exited (code=${code ?? 'null'}, signal=${signal ?? 'null'}); restarting in 5s…`,
+      );
+      setTimeout(launch, 5000).unref();
+    });
+    return child;
+  };
+
+  console.log(
+    `railway-staging-start: probe worker API base ${workerEnv.ASTRANULL_API_URL} (tenant=${workerEnv.ASTRANULL_PROBE_TENANT_ID})`,
+  );
+  return launch();
 }
 
 async function main() {
@@ -74,16 +118,45 @@ async function main() {
   console.log('railway-staging-start: seeding demo tenant (idempotent)…');
   await runNode(['scripts/seed-local-staging-tenant.mjs'], { env });
 
+  const port = env.PORT ?? '3000';
+  console.log('railway-staging-start: starting control plane…');
+  const apiChild = spawn(process.execPath, ['src/index.mjs'], {
+    cwd: REPO_ROOT,
+    env,
+    stdio: 'inherit',
+  });
+
+  await waitForHealth(port);
+  console.log('railway-staging-start: control plane healthy');
+
   if (env.ASTRANULL_PROBE_MODE === 'signed-worker') {
     console.log('railway-staging-start: starting signed probe worker…');
-    await startProbeWorker(env);
+    startProbeWorkerSupervised(env, port);
   }
 
-  console.log('railway-staging-start: starting control plane…');
-  await runNode(['src/index.mjs'], { env });
+  await new Promise((resolve, reject) => {
+    apiChild.on('error', reject);
+    apiChild.on('exit', (code, signal) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(
+        new Error(
+          `node src/index.mjs failed (code=${code ?? 'null'}, signal=${signal ?? 'null'})`,
+        ),
+      );
+    });
+  });
 }
 
-main().catch((err) => {
-  console.error(`railway-staging-start: ${err instanceof Error ? err.message : String(err)}`);
-  process.exit(1);
-});
+const startEntry = fileURLToPath(import.meta.url);
+const invokedAsMain =
+  process.argv[1] != null && path.resolve(process.argv[1]) === startEntry;
+
+if (invokedAsMain) {
+  main().catch((err) => {
+    console.error(`railway-staging-start: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  });
+}
