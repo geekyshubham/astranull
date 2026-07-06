@@ -448,6 +448,9 @@ export async function probeOutsideInWafScan(job, deps = {}) {
     timeoutMs,
     wafRequired: job.probe_profile?.waf_required !== false,
     customerVendorHint: job.probe_profile?.expected_vendor_hint ?? job.target?.metadata?.expected_vendor_hint,
+    agentCorroborated: job.probe_profile?.agent_corroborated === true
+      || job.target?.metadata?.agent_corroborated === true,
+    requireAgentForProtected: job.probe_profile?.require_agent_for_protected !== false,
     fetchFn: deps.fetchFn,
     originBypassFn: directIp && hostname
       ? async ({ directIp: ip, hostname: host, timeoutMs: tmo, deps: innerDeps }) => {

@@ -1,7 +1,8 @@
 /**
  * Outside-in WAF scanner — bounded metadata-only edge validation.
- * Detects WAF presence, fingerprints vendor/product, validates benign class markers,
- * tests origin bypass when declared, and emits a posture summary.
+ * Detects WAF presence, fingerprints vendor/product, validates benign class markers
+ * (including safe evasion variants), content-type confusion, optional origin bypass,
+ * and emits a posture summary. Protected requires agent corroboration by default.
  */
 
 import { createHash } from 'node:crypto';
@@ -18,15 +19,31 @@ export const BENIGN_CLASS_MARKERS = Object.freeze({
   path_traversal: '../../astranull-probe',
 });
 
+/** Safe evasion-class variants — single-request probes, not reusable attack tooling. */
+export const EVASION_VARIANT_MARKERS = Object.freeze({
+  sqli_encoded: encodeURIComponent(encodeURIComponent(BENIGN_CLASS_MARKERS.sqli)),
+  sqli_case: "AsTrAnUlL' oR '1'='0",
+  sqli_comment: "astranull' O/**/R '1'='0",
+  xss_encoded: encodeURIComponent(BENIGN_CLASS_MARKERS.xss),
+  path_encoded: encodeURIComponent(BENIGN_CLASS_MARKERS.path_traversal),
+});
+
 export const OUTSIDE_IN_SCAN_PHASES = Object.freeze([
   'baseline',
   'combined_marker',
+  'path_traversal_marker',
   'sqli_marker',
   'xss_marker',
-  'path_traversal_marker',
+  'sqli_encoded_marker',
+  'sqli_case_marker',
+  'sqli_comment_marker',
+  'xss_encoded_marker',
   'no_user_agent',
+  'content_type_confusion',
   'origin_bypass',
 ]);
+
+export const OUTSIDE_IN_SCAN_DEFAULT_BUDGET = 10;
 
 const DEFAULT_BROWSER_HEADERS = Object.freeze({
   Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -35,7 +52,6 @@ const DEFAULT_BROWSER_HEADERS = Object.freeze({
   DNT: '1',
 });
 
-/** Body fingerprint rules — store hash + id only in probe metadata. */
 const BLOCK_PAGE_SIGNATURE_RULES = Object.freeze([
   { id: 'block_sig_cloudflare_generic_v1', pattern: /cloudflare|cf-ray/i },
   { id: 'block_sig_akamai_generic_v1', pattern: /akamai|reference\s+#\d+\.\w+\.\d+\.\d+\.\d+/i },
@@ -69,9 +85,6 @@ function headerNamesFromResponse(res) {
   if (typeof res.headers.forEach === 'function') {
     res.headers.forEach((_value, name) => names.push(String(name).toLowerCase()));
     return [...new Set(names)].sort();
-  }
-  if (typeof res.headers.get === 'function') {
-    return [];
   }
   if (typeof res.headers === 'object') {
     return [...new Set(Object.keys(res.headers).map((k) => String(k).toLowerCase()))].sort();
@@ -119,21 +132,19 @@ function responseSnapshot(res, bodyText = '') {
     };
   }
   const status = res.status ?? 0;
-  const bodyHash = hashBodySnippet(bodyText);
-  const blockPageId = matchBlockPageSignature(bodyText);
   return {
     status_code: status,
     status_code_class: status >= 500 ? '5xx' : status >= 400 ? '4xx' : status >= 300 ? '3xx' : '2xx',
     header_names: headerNamesFromResponse(res),
     cookie_names: cookieNamesFromResponse(res),
     server_header: headerValue(res, 'server'),
-    block_page_signature_id: blockPageId,
-    block_page_fingerprint_hash: bodyHash,
+    block_page_signature_id: matchBlockPageSignature(bodyText),
+    block_page_fingerprint_hash: hashBodySnippet(bodyText),
     connection_dropped: false,
   };
 }
 
-function isBlockedOrChallenged(snapshot, baseline = null) {
+export function isBlockedOrChallenged(snapshot, baseline = null) {
   if (!snapshot || snapshot.connection_dropped) return { blocked: true, challenged: false, allowed: false };
   const status = snapshot.status_code;
   if (BLOCK_STATUSES.has(status)) {
@@ -172,26 +183,44 @@ export function detectGenericWafPresence({ baseline, attack, noUserAgent } = {})
   if (attack?.connection_dropped) {
     return { detected: true, reason: 'connection_dropped_on_marker', reasons: ['connection_dropped_on_marker'] };
   }
-  if (attack && baseline.status_code !== attack.status_code) {
-    reasons.push('status_code_drift');
-  }
+  if (attack && baseline.status_code !== attack.status_code) reasons.push('status_code_drift');
   if (attack && baseline.server_header && attack.server_header
     && baseline.server_header !== attack.server_header) {
     reasons.push('server_header_drift');
   }
-  if (noUserAgent && baseline.status_code !== noUserAgent.status_code) {
-    reasons.push('no_user_agent_drift');
-  }
-  if (attack?.block_page_signature_id) {
-    reasons.push('block_page_signature');
-  }
-  return {
-    detected: reasons.length > 0,
-    reason: reasons[0] ?? null,
-    reasons,
-  };
+  if (noUserAgent && baseline.status_code !== noUserAgent.status_code) reasons.push('no_user_agent_drift');
+  if (attack?.block_page_signature_id) reasons.push('block_page_signature');
+  return { detected: reasons.length > 0, reason: reasons[0] ?? null, reasons };
 }
 
+function recordMarkerResult(markerResults, entry) {
+  const existing = markerResults.find((row) => row.family === entry.family && row.variant === entry.variant);
+  if (existing) Object.assign(existing, entry);
+  else markerResults.push(entry);
+}
+
+function detectEvasionBypass(markerResults) {
+  const plainFamilies = ['sqli_marker', 'xss_marker', 'path_traversal_marker'];
+  const evasionFamilies = [
+    'sqli_encoded_marker',
+    'sqli_case_marker',
+    'sqli_comment_marker',
+    'xss_encoded_marker',
+    'content_type_confusion',
+  ];
+  const plainRows = markerResults.filter((row) => plainFamilies.includes(row.family));
+  const plainBlocked = plainRows.length > 0 && plainRows.every((row) => row.blocked);
+  const evasionAllowed = markerResults
+    .filter((row) => evasionFamilies.includes(row.family))
+    .some((row) => row.allowed);
+  return plainBlocked && evasionAllowed;
+}
+
+/**
+ * @param {object} input
+ * @param {boolean} [input.agentCorroborated=false]
+ * @param {boolean} [input.requireAgentForProtected=true]
+ */
 export function buildOutsideInPostureReport({
   wafDetected = false,
   genericWafDetected = false,
@@ -199,11 +228,19 @@ export function buildOutsideInPostureReport({
   originBypassConfirmed = false,
   wafRequired = true,
   vendorClassification = null,
+  agentCorroborated = false,
+  requireAgentForProtected = true,
+  evasionBypassSuspected = false,
 } = {}) {
   const anyMarkerAllowed = markerResults.some((m) => m.allowed === true);
   const anyMarkerBlocked = markerResults.some((m) => m.blocked === true);
-  const validationPassed = markerResults.length > 0 && anyMarkerBlocked && !anyMarkerAllowed;
-  const validationFailed = markerResults.length > 0 && anyMarkerAllowed;
+  const probeValidationPassed = markerResults.length > 0 && anyMarkerBlocked && !anyMarkerAllowed;
+  const validationFailed = markerResults.length > 0 && (anyMarkerAllowed || evasionBypassSuspected);
+
+  let validationPassed = probeValidationPassed && !evasionBypassSuspected;
+  if (requireAgentForProtected && validationPassed && !agentCorroborated) {
+    validationPassed = false;
+  }
 
   const posture = classifyWafPosture({
     wafDetected: wafDetected || genericWafDetected,
@@ -213,18 +250,43 @@ export function buildOutsideInPostureReport({
     wafRequired,
   });
 
+  const reason_codes = [...posture.reason_codes];
+  if (evasionBypassSuspected && !reason_codes.includes('scenario_category_failed')) {
+    reason_codes.push('scenario_category_failed');
+  }
+  if (probeValidationPassed && requireAgentForProtected && !agentCorroborated
+    && !reason_codes.includes('insufficient_validation_evidence')) {
+    reason_codes.push('insufficient_validation_evidence');
+  }
+
   let posture_label = 'Unknown';
-  if (posture.status === 'protected') posture_label = 'Protected';
-  else if (posture.status === 'underprotected' && originBypassConfirmed) posture_label = 'Bypass Risk';
-  else if (posture.status === 'underprotected') posture_label = 'Underprotected';
-  else if (posture.status === 'unprotected') posture_label = 'Unprotected';
-  else if (posture.status === 'excluded') posture_label = 'Excluded';
+  let posture_status = posture.status;
+
+  if (originBypassConfirmed) {
+    posture_label = 'Bypass Risk';
+    posture_status = 'underprotected';
+  } else if (validationFailed) {
+    posture_label = 'Underprotected';
+    posture_status = 'underprotected';
+  } else if (validationPassed && agentCorroborated) {
+    posture_label = 'Protected';
+    posture_status = 'protected';
+  } else if (probeValidationPassed && (wafDetected || genericWafDetected) && !agentCorroborated) {
+    posture_label = 'Detected, not validated';
+    posture_status = 'unknown';
+  } else if (posture.status === 'unprotected') {
+    posture_label = 'Unprotected';
+  } else if (posture.status === 'excluded') {
+    posture_label = 'Excluded';
+  } else if (posture.status === 'underprotected') {
+    posture_label = 'Underprotected';
+  }
 
   const best = vendorClassification?.best ?? null;
   return {
-    posture_status: posture.status,
+    posture_status,
     posture_label,
-    reason_codes: posture.reason_codes,
+    reason_codes: [...new Set(reason_codes)],
     waf_detected: wafDetected || genericWafDetected || Boolean(best),
     waf_fingerprint_detected: Boolean(best) || wafDetected || genericWafDetected,
     generic_waf_detected: genericWafDetected,
@@ -234,17 +296,23 @@ export function buildOutsideInPostureReport({
     waf_confidence: best?.confidence ?? (genericWafDetected ? 0.45 : 0),
     validation_passed: validationPassed,
     validation_failed: validationFailed,
+    probe_validation_passed: probeValidationPassed,
+    agent_corroborated: agentCorroborated,
+    agent_corroboration_required: requireAgentForProtected,
+    evasion_bypass_suspected: evasionBypassSuspected,
+    dom_xss_validation: 'agent_required',
     origin_bypass_confirmed: originBypassConfirmed,
     marker_summary: {
       probes_sent: markerResults.length,
       blocked_count: markerResults.filter((m) => m.blocked).length,
       allowed_count: markerResults.filter((m) => m.allowed).length,
       challenged_count: markerResults.filter((m) => m.challenged).length,
+      evasion_probes_sent: markerResults.filter((m) => String(m.variant ?? '') !== 'plain').length,
     },
   };
 }
 
-function buildUrl(baseUrl, { pathSuffix = '', params = {} } = {}) {
+function buildUrl(baseUrl, { pathSuffix = '', params = {}, rawParams = {} } = {}) {
   const url = new URL(baseUrl);
   if (pathSuffix) {
     const joined = `${url.pathname.replace(/\/$/, '')}/${pathSuffix}`.replace(/\/+/g, '/');
@@ -253,17 +321,23 @@ function buildUrl(baseUrl, { pathSuffix = '', params = {} } = {}) {
   for (const [key, value] of Object.entries(params)) {
     url.searchParams.set(key, value);
   }
-  return url.href;
+  let href = url.href;
+  for (const [key, value] of Object.entries(rawParams)) {
+    const sep = href.includes('?') ? '&' : '?';
+    href = `${href}${sep}${key}=${value}`;
+  }
+  return href;
 }
 
-async function boundedGet(url, headers, timeoutMs, deps) {
+async function boundedRequest(url, { method = 'GET', headers = {}, body = null }, timeoutMs, deps) {
   const fetchFn = deps.fetchFn ?? fetch;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetchFn(url, {
-      method: 'GET',
+      method,
       headers,
+      body,
       redirect: 'manual',
       signal: controller.signal,
     });
@@ -281,6 +355,37 @@ async function boundedGet(url, headers, timeoutMs, deps) {
 }
 
 /**
+ * Priority-ordered scan phases for a given request budget.
+ * @param {number} budget
+ * @param {{ hasDirectIp?: boolean }} options
+ */
+export function buildOutsideInScanPlan(budget, { hasDirectIp = false } = {}) {
+  const ordered = [
+    { phase: 'baseline', method: 'GET' },
+    { phase: 'combined_marker', method: 'GET' },
+    { phase: 'path_traversal_marker', method: 'GET' },
+    { phase: 'sqli_marker', method: 'GET' },
+    { phase: 'sqli_encoded_marker', method: 'GET' },
+    { phase: 'sqli_case_marker', method: 'GET' },
+    { phase: 'sqli_comment_marker', method: 'GET' },
+    { phase: 'content_type_confusion', method: 'POST' },
+    { phase: 'xss_marker', method: 'GET' },
+    { phase: 'xss_encoded_marker', method: 'GET' },
+    { phase: 'no_user_agent', method: 'GET' },
+  ];
+  if (hasDirectIp) ordered.push({ phase: 'origin_bypass', method: 'HEAD' });
+
+  if (hasDirectIp && budget >= 10) {
+    const reserve = ordered.filter((entry) => entry.phase !== 'no_user_agent' && entry.phase !== 'origin_bypass');
+    const picked = reserve.slice(0, budget - 1);
+    picked.push(ordered.find((entry) => entry.phase === 'origin_bypass'));
+    return picked.filter(Boolean);
+  }
+
+  return ordered.slice(0, budget);
+}
+
+/**
  * @param {{
  *   url: string,
  *   hostname?: string,
@@ -289,6 +394,8 @@ async function boundedGet(url, headers, timeoutMs, deps) {
  *   timeoutMs?: number,
  *   wafRequired?: boolean,
  *   customerVendorHint?: string,
+ *   agentCorroborated?: boolean,
+ *   requireAgentForProtected?: boolean,
  *   fetchFn?: typeof fetch,
  *   originBypassFn?: (args: object) => Promise<{ res: object|null, error: Error|null }>,
  * }} options
@@ -299,117 +406,231 @@ export async function runOutsideInWafScan(options = {}) {
     return { error_class: 'unsupported_target', requests_sent: 0, phases: [] };
   }
 
-  const budget = Number.isInteger(options.budget) && options.budget > 0 ? options.budget : 8;
+  const budget = Number.isInteger(options.budget) && options.budget > 0
+    ? options.budget
+    : OUTSIDE_IN_SCAN_DEFAULT_BUDGET;
   const timeoutMs = Number.isInteger(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : 5000;
   const deps = { fetchFn: options.fetchFn };
   const started = Date.now();
   let requestsSent = 0;
-  const phases = [];
+  const phaseLog = [];
   const markerResults = [];
 
-  async function runPhase(phase, requestUrl, headers) {
-    if (requestsSent >= budget) return null;
-    requestsSent += 1;
-    const { res, bodyText, error } = await boundedGet(requestUrl, headers, timeoutMs, deps);
-    const snapshot = error
-      ? { ...responseSnapshot(null), error_class: error.name ?? error.code ?? 'probe_failed' }
-      : responseSnapshot(res, bodyText);
-    phases.push({ phase, status_code: snapshot.status_code, header_name_count: snapshot.header_names.length });
-    return snapshot;
-  }
-
-  const baseline = await runPhase('baseline', url, { ...DEFAULT_BROWSER_HEADERS });
-  if (!baseline) {
-    return { error_class: 'request_budget_exhausted', requests_sent: requestsSent, phases };
-  }
-
-  const combinedParams = {
-    [randomParamName()]: BENIGN_CLASS_MARKERS.xss,
-    [randomParamName()]: BENIGN_CLASS_MARKERS.sqli,
-    [randomParamName()]: BENIGN_CLASS_MARKERS.path_traversal,
-  };
-  const combinedUrl = buildUrl(url, { params: combinedParams });
-  const combined = await runPhase('combined_marker', combinedUrl, { ...DEFAULT_BROWSER_HEADERS });
-  if (combined) {
-    const combinedEval = isBlockedOrChallenged(combined, baseline);
-    markerResults.push({ family: 'sqli_marker', ...combinedEval, status_code: combined.status_code });
-    markerResults.push({ family: 'xss_marker', ...combinedEval, status_code: combined.status_code });
-  }
-
-  let sqli = combined;
-  let xss = combined;
-  let pathTraversal = null;
-
-  if (requestsSent < budget) {
-    const pathUrl = buildUrl(url, { pathSuffix: BENIGN_CLASS_MARKERS.path_traversal });
-    pathTraversal = await runPhase('path_traversal_marker', pathUrl, { ...DEFAULT_BROWSER_HEADERS });
-    if (pathTraversal) {
-      const evalResult = isBlockedOrChallenged(pathTraversal, baseline);
-      markerResults.push({ family: 'path_traversal_marker', ...evalResult, status_code: pathTraversal.status_code });
-    }
-  }
-
-  if (requestsSent < budget) {
-    const sqliUrl = buildUrl(url, { params: { [randomParamName()]: BENIGN_CLASS_MARKERS.sqli } });
-    sqli = await runPhase('sqli_marker', sqliUrl, { ...DEFAULT_BROWSER_HEADERS });
-    if (sqli) {
-      const evalResult = isBlockedOrChallenged(sqli, baseline);
-      const existing = markerResults.find((entry) => entry.family === 'sqli_marker');
-      if (existing) Object.assign(existing, evalResult, { status_code: sqli.status_code });
-      else markerResults.push({ family: 'sqli_marker', ...evalResult, status_code: sqli.status_code });
-    }
-  }
-
-  if (requestsSent < budget) {
-    const xssUrl = buildUrl(url, { params: { [randomParamName()]: BENIGN_CLASS_MARKERS.xss } });
-    xss = await runPhase('xss_marker', xssUrl, { ...DEFAULT_BROWSER_HEADERS });
-    if (xss) {
-      const evalResult = isBlockedOrChallenged(xss, baseline);
-      const existing = markerResults.find((entry) => entry.family === 'xss_marker');
-      if (existing) Object.assign(existing, evalResult, { status_code: xss.status_code });
-      else markerResults.push({ family: 'xss_marker', ...evalResult, status_code: xss.status_code });
-    }
-  }
-
-  let noUserAgent = null;
-  if (requestsSent < budget) {
-    const noUaHeaders = { ...DEFAULT_BROWSER_HEADERS };
-    delete noUaHeaders['User-Agent'];
-    noUserAgent = await runPhase('no_user_agent', url, noUaHeaders);
-  }
-
-  let originBypassConfirmed = false;
-  let originBypassStatus = null;
   const directIp = options.directIp ?? null;
   const hostname = options.hostname ?? (() => {
     try { return new URL(url).hostname; } catch { return null; }
   })();
+  const plan = buildOutsideInScanPlan(budget, { hasDirectIp: Boolean(directIp && hostname) });
+  const plannedPhases = new Set(plan.map((entry) => entry.phase));
 
-  if (directIp && hostname && requestsSent < budget && typeof options.originBypassFn === 'function') {
+  async function runGetPhase(phase, requestUrl, headers) {
+    if (requestsSent >= budget) return null;
+    requestsSent += 1;
+    const { res, bodyText, error } = await boundedRequest(requestUrl, { method: 'GET', headers }, timeoutMs, deps);
+    const snapshot = error
+      ? { ...responseSnapshot(null), error_class: error.name ?? error.code ?? 'probe_failed' }
+      : responseSnapshot(res, bodyText);
+    phaseLog.push({ phase, status_code: snapshot.status_code });
+    return snapshot;
+  }
+
+  let baseline = null;
+  let combined = null;
+  let sqli = null;
+  let xss = null;
+  let pathTraversal = null;
+  let noUserAgent = null;
+
+  if (plannedPhases.has('baseline')) {
+    baseline = await runGetPhase('baseline', url, { ...DEFAULT_BROWSER_HEADERS });
+    if (!baseline) return { error_class: 'request_budget_exhausted', requests_sent: requestsSent, phases: phaseLog };
+  }
+
+  if (plannedPhases.has('combined_marker')) {
+    const combinedParams = {
+      [randomParamName()]: BENIGN_CLASS_MARKERS.xss,
+      [randomParamName()]: BENIGN_CLASS_MARKERS.sqli,
+      [randomParamName()]: BENIGN_CLASS_MARKERS.path_traversal,
+    };
+    combined = await runGetPhase('combined_marker', buildUrl(url, { params: combinedParams }), { ...DEFAULT_BROWSER_HEADERS });
+    if (combined) {
+      const evalResult = isBlockedOrChallenged(combined, baseline);
+      recordMarkerResult(markerResults, { family: 'sqli_marker', variant: 'plain', ...evalResult, status_code: combined.status_code });
+      recordMarkerResult(markerResults, { family: 'xss_marker', variant: 'plain', ...evalResult, status_code: combined.status_code });
+    }
+  }
+
+  if (plannedPhases.has('path_traversal_marker')) {
+    pathTraversal = await runGetPhase(
+      'path_traversal_marker',
+      buildUrl(url, { pathSuffix: BENIGN_CLASS_MARKERS.path_traversal }),
+      { ...DEFAULT_BROWSER_HEADERS },
+    );
+    if (pathTraversal) {
+      recordMarkerResult(markerResults, {
+        family: 'path_traversal_marker',
+        variant: 'plain',
+        ...isBlockedOrChallenged(pathTraversal, baseline),
+        status_code: pathTraversal.status_code,
+      });
+    }
+  }
+
+  if (plannedPhases.has('sqli_marker')) {
+    sqli = await runGetPhase(
+      'sqli_marker',
+      buildUrl(url, { params: { [randomParamName()]: BENIGN_CLASS_MARKERS.sqli } }),
+      { ...DEFAULT_BROWSER_HEADERS },
+    );
+    if (sqli) {
+      recordMarkerResult(markerResults, {
+        family: 'sqli_marker',
+        variant: 'plain',
+        ...isBlockedOrChallenged(sqli, baseline),
+        status_code: sqli.status_code,
+      });
+    }
+  }
+
+  if (plannedPhases.has('sqli_encoded_marker')) {
+    const snap = await runGetPhase(
+      'sqli_encoded_marker',
+      buildUrl(url, { rawParams: { [randomParamName()]: EVASION_VARIANT_MARKERS.sqli_encoded } }),
+      { ...DEFAULT_BROWSER_HEADERS },
+    );
+    if (snap) {
+      recordMarkerResult(markerResults, {
+        family: 'sqli_encoded_marker',
+        variant: 'double_url_encoded',
+        ...isBlockedOrChallenged(snap, baseline),
+        status_code: snap.status_code,
+      });
+    }
+  }
+
+  if (plannedPhases.has('sqli_case_marker')) {
+    const snap = await runGetPhase(
+      'sqli_case_marker',
+      buildUrl(url, { params: { [randomParamName()]: EVASION_VARIANT_MARKERS.sqli_case } }),
+      { ...DEFAULT_BROWSER_HEADERS },
+    );
+    if (snap) {
+      recordMarkerResult(markerResults, {
+        family: 'sqli_case_marker',
+        variant: 'case_mixed',
+        ...isBlockedOrChallenged(snap, baseline),
+        status_code: snap.status_code,
+      });
+    }
+  }
+
+  if (plannedPhases.has('sqli_comment_marker')) {
+    const snap = await runGetPhase(
+      'sqli_comment_marker',
+      buildUrl(url, { params: { [randomParamName()]: EVASION_VARIANT_MARKERS.sqli_comment } }),
+      { ...DEFAULT_BROWSER_HEADERS },
+    );
+    if (snap) {
+      recordMarkerResult(markerResults, {
+        family: 'sqli_comment_marker',
+        variant: 'comment_insertion',
+        ...isBlockedOrChallenged(snap, baseline),
+        status_code: snap.status_code,
+      });
+    }
+  }
+
+  if (plannedPhases.has('xss_marker')) {
+    xss = await runGetPhase(
+      'xss_marker',
+      buildUrl(url, { params: { [randomParamName()]: BENIGN_CLASS_MARKERS.xss } }),
+      { ...DEFAULT_BROWSER_HEADERS },
+    );
+    if (xss) {
+      recordMarkerResult(markerResults, {
+        family: 'xss_marker',
+        variant: 'plain',
+        ...isBlockedOrChallenged(xss, baseline),
+        status_code: xss.status_code,
+      });
+    }
+  }
+
+  if (plannedPhases.has('xss_encoded_marker')) {
+    const snap = await runGetPhase(
+      'xss_encoded_marker',
+      buildUrl(url, { rawParams: { [randomParamName()]: EVASION_VARIANT_MARKERS.xss_encoded } }),
+      { ...DEFAULT_BROWSER_HEADERS },
+    );
+    if (snap) {
+      recordMarkerResult(markerResults, {
+        family: 'xss_encoded_marker',
+        variant: 'url_encoded',
+        ...isBlockedOrChallenged(snap, baseline),
+        status_code: snap.status_code,
+      });
+    }
+  }
+
+  if (plannedPhases.has('no_user_agent')) {
+    const noUaHeaders = { ...DEFAULT_BROWSER_HEADERS };
+    delete noUaHeaders['User-Agent'];
+    noUserAgent = await runGetPhase('no_user_agent', url, noUaHeaders);
+  }
+
+  if (plannedPhases.has('content_type_confusion') && requestsSent < budget) {
+    requestsSent += 1;
+    const formBody = `${randomParamName()}=${encodeURIComponent(BENIGN_CLASS_MARKERS.sqli)}`;
+    const { res, bodyText, error } = await boundedRequest(url, {
+      method: 'POST',
+      headers: {
+        ...DEFAULT_BROWSER_HEADERS,
+        'Content-Type': 'application/json',
+        'Content-Length': String(formBody.length),
+      },
+      body: formBody,
+    }, timeoutMs, deps);
+    const snapshot = error
+      ? { ...responseSnapshot(null), error_class: error.name ?? error.code ?? 'probe_failed' }
+      : responseSnapshot(res, bodyText);
+    phaseLog.push({ phase: 'content_type_confusion', status_code: snapshot.status_code });
+    const contentTypeEval = snapshot.status_code >= 200 && snapshot.status_code < 300
+      ? { blocked: false, challenged: false, allowed: true }
+      : isBlockedOrChallenged(snapshot, baseline);
+    recordMarkerResult(markerResults, {
+      family: 'content_type_confusion',
+      variant: 'json_header_form_body',
+      ...contentTypeEval,
+      status_code: snapshot.status_code,
+    });
+  }
+
+  let originBypassConfirmed = false;
+  let originBypassStatus = null;
+  if (plannedPhases.has('origin_bypass') && directIp && hostname
+    && requestsSent < budget && typeof options.originBypassFn === 'function') {
     requestsSent += 1;
     const { res, error } = await options.originBypassFn({ directIp, hostname, timeoutMs, deps });
     originBypassStatus = error ? 0 : (res?.status ?? 0);
     originBypassConfirmed = !error && originBypassStatus >= 200 && originBypassStatus < 400;
-    phases.push({ phase: 'origin_bypass', status_code: originBypassStatus, bypass_signal: originBypassConfirmed });
+    phaseLog.push({ phase: 'origin_bypass', status_code: originBypassStatus, bypass_signal: originBypassConfirmed });
   }
 
   const attackSnapshot = combined ?? sqli ?? xss ?? pathTraversal ?? baseline;
   const generic = detectGenericWafPresence({ baseline, attack: attackSnapshot, noUserAgent });
-
   const signalSource = attackSnapshot?.header_names?.length >= baseline?.header_names?.length
     ? attackSnapshot
     : baseline;
   const vendorClassification = classifyWafProductFromSignals({
     header_names: [...new Set([...(baseline?.header_names ?? []), ...(signalSource?.header_names ?? [])])],
     cookie_names: [...new Set([...(baseline?.cookie_names ?? []), ...(signalSource?.cookie_names ?? [])])],
-    block_page_signature_id: attackSnapshot?.block_page_signature_id
-      ?? baseline?.block_page_signature_id
-      ?? null,
+    block_page_signature_id: attackSnapshot?.block_page_signature_id ?? baseline?.block_page_signature_id ?? null,
     customer_vendor_hint: options.customerVendorHint ?? null,
     waf_present: generic.detected || Boolean(attackSnapshot?.block_page_signature_id),
   });
 
   const wafDetected = Boolean(vendorClassification.best) || generic.detected;
+  const evasionBypassSuspected = detectEvasionBypass(markerResults);
   const posture = buildOutsideInPostureReport({
     wafDetected,
     genericWafDetected: generic.detected,
@@ -417,26 +638,28 @@ export async function runOutsideInWafScan(options = {}) {
     originBypassConfirmed,
     wafRequired: options.wafRequired !== false,
     vendorClassification,
+    agentCorroborated: options.agentCorroborated === true,
+    requireAgentForProtected: options.requireAgentForProtected !== false,
+    evasionBypassSuspected,
   });
 
   const durationMs = Date.now() - started;
-  const external_result = originBypassConfirmed
+  const external_result = originBypassConfirmed || posture.validation_failed
     ? 'connected'
-    : posture.validation_failed
-      ? 'connected'
-      : wafDetected && posture.validation_passed
+    : posture.validation_passed || (wafDetected && posture.probe_validation_passed)
+      ? 'blocked'
+      : wafDetected
         ? 'blocked'
-        : wafDetected
-          ? 'blocked'
-          : 'connected';
+        : 'connected';
 
   return {
     duration_ms: durationMs,
     requests_sent: requestsSent,
-    phases,
-    baseline_status_code: baseline.status_code,
-    header_names: signalSource?.header_names ?? baseline.header_names,
-    cookie_names: signalSource?.cookie_names ?? baseline.cookie_names,
+    phases: phaseLog,
+    scan_plan: plan.map((entry) => entry.phase),
+    baseline_status_code: baseline?.status_code ?? 0,
+    header_names: signalSource?.header_names ?? baseline?.header_names ?? [],
+    cookie_names: signalSource?.cookie_names ?? baseline?.cookie_names ?? [],
     block_page_signature_id: attackSnapshot?.block_page_signature_id ?? null,
     block_page_fingerprint_hash: attackSnapshot?.block_page_fingerprint_hash ?? null,
     generic_waf_reasons: generic.reasons,

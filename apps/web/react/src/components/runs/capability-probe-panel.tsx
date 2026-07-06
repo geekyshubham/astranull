@@ -65,8 +65,10 @@ function rowsForProbeKind(probeKind: string, meta: DataItem): EvidenceRow[] {
         { label: 'Posture', value: getString(meta, ['posture_label', 'posture_status']) },
         { label: 'WAF detected', value: formatBool(meta.waf_fingerprint_detected ?? meta.waf_detected) },
         { label: 'Detected vendor', value: getString(meta, ['detected_vendor', 'waf_product_hint']) },
-        { label: 'Confidence', value: getString(meta, ['waf_confidence']) },
+        { label: 'Agent corroborated', value: formatBool(meta.agent_corroborated) },
+        { label: 'Evasion bypass', value: formatBool(meta.evasion_bypass_suspected) },
         { label: 'Origin bypass', value: formatBool(meta.origin_bypass_confirmed) },
+        { label: 'DOM XSS', value: getString(meta, ['dom_xss_validation'], 'agent_required') },
         {
           label: 'Marker probes',
           value: Array.isArray(meta.marker_probes)
@@ -74,8 +76,9 @@ function rowsForProbeKind(probeKind: string, meta: DataItem): EvidenceRow[] {
                 .map((entry) => {
                   const row = entry as DataItem;
                   const family = getString(row, ['family']);
+                  const variant = getString(row, ['variant']);
                   const blocked = row.blocked === true ? 'blocked' : row.allowed === true ? 'allowed' : 'inconclusive';
-                  return `${family}: ${blocked}`;
+                  return variant ? `${family}/${variant}: ${blocked}` : `${family}: ${blocked}`;
                 })
                 .join(', ')
             : '—',

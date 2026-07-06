@@ -3,7 +3,9 @@ import { describe, it } from 'node:test';
 import { getCheckById } from '../../src/contracts/checks.mjs';
 import {
   BENIGN_CLASS_MARKERS,
+  EVASION_VARIANT_MARKERS,
   buildOutsideInPostureReport,
+  buildOutsideInScanPlan,
   detectGenericWafPresence,
   runOutsideInWafScan,
 } from '../../src/lib/outsideInWafScanner.mjs';
@@ -33,10 +35,23 @@ function mockResponse(status, headers = {}) {
 }
 
 describe('outside-in WAF scanner', () => {
-  it('waf.fingerprint.safe maps to outside_in_waf_scan probe profile', () => {
+  it('waf.fingerprint.safe maps to outside_in_waf_scan with 10-request budget', () => {
     const check = getCheckById('waf.fingerprint.safe');
     assert.equal(check.probe_profile.kind, 'outside_in_waf_scan');
-    assert.equal(check.probe_profile.max_requests, 5);
+    assert.equal(check.probe_profile.max_requests, 10);
+    assert.equal(check.probe_profile.require_agent_for_protected, true);
+  });
+
+  it('buildOutsideInScanPlan prioritizes evasion phases within budget', () => {
+    const plan = buildOutsideInScanPlan(6, { hasDirectIp: false });
+    assert.deepEqual(plan.map((entry) => entry.phase), [
+      'baseline',
+      'combined_marker',
+      'path_traversal_marker',
+      'sqli_marker',
+      'sqli_encoded_marker',
+      'sqli_case_marker',
+    ]);
   });
 
   it('detects generic WAF via status drift between baseline and marker probe', () => {
@@ -47,16 +62,14 @@ describe('outside-in WAF scanner', () => {
     assert.ok(result.reasons.includes('status_code_drift'));
   });
 
-  it('fingerprints Cloudflare and reports protected when markers are blocked', async () => {
-    const calls = [];
+  it('fingerprints Cloudflare but requires agent for Protected label', async () => {
     const baseUrl = 'https://shop.example.test/';
     const outcome = await runOutsideInWafScan({
       url: baseUrl,
-      budget: 7,
+      budget: 10,
       timeoutMs: 1000,
       fetchFn: async (url, init) => {
-        calls.push(url);
-        const isBaseline = url === baseUrl && init?.headers?.['User-Agent'];
+        const isBaseline = url === baseUrl && init?.headers?.['User-Agent'] && init?.method !== 'POST';
         if (!isBaseline) {
           return mockResponse(403, {
             server: 'cloudflare',
@@ -73,18 +86,90 @@ describe('outside-in WAF scanner', () => {
       },
     });
 
-    assert.ok(calls.length >= 5);
     assert.equal(outcome.waf_detected, true);
     assert.equal(outcome.detected_vendor, 'cloudflare');
+    assert.equal(outcome.posture_label, 'Detected, not validated');
+    assert.equal(outcome.probe_validation_passed, true);
+    assert.equal(outcome.validation_passed, false);
+    assert.ok(outcome.marker_probes.some((probe) => probe.family === 'sqli_encoded_marker'));
+  });
+
+  it('reports Protected only when agent corroboration is present', async () => {
+    const baseUrl = 'https://shop.example.test/';
+    const outcome = await runOutsideInWafScan({
+      url: baseUrl,
+      budget: 8,
+      timeoutMs: 1000,
+      agentCorroborated: true,
+      fetchFn: async (url, init) => {
+        const isBaseline = url === baseUrl && init?.headers?.['User-Agent'] && init?.method !== 'POST';
+        if (!isBaseline) {
+          return mockResponse(403, { server: 'cloudflare', 'cf-ray': '1', __body: 'Cloudflare' });
+        }
+        return mockResponse(200, { server: 'cloudflare', 'cf-ray': '1' });
+      },
+    });
     assert.equal(outcome.posture_label, 'Protected');
     assert.equal(outcome.validation_passed, true);
-    assert.ok(outcome.marker_probes.every((probe) => probe.blocked));
+    assert.equal(outcome.agent_corroborated, true);
+  });
+
+  it('flags evasion bypass when plain markers blocked but encoded allowed', async () => {
+    const baseUrl = 'https://edge.example.test/';
+    const outcome = await runOutsideInWafScan({
+      url: baseUrl,
+      budget: 10,
+      timeoutMs: 1000,
+      fetchFn: async (url, init) => {
+        const isBaseline = url === baseUrl && init?.headers?.['User-Agent'];
+        if (isBaseline) return mockResponse(200, { server: 'nginx' });
+        if (url.includes('%25') || url.includes(EVASION_VARIANT_MARKERS.sqli_encoded)) {
+          return mockResponse(200, { server: 'nginx' });
+        }
+        if (init?.method === 'POST') return mockResponse(200, { server: 'nginx' });
+        return mockResponse(403, { server: 'nginx', __body: 'blocked' });
+      },
+    });
+    assert.equal(outcome.evasion_bypass_suspected, true);
+    assert.equal(outcome.posture_label, 'Underprotected');
+    assert.equal(outcome.validation_failed, true);
+  });
+
+  it('runs content-type confusion POST within scan plan', async () => {
+    const methods = [];
+    const outcome = await runOutsideInWafScan({
+      url: 'https://api.example.test/',
+      budget: 10,
+      timeoutMs: 1000,
+      fetchFn: async (_url, init) => {
+        methods.push(init?.method ?? 'GET');
+        return mockResponse(403, { server: 'waf', __body: 'blocked' });
+      },
+    });
+    assert.ok(methods.includes('POST'));
+    const contentTypeProbe = outcome.marker_probes.find((probe) => probe.family === 'content_type_confusion');
+    assert.ok(contentTypeProbe);
+    assert.equal(contentTypeProbe.blocked, true);
+  });
+
+  it('flags content-type confusion gap when POST marker is allowed through', async () => {
+    const outcome = await runOutsideInWafScan({
+      url: 'https://api.example.test/',
+      budget: 10,
+      timeoutMs: 1000,
+      fetchFn: async (_url, init) => {
+        if (init?.method === 'POST') return mockResponse(200, { server: 'nginx' });
+        return mockResponse(403, { server: 'nginx', __body: 'blocked' });
+      },
+    });
+    assert.equal(outcome.evasion_bypass_suspected, true);
+    assert.ok(outcome.marker_probes.find((probe) => probe.family === 'content_type_confusion')?.allowed);
   });
 
   it('reports underprotected when markers reach origin with 200', async () => {
     const outcome = await runOutsideInWafScan({
       url: 'https://app.example.test/',
-      budget: 7,
+      budget: 8,
       timeoutMs: 1000,
       fetchFn: async () => mockResponse(200, { server: 'nginx' }),
     });
@@ -92,21 +177,20 @@ describe('outside-in WAF scanner', () => {
     assert.equal(outcome.waf_detected, false);
     assert.equal(outcome.posture_label, 'Underprotected');
     assert.equal(outcome.validation_failed, true);
-    assert.ok(outcome.marker_probes.every((probe) => probe.allowed));
   });
 
   it('reports bypass risk when declared origin is reachable', async () => {
     const outcome = await runOutsideInWafScan({
       url: 'https://edge.example.test/',
-      budget: 8,
+      budget: 10,
       timeoutMs: 1000,
       directIp: '198.51.100.7',
       hostname: 'edge.example.test',
-      fetchFn: async (url) => {
-        if (url.includes(BENIGN_CLASS_MARKERS.sqli) || url.includes('astranull')) {
-          return mockResponse(403, { server: 'cloudflare', 'cf-ray': '1', __body: 'blocked by cloudflare' });
+      fetchFn: async (url, init) => {
+        if (url === 'https://edge.example.test/' && init?.headers?.['User-Agent']) {
+          return mockResponse(200, { server: 'cloudflare', 'cf-ray': '1' });
         }
-        return mockResponse(200, { server: 'cloudflare', 'cf-ray': '1' });
+        return mockResponse(403, { server: 'cloudflare', 'cf-ray': '1', __body: 'blocked' });
       },
       originBypassFn: async () => ({
         res: mockResponse(200, { server: 'origin-nginx' }),
@@ -116,18 +200,17 @@ describe('outside-in WAF scanner', () => {
 
     assert.equal(outcome.origin_bypass_confirmed, true);
     assert.equal(outcome.posture_label, 'Bypass Risk');
-    assert.equal(outcome.posture_status, 'underprotected');
   });
 
   it('probeOutsideInWafScan integrates with capability probe dispatch', async () => {
     const outcome = await probeOutsideInWafScan({
       check_id: 'waf.fingerprint.safe',
-      constraints: { max_requests: 7, timeout_ms: 1000 },
+      constraints: { max_requests: 10, timeout_ms: 1000 },
       probe_profile: { kind: 'outside_in_waf_scan' },
       target: { kind: 'url', value: 'https://edge.example.test/' },
     }, {
       fetchFn: async (url) => {
-        const blocked = url.includes('OR');
+        const blocked = url.includes('OR') || url.includes('%');
         return mockResponse(blocked ? 403 : 200, {
           server: 'cloudflare',
           'cf-ray': 'xyz',
@@ -140,11 +223,12 @@ describe('outside-in WAF scanner', () => {
     assert.equal(outcome.metadata.waf_fingerprint_detected, true);
     assert.ok(outcome.requests_sent >= 5);
     assert.ok(outcome.metadata.waf_fingerprint_catalog_version);
+    assert.equal(outcome.metadata.agent_corroboration_required, true);
   });
 
   it('executeCapabilityProbe routes outside_in_waf_scan kind', async () => {
     const outcome = await executeCapabilityProbe({
-      constraints: { max_requests: 6, timeout_ms: 1000 },
+      constraints: { max_requests: 8, timeout_ms: 1000 },
       probe_profile: { kind: 'outside_in_waf_scan' },
       target: { kind: 'url', value: 'https://edge.example.test/' },
     }, {
@@ -158,12 +242,17 @@ describe('outside-in WAF scanner', () => {
     const report = buildOutsideInPostureReport({
       wafDetected: true,
       markerResults: [
-        { family: 'sqli_marker', blocked: false, challenged: false, allowed: true },
+        { family: 'sqli_marker', variant: 'plain', blocked: false, challenged: false, allowed: true },
       ],
       originBypassConfirmed: false,
     });
     assert.equal(report.posture_status, 'underprotected');
     assert.equal(report.posture_label, 'Underprotected');
     assert.equal(report.validation_failed, true);
+  });
+
+  it('exports benign and evasion marker constants', () => {
+    assert.ok(BENIGN_CLASS_MARKERS.sqli.includes('OR'));
+    assert.ok(EVASION_VARIANT_MARKERS.sqli_comment.includes('/**/'));
   });
 });

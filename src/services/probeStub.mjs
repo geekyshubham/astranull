@@ -104,15 +104,18 @@ export function simulateProbeResult(check, target, overrideProfile) {
       note: 'Simulated WAF enforcement probe.',
     });
   } else if (probeProfileKind === 'outside_in_waf_scan') {
+    const blocked = external_result === 'blocked';
     Object.assign(baseMetadata, {
       probe_kind: 'outside_in_waf_scan',
-      waf_fingerprint_detected: external_result === 'blocked',
-      posture_label: external_result === 'blocked' ? 'Protected' : 'Underprotected',
-      posture_status: external_result === 'blocked' ? 'protected' : 'underprotected',
+      waf_fingerprint_detected: blocked,
+      posture_label: blocked ? 'Detected, not validated' : 'Underprotected',
+      posture_status: blocked ? 'unknown' : 'underprotected',
+      agent_corroboration_required: true,
+      evasion_bypass_suspected: false,
       marker_probes: [
-        { family: 'sqli_marker', blocked: external_result === 'blocked', allowed: external_result === 'connected' },
-        { family: 'xss_marker', blocked: external_result === 'blocked', allowed: external_result === 'connected' },
-        { family: 'path_traversal_marker', blocked: external_result === 'blocked', allowed: external_result === 'connected' },
+        { family: 'sqli_marker', variant: 'plain', blocked, allowed: !blocked },
+        { family: 'sqli_encoded_marker', variant: 'double_url_encoded', blocked, allowed: !blocked },
+        { family: 'content_type_confusion', variant: 'json_header_form_body', blocked, allowed: !blocked },
       ],
       note: 'Simulated outside-in WAF scanner.',
     });

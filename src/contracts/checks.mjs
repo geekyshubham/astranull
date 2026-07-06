@@ -46,7 +46,7 @@ export const MAX_REQUESTS_BY_PROBE_KIND = Object.freeze({
   cors_posture_probe: 1,
   bot_challenge_probe: 1,
   graphql_posture_probe: 1,
-  outside_in_waf_scan: 5,
+  outside_in_waf_scan: 10,
 });
 
 export function maxProbeRequestsForKind(kind) {
@@ -57,7 +57,7 @@ const ALLOWED_OPS_READINESS_SCENARIOS = new Set(['runbook_contacts', 'kill_switc
 
 const ALLOWED_PROBE_KINDS = new Set(ALLOWED_PROBE_PROFILE_KINDS);
 export const MAX_PROBE_PROFILE_TIMEOUT_MS = 5000;
-export const MAX_PROBE_PROFILE_REQUESTS = 5;
+export const MAX_PROBE_PROFILE_REQUESTS = 10;
 
 export const WAF_SAFE_PROBE_METADATA_KEYS = Object.freeze([
   'scenario_family',
@@ -89,6 +89,12 @@ const ALLOWED_WAF_COLLECT_KEYS = new Set([
   'server_header',
   'waf_product_hint',
   'tls_fingerprint_hint',
+  'marker_probes',
+  'posture_status',
+  'posture_label',
+  'origin_bypass_confirmed',
+  'evasion_bypass_suspected',
+  'agent_corroboration_required',
 ]);
 
 export const WAF_SAFE_CHECK_IDS = Object.freeze([
@@ -135,6 +141,10 @@ export const CAPABILITY_PROFILE_PASSTHROUGH_KEYS = Object.freeze([
   'graphql_path',
   'zone',
   'use_https',
+  'waf_required',
+  'expected_vendor_hint',
+  'require_agent_for_protected',
+  'agent_corroborated',
 ]);
 
 export function buildProbeProfile({
@@ -514,14 +524,15 @@ export const CHECK_CATALOG = [
     required_customer_setup: ['declared_waf_asset', 'customer_approves_waf_fingerprint_probe'],
     evidence_required: ['probe_result'],
     verdict_logic:
-      'Up to five bounded GET/HEAD probes fingerprint the edge, validate class markers are blocked, test declared origin bypass, and emit Protected/Underprotected/Bypass Risk posture.',
+      'Up to ten bounded GET/POST/HEAD probes fingerprint the edge, validate plain and evasion-class markers, test content-type confusion and origin bypass, and emit posture (Protected only with agent corroboration).',
     probe_profile: {
       kind: 'outside_in_waf_scan',
-      max_requests: 5,
+      max_requests: 10,
       timeout_ms: 5000,
       scenario_family: 'fingerprint',
       expected_action: 'block',
       nonce_hash_only: true,
+      require_agent_for_protected: true,
       collect: [
         'status_code',
         'waf_product_hint',
@@ -529,9 +540,11 @@ export const CHECK_CATALOG = [
         'posture_status',
         'posture_label',
         'origin_bypass_confirmed',
+        'evasion_bypass_suspected',
+        'agent_corroboration_required',
       ],
     },
-    safety_constraints: { max_events: 5, max_duration_seconds: 120, max_concurrent_runs_per_target_group: 1 },
+    safety_constraints: { max_events: 10, max_duration_seconds: 120, max_concurrent_runs_per_target_group: 1 },
     default_expected_behavior: 'must_block_before_origin',
     probe_simulation_profile: 'external_blocked',
   }),
