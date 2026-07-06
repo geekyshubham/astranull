@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import net from 'node:net';
 import { describe, it } from 'node:test';
+import { isLiveCapabilityProbeAuthorized } from '../../src/lib/capabilityProbeAuth.mjs';
 import {
   buildAxfrDnsMessage,
   encodeDnsQName,
   frameDnsTcpMessage,
-  parseDnsResponseHeader,
+} from '../../src/lib/dnsTcpWire.mjs';
+import {
   probeApiSurfaceScan,
   probeAxfrLeak,
   probeBotChallenge,
@@ -22,7 +24,6 @@ import {
   probeTlsAudit,
   probeWafEnforcement,
   executeCapabilityProbe,
-  isLiveCapabilityProbeAuthorized,
 } from '../../src/lib/capabilityProbes.mjs';
 import { getCheckById } from '../../src/contracts/checks.mjs';
 
@@ -168,50 +169,6 @@ describe('capability probes P0/P1', () => {
     });
     assert.equal(outcome.metadata.dnssec_missing, true);
     assert.equal(outcome.external_result, 'connected');
-  });
-
-  it('buildAxfrDnsMessage encodes QNAME and AXFR QTYPE without trailing garbage', () => {
-    const qname = encodeDnsQName('example.test');
-    assert.equal(qname.length, 14);
-    assert.equal(qname[0], 7);
-    assert.equal(qname.toString('ascii', 1, 8), 'example');
-    assert.equal(qname[8], 4);
-    assert.equal(qname.toString('ascii', 9, 13), 'test');
-    assert.equal(qname[13], 0);
-
-    const message = buildAxfrDnsMessage('example.test');
-    assert.equal(message.length, 12 + qname.length + 4);
-    assert.equal(message.readUInt16BE(qname.length + 12), 252);
-    assert.equal(message.readUInt16BE(qname.length + 14), 1);
-  });
-
-  it('frameDnsTcpMessage prefixes RFC 1035 TCP length', () => {
-    const message = buildAxfrDnsMessage('example.test');
-    const framed = frameDnsTcpMessage(message);
-    assert.equal(framed.readUInt16BE(0), message.length);
-    assert.deepEqual(framed.subarray(2), message);
-  });
-
-  it('parseDnsResponseHeader strips TCP prefix and reads REFUSED rcode', () => {
-    const dns = Buffer.alloc(12);
-    dns[3] = 0x05;
-    const framed = frameDnsTcpMessage(dns);
-    const parsed = parseDnsResponseHeader(framed);
-    assert.equal(parsed.rcode, 5);
-    assert.equal(parsed.answer_count, 0);
-    assert.equal(parsed.incomplete, false);
-    assert.equal(parsed.tcp_framed, true);
-  });
-
-  it('parseDnsResponseHeader marks partial TCP frames incomplete', () => {
-    const dns = Buffer.alloc(12);
-    dns[3] = 0x05;
-    const framed = frameDnsTcpMessage(dns);
-    const partial = framed.subarray(0, 6);
-    const parsed = parseDnsResponseHeader(partial);
-    assert.equal(parsed.incomplete, true);
-    assert.equal(parsed.tcp_framed, true);
-    assert.equal(parsed.rcode, null);
   });
 
   it('axfr leak probe integrates with a local TCP DNS responder', async () => {

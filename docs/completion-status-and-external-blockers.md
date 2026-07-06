@@ -17,12 +17,12 @@ All verified with `make verify` (lint ok; 2077 unit + 230 integration + 15 e2e p
 | **AG-018** external-only validation mode | `validation_mode` (`agent_assisted`/`external_only`) on target groups; `src/services/dnsOwnership.mjs` issues/verifies `_astranull-challenge.<domain>` TXT (injectable resolver) → `dns_verified`; `correlateExternalOnlyVerdict` + `finalizeVerdictIfReady` external-only branch (`confidence: external_only`, `placement: unverified`, `strengthen_hint: deploy_agent`, finalizes on external probe evidence alone); server DNS-ownership routes. | `tests/unit/target-groups-validation-mode.test.mjs`, `dns-ownership.test.mjs`, `correlation.test.mjs` |
 | **AG-017/AG-018 UI** | Target-group detail panel: validation-mode toggle, DNS TXT issue/verify, ownership-verification confirm; "Strengthen this verdict" CTA on external-only findings. | `web:typecheck` + `web:build` clean; additive diff (settings form preserved) |
 | **Safe-probe upgrades** | `dns.secondary_failover.safe`→`dns_failover_posture`; `tls.idle_connection_timeout.safe`→`tls_session` (node:tls, bounded handshake); `protocol.http2_stream_concurrency.safe`→`http2_settings` (node:http2 SETTINGS read). Injectable transports; simulation + worker dispatch. | `tests/unit/safe-network-probes.test.mjs`, `probe-worker.test.mjs` |
-| **P0/P1 capability probes** | `src/lib/capabilityProbes.mjs` — bounded live probes for origin leak, host/SNI bypass, firewall exposure, rate-limit, WAF enforcement, DNS posture (DNSSEC/AXFR/open-recursion/failover), TLS audit, cache abuse, API surface, CORS, bot challenge, GraphQL. Customer-declared targets only; caps enforced in catalog (`max_events`, per-kind request limits). Worker dispatches via `executeCapabilityProbe`; simulation stub recognizes all kinds. | `tests/unit/capability-probes.test.mjs`, `probe-worker.test.mjs` |
+| **P0/P1 capability probes** | `src/lib/capabilityProbes.mjs` plus `src/lib/dnsTcpWire.mjs` (explicit TCP framing) and `src/lib/capabilityProbeAuth.mjs` (signed-worker gate) — bounded live probes for origin leak, host/SNI bypass, firewall exposure, rate-limit, WAF enforcement, DNS posture (DNSSEC/AXFR/open-recursion/failover), TLS audit, cache abuse, API surface, CORS, bot challenge, GraphQL. Customer-declared targets only; caps enforced in catalog (`max_events`, per-kind request limits). Worker dispatches via `executeCapabilityProbe`; simulation stub recognizes all kinds. | `tests/unit/capability-probes.test.mjs`, `tests/unit/dns-tcp-wire.test.mjs`, `probe-worker.test.mjs`, `scripts/capture-probe-verification-evidence.mjs` |
 | **Doc sync** | `progress-detailed.md` VEC-003/012/013 corrected to live probe kinds + safe-probe upgrade status table; `docs/agent/09-deployment-modes-and-onboarding.md` Phase 1/3 boxes marked with honest qualifiers. | doc review |
 | **AG-017 Postgres parity** | Migration `0024_ownership_verifications.sql` + `db/schema.sql` (table + per-tenant RLS; `target_groups.validation_mode/ownership_status/dns_ownership`; `probe_jobs.ownership_verification_id`); `ownershipVerificationRepository.mjs` + service adapters (tenant-scoped; mirror in-memory signatures incl. signed `ownership_challenge` job dispatch); `dnsOwnership` PG service; coreCatalog target-group column persistence; runtime wiring. | `scripts/validate-db-schema.mjs` ok; `postgres-tenant-query-audit.mjs` 0 findings (table added to enforced tenant list); `tests/unit/postgres-ownership-verification-service-adapters.test.mjs` pass; guard tests (migration latest-version, repository keys, runtime harness) updated without weakening validation; `make verify` green |
 
 ### Safety judgment (bounded live probes vs metadata-only)
-Per `AGENTS.md` safe-by-default and no-IP-inventory-discovery — live probes run only on **customer-declared** targets via signed-worker jobs, with hard caps (e.g. 12 subdomain prefixes, 15 ports, single AXFR attempt, no flooding). `executeCapabilityProbe` fails closed unless the job was verified by the signed worker (`signedJobVerified`), carries a valid `job_signature`, or the caller supplies injectable I/O deps (unit tests / verification harness only):
+Per `AGENTS.md` safe-by-default and no-IP-inventory-discovery — live probes run only on **customer-declared** targets via signed-worker jobs, with hard caps (e.g. 12 subdomain prefixes, 15 ports, single AXFR attempt, no flooding). `capabilityProbeAuth.isLiveCapabilityProbeAuthorized` gates `executeCapabilityProbe`: authorized only when the signed worker verified the job (`signedJobVerified`), the job carries a valid `job_signature`, or the caller supplies injectable I/O deps (unit tests / `scripts/capture-probe-verification-evidence.mjs` harness):
 - `dns.zone_transfer_exposure.safe` → `dns_axfr_leak` — one TCP-53 AXFR attempt with RFC 1035 framing against the declared zone's first NS; refuses/leak metadata only; not zone enumeration.
 - `origin.leak_scan.safe` — bounded prefix scan on the declared apex only (12 fixed labels); not internet-wide subdomain discovery.
 - `l3.firewall_exposure_scan.safe` — TCP connect sweep on customer-declared host/IP and capped port list; not arbitrary network mapping.
@@ -83,26 +83,3 @@ These recur as `External:` under many `[x]` rows. They are operational/business 
 
 ### What would unblock section C
 Provisioned staging/prod infrastructure, real provider/partner contracts and credentials, an enterprise IdP tenant, KMS/HSM, a package-hosting + signing pipeline, and recorded legal/SOC/security signoffs — then attach the evidence via the existing `npm run release:*:evidence` CLIs and re-run `npm run release:gap-audit` / `release:external-verify`.
-
----
-
-## D. WAF posture UI parity vs Ionix (completed this pass)
-
-The Ionix comparison was mostly a **UI-exposure gap, not a capability gap** — the WAF backend was well ahead of the frontend. Wired the following existing backend capabilities into the UI (all verified: `web:typecheck` + `web:build` clean; scope + brand-contamination sweep clean per wave):
-
-| Ionix gap | Now wired (UI) | Source |
-|---|---|---|
-| Unified cross-vendor dashboard | Coverage-by-vendor / criticality / geography cards + vendor-consolidation on the WAF posture Overview tab | `/v1/waf/coverage/{vendors,criticality,geography,vendor-consolidation}` |
-| Subsidiary/acquisition rollup | Coverage-by-entity/subsidiary card | `/v1/waf/coverage/entities` |
-| Coverage trends | Coverage-trend list on Overview | `data.wafCoverage.trend` (already in `/v1/waf/coverage`) |
-| 50+ WAF product support | WAF product catalog viewer | `/v1/waf/products` |
-| Board/executive reporting | "WAF posture reports" card on Reports (executive_coverage, board_roadmap_brief, drift_audit, connector_health) exporting by kind | `/v1/waf/reports/:kind/export` |
-| Monitor-only + bypass detection | "WAF enforcement signals" card (monitor-only / not-blocking counts + drift reason-code breakdown) | derived from `data.wafDriftEvents` |
-| Drift UX (scan history) | Drift scan history card + client-side reason filter | new `GET /v1/waf/drift-scans/history` (added this pass, in-memory + Postgres parity + tests) |
-| Scheduled validation | Scheduled validation plans card | `/v1/waf/validation-plans/scheduled` |
-| Exception management | Dedicated exception register card | `/v1/waf/exceptions` |
-| Connector lifecycle / remediation | Already productized before this pass (Integrations page + remediation action-items) | — |
-
-**Remaining WAF UI follow-up (in-repo, buildable):** dedicated **baseline-approval UI**. `POST /v1/waf/baselines/:id/approve` exists, but there is no `/v1/waf/baselines` LIST endpoint and baselines are not loaded into `PortalData`; a register UI needs a new tenant-scoped list endpoint + lib loading first. Deferred rather than shipped half-wired.
-
-**P0/P1 probes note:** `src/lib/capabilityProbes.mjs` ships bounded live P0/P1 capability probes (see table above). They replace prior `metadata_marker` simulation for catalog checks listed in `tests/unit/capability-probes.test.mjs`. WAF drift UI work in this doc's Ionix table is separate from the probe pipeline.

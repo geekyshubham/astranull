@@ -7,18 +7,12 @@ import { Resolver } from 'node:dns/promises';
 import https from 'node:https';
 import net from 'node:net';
 import tls from 'node:tls';
-import { verifyProbeJobSignature } from './probeJobs.mjs';
-
-const INJECTABLE_IO_DEPS = Object.freeze([
-  'fetchFn',
-  'connectFn',
-  'httpsRequestFn',
-  'resolve4Fn',
-  'resolve6Fn',
-  'resolveFn',
-  'resolveNsFn',
-  'resolve4ExternalFn',
-]);
+import { isLiveCapabilityProbeAuthorized } from './capabilityProbeAuth.mjs';
+import {
+  buildAxfrDnsMessage,
+  frameDnsTcpMessage,
+  parseDnsResponseHeader,
+} from './dnsTcpWire.mjs';
 
 export const BOUNDED_SUBDOMAIN_PREFIXES = Object.freeze([
   'www', 'api', 'admin', 'dev', 'staging', 'test', 'old', 'legacy', 'direct', 'origin', 'cdn', 'internal',
@@ -495,98 +489,6 @@ export async function probeDnssecPosture(job, deps = {}) {
   };
 }
 
-export function encodeDnsQName(zone) {
-  const labels = String(zone).split('.').filter(Boolean);
-  const parts = [];
-  for (const label of labels) {
-    parts.push(Buffer.from([label.length]));
-    parts.push(Buffer.from(label, 'ascii'));
-  }
-  parts.push(Buffer.from([0]));
-  return Buffer.concat(parts);
-}
-
-/** Build a single AXFR DNS query message (UDP/TCP payload without length prefix). */
-export function buildAxfrDnsMessage(zone) {
-  const qname = encodeDnsQName(zone);
-  const header = Buffer.alloc(12);
-  header.writeUInt16BE(0x1234, 0);
-  header.writeUInt16BE(0x0100, 2); // standard query, recursion desired
-  header.writeUInt16BE(1, 4); // QDCOUNT = 1
-  const question = Buffer.alloc(qname.length + 4);
-  qname.copy(question, 0);
-  question.writeUInt16BE(252, qname.length); // QTYPE AXFR
-  question.writeUInt16BE(1, qname.length + 2); // QCLASS IN
-  return Buffer.concat([header, question]);
-}
-
-/** RFC 1035 §4.2.2 — prepend 16-bit message length for DNS-over-TCP. */
-export function frameDnsTcpMessage(message) {
-  const framed = Buffer.alloc(2 + message.length);
-  framed.writeUInt16BE(message.length, 0);
-  message.copy(framed, 2);
-  return framed;
-}
-
-/** Parse DNS header from a TCP DNS response (strips 2-byte length prefix when present). */
-export function parseDnsResponseHeader(chunk) {
-  const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk ?? []);
-  if (buffer.length < 12) {
-    if (buffer.length >= 2) {
-      const declaredLen = buffer.readUInt16BE(0);
-      if (declaredLen >= 12 && buffer.length < declaredLen + 2) {
-        return {
-          rcode: null,
-          answer_count: 0,
-          dns_message: buffer,
-          incomplete: true,
-          tcp_framed: true,
-        };
-      }
-    }
-    return {
-      rcode: null,
-      answer_count: 0,
-      dns_message: buffer,
-      incomplete: true,
-      tcp_framed: false,
-    };
-  }
-
-  const declaredLen = buffer.readUInt16BE(0);
-  const tcpFramed = declaredLen >= 12 && buffer.length >= declaredLen + 2;
-  if (tcpFramed && buffer.length < declaredLen + 2) {
-    return {
-      rcode: null,
-      answer_count: 0,
-      dns_message: buffer,
-      incomplete: true,
-      tcp_framed: true,
-    };
-  }
-
-  const dnsMessage = tcpFramed ? buffer.subarray(2, 2 + declaredLen) : buffer;
-  if (dnsMessage.length < 12) {
-    return {
-      rcode: null,
-      answer_count: 0,
-      dns_message: dnsMessage,
-      incomplete: true,
-      tcp_framed: tcpFramed,
-    };
-  }
-
-  const rcode = dnsMessage[3] & 0x0f;
-  const answerCount = dnsMessage.readUInt16BE(6);
-  return {
-    rcode,
-    answer_count: answerCount,
-    dns_message: dnsMessage,
-    incomplete: false,
-    tcp_framed: tcpFramed,
-  };
-}
-
 /**
  * P1 — AXFR leak: single TCP-53 AXFR attempt against first NS.
  */
@@ -630,7 +532,7 @@ export async function probeAxfrLeak(job, deps = {}) {
     socket.on('data', (chunk) => {
       if (settled) return;
       responseBuffer = Buffer.concat([responseBuffer, chunk]);
-      const parsed = parseDnsResponseHeader(responseBuffer);
+      const parsed = parseDnsResponseHeader(responseBuffer, { transport: 'tcp' });
       if (parsed.incomplete) return;
       settled = true;
       clearTimeout(timer);
@@ -1087,19 +989,6 @@ export const CAPABILITY_PROBE_DISPATCH = Object.freeze({
   bot_challenge_probe: probeBotChallenge,
   graphql_posture_probe: probeGraphqlPosture,
 });
-
-export function hasInjectableIoDeps(deps = {}) {
-  return INJECTABLE_IO_DEPS.some((key) => typeof deps[key] === 'function');
-}
-
-/** Fail closed unless the caller is a signed worker, a signed job, or an injectable test consumer. */
-export function isLiveCapabilityProbeAuthorized(job, deps = {}) {
-  if (deps.skipLiveProbeGuard === true) return true;
-  if (deps.signedJobVerified === true) return true;
-  if (hasInjectableIoDeps(deps)) return true;
-  if (deps.probeWorkerSecret && verifyProbeJobSignature(job, deps.probeWorkerSecret)) return true;
-  return false;
-}
 
 export async function executeCapabilityProbe(job, deps = {}) {
   const kind = job.probe_profile?.kind;
