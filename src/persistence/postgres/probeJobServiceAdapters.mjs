@@ -1,5 +1,6 @@
 import { newId } from '../../lib/ids.mjs';
 import { validateProbeResultBody } from '../../lib/probeResultValidation.mjs';
+import { enrichOutsideInWafProbeMetadata } from '../../lib/outsideInWafAgentEvidence.mjs';
 import { enrichProbeMetadataWithWafCatalog } from '../../lib/wafProductCatalog.mjs';
 
 /** @type {readonly string[]} */
@@ -150,7 +151,7 @@ export function createPostgresProbeJobServices(repositories, options = {}) {
         await probeJobs.claimPendingJobForWorker(ctx, job.id, workerId, nowIso);
       }
 
-      const probeMetadata = enrichProbeMetadataWithWafCatalog(
+      let probeMetadata = enrichProbeMetadataWithWafCatalog(
         {
           ...workerMetadata,
           external_result: externalResult,
@@ -159,6 +160,17 @@ export function createPostgresProbeJobServices(repositories, options = {}) {
         },
         job.check_id,
       );
+
+      if (job.probe_profile?.kind === 'outside_in_waf_scan') {
+        const agentObservations = await validationEvidence.listRunEvents(evidenceCtx, run.id, {
+          signalType: 'agent_observation',
+          limit: 500,
+        });
+        probeMetadata = enrichOutsideInWafProbeMetadata(probeMetadata, {
+          agents: Array.isArray(agentObservations) ? agentObservations : [],
+          nonceHash: job.nonce_hash,
+        });
+      }
 
       const probeEvent = await validationEvidence.appendProbeResultEventIdempotent(evidenceCtx, {
         id: newIdFn('event'),

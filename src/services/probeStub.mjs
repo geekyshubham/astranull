@@ -116,6 +116,7 @@ export function simulateProbeResult(check, target, overrideProfile) {
         { family: 'sqli_marker', variant: 'plain', blocked, allowed: !blocked },
         { family: 'sqli_encoded_marker', variant: 'double_url_encoded', blocked, allowed: !blocked },
         { family: 'content_type_confusion', variant: 'json_header_form_body', blocked, allowed: !blocked },
+        { family: 'multipart_confusion', variant: 'multipart_form_field', blocked, allowed: !blocked },
       ],
       note: 'Simulated outside-in WAF scanner.',
     });

@@ -40,6 +40,7 @@ export const OUTSIDE_IN_SCAN_PHASES = Object.freeze([
   'xss_encoded_marker',
   'no_user_agent',
   'content_type_confusion',
+  'multipart_confusion',
   'origin_bypass',
 ]);
 
@@ -207,6 +208,7 @@ function detectEvasionBypass(markerResults) {
     'sqli_comment_marker',
     'xss_encoded_marker',
     'content_type_confusion',
+    'multipart_confusion',
   ];
   const plainRows = markerResults.filter((row) => plainFamilies.includes(row.family));
   const plainBlocked = plainRows.length > 0 && plainRows.every((row) => row.blocked);
@@ -220,6 +222,7 @@ function detectEvasionBypass(markerResults) {
  * @param {object} input
  * @param {boolean} [input.agentCorroborated=false]
  * @param {boolean} [input.requireAgentForProtected=true]
+ * @param {string} [input.domXssValidation='agent_required']
  */
 export function buildOutsideInPostureReport({
   wafDetected = false,
@@ -231,6 +234,7 @@ export function buildOutsideInPostureReport({
   agentCorroborated = false,
   requireAgentForProtected = true,
   evasionBypassSuspected = false,
+  domXssValidation = 'agent_required',
 } = {}) {
   const anyMarkerAllowed = markerResults.some((m) => m.allowed === true);
   const anyMarkerBlocked = markerResults.some((m) => m.blocked === true);
@@ -300,7 +304,7 @@ export function buildOutsideInPostureReport({
     agent_corroborated: agentCorroborated,
     agent_corroboration_required: requireAgentForProtected,
     evasion_bypass_suspected: evasionBypassSuspected,
-    dom_xss_validation: 'agent_required',
+    dom_xss_validation: domXssValidation,
     origin_bypass_confirmed: originBypassConfirmed,
     marker_summary: {
       probes_sent: markerResults.length,
@@ -310,6 +314,18 @@ export function buildOutsideInPostureReport({
       evasion_probes_sent: markerResults.filter((m) => String(m.variant ?? '') !== 'plain').length,
     },
   };
+}
+
+function buildMultipartConfusionBody(marker, boundary = 'astranullBoundary7f3a') {
+  const fieldName = randomParamName();
+  return [
+    `--${boundary}`,
+    `Content-Disposition: form-data; name="${fieldName}"`,
+    '',
+    marker,
+    `--${boundary}--`,
+    '',
+  ].join('\r\n');
 }
 
 function buildUrl(baseUrl, { pathSuffix = '', params = {}, rawParams = {} } = {}) {
@@ -369,6 +385,7 @@ export function buildOutsideInScanPlan(budget, { hasDirectIp = false } = {}) {
     { phase: 'sqli_case_marker', method: 'GET' },
     { phase: 'sqli_comment_marker', method: 'GET' },
     { phase: 'content_type_confusion', method: 'POST' },
+    { phase: 'multipart_confusion', method: 'POST' },
     { phase: 'xss_marker', method: 'GET' },
     { phase: 'xss_encoded_marker', method: 'GET' },
     { phase: 'no_user_agent', method: 'GET' },
@@ -396,6 +413,7 @@ export function buildOutsideInScanPlan(budget, { hasDirectIp = false } = {}) {
  *   customerVendorHint?: string,
  *   agentCorroborated?: boolean,
  *   requireAgentForProtected?: boolean,
+ *   domXssValidation?: string,
  *   fetchFn?: typeof fetch,
  *   originBypassFn?: (args: object) => Promise<{ res: object|null, error: Error|null }>,
  * }} options
@@ -605,6 +623,34 @@ export async function runOutsideInWafScan(options = {}) {
     });
   }
 
+  if (plannedPhases.has('multipart_confusion') && requestsSent < budget) {
+    requestsSent += 1;
+    const boundary = 'astranullBoundary7f3a';
+    const multipartBody = buildMultipartConfusionBody(BENIGN_CLASS_MARKERS.sqli, boundary);
+    const { res, bodyText, error } = await boundedRequest(url, {
+      method: 'POST',
+      headers: {
+        ...DEFAULT_BROWSER_HEADERS,
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': String(multipartBody.length),
+      },
+      body: multipartBody,
+    }, timeoutMs, deps);
+    const snapshot = error
+      ? { ...responseSnapshot(null), error_class: error.name ?? error.code ?? 'probe_failed' }
+      : responseSnapshot(res, bodyText);
+    phaseLog.push({ phase: 'multipart_confusion', status_code: snapshot.status_code });
+    const multipartEval = snapshot.status_code >= 200 && snapshot.status_code < 300
+      ? { blocked: false, challenged: false, allowed: true }
+      : isBlockedOrChallenged(snapshot, baseline);
+    recordMarkerResult(markerResults, {
+      family: 'multipart_confusion',
+      variant: 'multipart_form_field',
+      ...multipartEval,
+      status_code: snapshot.status_code,
+    });
+  }
+
   let originBypassConfirmed = false;
   let originBypassStatus = null;
   if (plannedPhases.has('origin_bypass') && directIp && hostname
@@ -641,6 +687,7 @@ export async function runOutsideInWafScan(options = {}) {
     agentCorroborated: options.agentCorroborated === true,
     requireAgentForProtected: options.requireAgentForProtected !== false,
     evasionBypassSuspected,
+    domXssValidation: options.domXssValidation ?? 'agent_required',
   });
 
   const durationMs = Date.now() - started;

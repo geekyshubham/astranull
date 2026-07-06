@@ -52,6 +52,8 @@ describe('outside-in WAF scanner', () => {
       'sqli_encoded_marker',
       'sqli_case_marker',
     ]);
+    const fullPlan = buildOutsideInScanPlan(10, { hasDirectIp: false });
+    assert.ok(fullPlan.some((entry) => entry.phase === 'multipart_confusion'));
   });
 
   it('detects generic WAF via status drift between baseline and marker probe', () => {
@@ -135,14 +137,16 @@ describe('outside-in WAF scanner', () => {
     assert.equal(outcome.validation_failed, true);
   });
 
-  it('runs content-type confusion POST within scan plan', async () => {
+  it('runs content-type and multipart confusion POST probes within scan plan', async () => {
     const methods = [];
+    const contentTypes = [];
     const outcome = await runOutsideInWafScan({
       url: 'https://api.example.test/',
       budget: 10,
       timeoutMs: 1000,
       fetchFn: async (_url, init) => {
         methods.push(init?.method ?? 'GET');
+        contentTypes.push(init?.headers?.['Content-Type'] ?? null);
         return mockResponse(403, { server: 'waf', __body: 'blocked' });
       },
     });
@@ -150,6 +154,10 @@ describe('outside-in WAF scanner', () => {
     const contentTypeProbe = outcome.marker_probes.find((probe) => probe.family === 'content_type_confusion');
     assert.ok(contentTypeProbe);
     assert.equal(contentTypeProbe.blocked, true);
+    const multipartProbe = outcome.marker_probes.find((probe) => probe.family === 'multipart_confusion');
+    assert.ok(multipartProbe);
+    assert.equal(multipartProbe.blocked, true);
+    assert.ok(contentTypes.some((value) => String(value).includes('multipart/form-data')));
   });
 
   it('flags content-type confusion gap when POST marker is allowed through', async () => {
@@ -200,6 +208,31 @@ describe('outside-in WAF scanner', () => {
 
     assert.equal(outcome.origin_bypass_confirmed, true);
     assert.equal(outcome.posture_label, 'Bypass Risk');
+  });
+
+  it('probeOutsideInWafScan applies bound agent corroboration after scan', async () => {
+    const outcome = await probeOutsideInWafScan({
+      check_id: 'waf.fingerprint.safe',
+      nonce_hash: 'sha256:agent-proof',
+      constraints: { max_requests: 10, timeout_ms: 1000 },
+      probe_profile: { kind: 'outside_in_waf_scan' },
+      target: { kind: 'url', value: 'https://edge.example.test/' },
+    }, {
+      agentObservations: [{
+        nonce_hash: 'sha256:agent-proof',
+        metadata: { waf_marker: true, observed_action: 'block', waf_blocked: true },
+      }],
+      fetchFn: async (url, init) => {
+        const isBaseline = url === 'https://edge.example.test/' && init?.headers?.['User-Agent'] && init?.method !== 'POST';
+        if (!isBaseline) {
+          return mockResponse(403, { server: 'cloudflare', 'cf-ray': '1', __body: 'Cloudflare' });
+        }
+        return mockResponse(200, { server: 'cloudflare', 'cf-ray': '1' });
+      },
+    });
+
+    assert.equal(outcome.metadata.agent_corroborated, true);
+    assert.equal(outcome.metadata.posture_label, 'Protected');
   });
 
   it('probeOutsideInWafScan integrates with capability probe dispatch', async () => {

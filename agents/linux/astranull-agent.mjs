@@ -1490,8 +1490,26 @@ function applySafeWafMetadataFields(record, out) {
   if (protectedPath !== null) out.protected_path = protectedPath;
 }
 
+const OUTSIDE_IN_XSS_MARKER_FRAGMENT = 'astranull-xss-probe';
+
+export function extractDomXssCanaryHintsFromRequest(req) {
+  const requestUrl = String(req?.url ?? '');
+  if (!requestUrl.includes(OUTSIDE_IN_XSS_MARKER_FRAGMENT)) {
+    return {};
+  }
+  return {
+    dom_xss_probe: true,
+    observation_type: 'dom_xss_canary',
+    scenario_family: 'xss_marker',
+    waf_marker: true,
+    marker_reached_origin: true,
+  };
+}
+
 export function extractWafCanaryHintsFromRequest(req) {
-  const hints = {};
+  const hints = {
+    ...extractDomXssCanaryHintsFromRequest(req),
+  };
   for (const [headerName, field] of Object.entries(WAF_CANARY_HINT_HEADERS)) {
     const raw = req.headers[headerName];
     if (raw === undefined || raw === null || raw === '') continue;

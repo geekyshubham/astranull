@@ -10,6 +10,7 @@ import {
   sanitizeWorkerProbeMetadata,
   validateProbeResultBody,
 } from '../lib/probeResultValidation.mjs';
+import { enrichOutsideInWafProbeMetadata } from '../lib/outsideInWafAgentEvidence.mjs';
 import { enrichProbeMetadataWithWafCatalog } from '../lib/wafProductCatalog.mjs';
 import { getStore, persistStore } from '../store.mjs';
 import { recordEvidence } from './evidence.mjs';
@@ -389,7 +390,7 @@ export function ingestProbeResult(workerCtx, jobId, body, runtimeConfig) {
     job.leased_by = workerCtx.workerId;
   }
 
-  const probeMetadata = enrichProbeMetadataWithWafCatalog(
+  let probeMetadata = enrichProbeMetadataWithWafCatalog(
     {
       ...workerMetadata,
       external_result: externalResult,
@@ -398,6 +399,16 @@ export function ingestProbeResult(workerCtx, jobId, body, runtimeConfig) {
     },
     job.check_id,
   );
+
+  if (job.probe_profile?.kind === 'outside_in_waf_scan') {
+    const agentObservations = store.events.filter(
+      (event) => event.test_run_id === run.id && event.signal_type === 'agent_observation',
+    );
+    probeMetadata = enrichOutsideInWafProbeMetadata(probeMetadata, {
+      agents: agentObservations,
+      nonceHash: job.nonce_hash,
+    });
+  }
 
   const probeEvent = {
     id: newId('event'),

@@ -14,6 +14,10 @@ import {
   resolveProbeRequestBudget,
 } from './probeRequestBudget.mjs';
 import { runDnsTcpAxfrQuery } from './dnsTcpAxfrSession.mjs';
+import {
+  enrichOutsideInWafProbeMetadata,
+  resolveDomXssValidation,
+} from './outsideInWafAgentEvidence.mjs';
 import { runOutsideInWafScan } from './outsideInWafScanner.mjs';
 import { enrichProbeMetadataWithWafCatalog } from './wafProductCatalog.mjs';
 
@@ -440,6 +444,10 @@ export async function probeOutsideInWafScan(job, deps = {}) {
   const timeoutMs = job.constraints?.timeout_ms ?? 5000;
   const started = Date.now();
 
+  const agentObservations = Array.isArray(deps.agentObservations) ? deps.agentObservations : [];
+  const nonceHash = job.nonce_hash ?? null;
+  const domXssValidation = resolveDomXssValidation({ agents: agentObservations, nonceHash });
+
   const scan = await runOutsideInWafScan({
     url,
     hostname,
@@ -451,6 +459,7 @@ export async function probeOutsideInWafScan(job, deps = {}) {
     agentCorroborated: job.probe_profile?.agent_corroborated === true
       || job.target?.metadata?.agent_corroborated === true,
     requireAgentForProtected: job.probe_profile?.require_agent_for_protected !== false,
+    domXssValidation,
     fetchFn: deps.fetchFn,
     originBypassFn: directIp && hostname
       ? async ({ directIp: ip, hostname: host, timeoutMs: tmo, deps: innerDeps }) => {
@@ -491,16 +500,18 @@ export async function probeOutsideInWafScan(job, deps = {}) {
         ? 'blocked'
         : 'connected';
 
+  const enrichedScan = enrichOutsideInWafProbeMetadata(
+    withKind(job, kind, {
+      duration_ms: durationMs,
+      scenario_family: 'fingerprint',
+      ...scan,
+    }),
+    { agents: agentObservations, nonceHash },
+  );
+
   return {
     external_result: external,
-    metadata: enrichProbeMetadataWithWafCatalog(
-      withKind(job, kind, {
-        duration_ms: durationMs,
-        scenario_family: 'fingerprint',
-        ...scan,
-      }),
-      job.check_id,
-    ),
+    metadata: enrichProbeMetadataWithWafCatalog(enrichedScan, job.check_id),
     requests_sent: scan.requests_sent ?? 0,
     duration_ms: durationMs,
   };
