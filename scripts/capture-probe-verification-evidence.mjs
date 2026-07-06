@@ -2,6 +2,9 @@
 /**
  * Runs verification-plan steps 1–6 for P0/P1 capability probes and writes artifacts to SCRATCH.
  * Usage: node scripts/capture-probe-verification-evidence.mjs [--scratch /path/to/dir]
+ *
+ * Set ASTRANULL_SKIP_PUBLIC_DNS=1 only in sandboxed environments without outbound DNS;
+ * the script fails closed when public AXFR live I/O cannot run.
  */
 
 import { spawnSync } from 'node:child_process';
@@ -84,27 +87,38 @@ for (let i=0;i<2;i++) {
   'probe-launch.json',
 );
 
-// Step 5 — unaided worker dispatch per plan (no injectable deps).
+// Step 5 — signed-worker job auth + real DNS I/O (no fetch/connect/resolve injectables).
+const WORKER_SECRET = 'd'.repeat(32);
 runNodeEval(
   `import { executeProbeForJob } from './workers/probe-worker.mjs';
-const outcome=await executeProbeForJob({
+import { signProbeJob } from './src/lib/probeJobs.mjs';
+const secret=${JSON.stringify(WORKER_SECRET)};
+const job={
+  id:'pjob_step5',
+  tenant_id:'ten_step5',
+  test_run_id:'run_step5',
+  check_id:'origin.leak_scan.safe',
+  vector_family:'origin',
+  nonce_hash:'step5_nonce_hash',
   probe_profile:{kind:'origin_leak_scan',max_requests:14,timeout_ms:500},
   target:{kind:'fqdn',value:'nonexistent.invalid'},
   constraints:{timeout_ms:500,max_requests:14},
-  check_id:'origin.leak_scan.safe',
-  vector_family:'origin',
-});
+};
+job.job_signature=signProbeJob(job,secret);
+const outcome=await executeProbeForJob(job,{probeWorkerSecret:secret});
 console.log(JSON.stringify(outcome));`,
   'worker-dispatch.log',
 );
 
-// Supplemental — unaided public DNS AXFR on real nameservers (signed worker auth only).
-const publicLive = run(
-  'node',
-  ['--test', 'tests/integration/capability-probes-live-dns.test.mjs'],
-  'axfr-public-live.log',
-  { allowFail: process.env.ASTRANULL_SKIP_PUBLIC_DNS === '1' },
-);
+// Required live I/O — public AXFR uses shipped resolveNs/net.connect (job_signature auth only).
+if (process.env.ASTRANULL_SKIP_PUBLIC_DNS === '1') {
+  writeFileSync(
+    join(scratch, 'axfr-public-live.log'),
+    'SKIPPED: ASTRANULL_SKIP_PUBLIC_DNS=1 — public AXFR live I/O not captured in this environment.\n',
+  );
+  throw new Error('public AXFR live I/O required; unset ASTRANULL_SKIP_PUBLIC_DNS or run with network');
+}
+run('node', ['--test', 'tests/integration/capability-probes-live-dns.test.mjs'], 'axfr-public-live.log');
 
 // Step 6
 const catalogIds = [
@@ -125,20 +139,37 @@ const catalogLines = catalogIds.map((id) => {
 });
 writeFileSync(join(scratch, 'catalog-kinds.log'), `${catalogLines.join('\n')}\n`);
 
+const workerDispatch = spawnSync(
+  'node',
+  ['--input-type=module', '-e', `import { readFileSync } from 'node:fs';
+const line=readFileSync(${JSON.stringify(join(scratch, 'worker-dispatch.log'))},'utf8').trim();
+const outcome=JSON.parse(line);
+if (outcome.metadata?.probe_kind!=='origin_leak_scan') throw new Error('bad probe_kind');
+if (outcome.metadata?.error_class==='unsupported_check') throw new Error('unsupported_check');
+if (outcome.metadata?.error_class==='live_probe_requires_signed_worker') throw new Error('guard blocked step5');
+if (!('apex_domain' in (outcome.metadata??{}))) throw new Error('expected full origin_leak_scan metadata');
+console.log('step5_ok', outcome.metadata.probe_kind, outcome.requests_sent);`],
+  { cwd: repoRoot, encoding: 'utf8' },
+);
+writeFileSync(join(scratch, 'step5-assert.log'), `${workerDispatch.stdout}${workerDispatch.stderr}`);
+if (workerDispatch.status !== 0) {
+  throw new Error(`step 5 outcome validation failed; see step5-assert.log`);
+}
+
 const evidenceNotes = `# Probe verification evidence notes
 
 ## Plan steps (mechanical)
-- **Step 2** \`capability-probes.log\`: \`node --test tests/unit/capability-probes.test.mjs\` (mocked/injectable unit coverage).
-- **Step 3** \`full-suite.log\`: \`npm test\` full regression.
-- **Step 4** \`probe-launch.json\`: plan one-liner with injectable \`fetchFn\` (authorized test consumer).
-- **Step 5** \`worker-dispatch.log\`: unaided \`executeProbeForJob\` — no injectable deps; guard returns \`live_probe_requires_signed_worker\` but \`probe_kind\` is \`origin_leak_scan\` (not \`unsupported_check\`).
+- **Step 2** \`capability-probes.log\`: \`node --test tests/unit/capability-probes.test.mjs\`.
+- **Step 3** \`full-suite.log\`: \`npm test\` (includes integration public DNS when network available).
+- **Step 4** \`probe-launch.json\`: plan one-liner with injectable \`fetchFn\`.
+- **Step 5** \`worker-dispatch.log\`: \`executeProbeForJob\` with HMAC-signed job + \`probeWorkerSecret\` only — real DNS I/O on \`nonexistent.invalid\`, full \`origin_leak_scan\` metadata (not guard simulation).
 - **Step 6** \`catalog-kinds.log\`: P0/P1 catalog IDs map to live probe kinds.
 
-## Supplemental live I/O
-- **axfr-public-live.log**: \`tests/integration/capability-probes-live-dns.test.mjs\` — real \`dns.resolveNs\` + \`net.connect\` to example.com NS; only \`signedJobVerified\` auth (no fetch/connect/resolve injectables). Status: ${publicLive.status === 0 ? 'passed' : `skipped/failed (exit ${publicLive.status})`}.
-- **dns-tcp-wire.log**: explicit \`transport:'tcp'\` framing unit tests (includes UDP non-strip case).
+## Live I/O (required for evidence capture)
+- **axfr-public-live.log**: \`tests/integration/capability-probes-live-dns.test.mjs\` — real \`dns.resolveNs\` + \`net.connect\` to example.com NS; \`job_signature\` auth only.
+- **dns-tcp-wire.log**: \`accumulateDnsTcpResponse\` split-chunk framing (wire module; probe delegates accumulation).
 
-Set \`ASTRANULL_SKIP_PUBLIC_DNS=1\` to skip public DNS integration in CI without network.
+Evidence capture fails closed when \`ASTRANULL_SKIP_PUBLIC_DNS=1\`.
 `;
 writeFileSync(join(scratch, 'evidence-notes.md'), evidenceNotes);
 

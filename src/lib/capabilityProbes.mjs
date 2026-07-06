@@ -9,9 +9,9 @@ import net from 'node:net';
 import tls from 'node:tls';
 import { isLiveCapabilityProbeAuthorized } from './capabilityProbeAuth.mjs';
 import {
+  accumulateDnsTcpResponse,
   buildAxfrDnsMessage,
   frameDnsTcpMessage,
-  parseDnsResponseHeader,
 } from './dnsTcpWire.mjs';
 
 export const BOUNDED_SUBDOMAIN_PREFIXES = Object.freeze([
@@ -531,13 +531,13 @@ export async function probeAxfrLeak(job, deps = {}) {
     });
     socket.on('data', (chunk) => {
       if (settled) return;
-      responseBuffer = Buffer.concat([responseBuffer, chunk]);
-      const parsed = parseDnsResponseHeader(responseBuffer, { transport: 'tcp' });
-      if (parsed.incomplete) return;
+      const accumulated = accumulateDnsTcpResponse(responseBuffer, chunk, { transport: 'tcp' });
+      responseBuffer = accumulated.buffer;
+      if (!accumulated.complete) return;
       settled = true;
       clearTimeout(timer);
       socket.destroy();
-      const { rcode, answer_count: answerCount } = parsed;
+      const { rcode, answer_count: answerCount } = accumulated.parsed;
       if (rcode === 0 && answerCount > 0) {
         resolve({ axfr_leak: true, rcode, answer_count: answerCount });
       } else {

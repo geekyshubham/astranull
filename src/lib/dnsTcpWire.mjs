@@ -110,3 +110,15 @@ export function parseDnsResponseHeader(chunk, options = {}) {
     tcp_framed: false,
   };
 }
+
+/**
+ * Append a TCP DNS response chunk and parse when the frame is complete.
+ * @param {Buffer} responseBuffer accumulated bytes so far
+ * @param {Buffer} chunk newly received bytes
+ * @param {{ transport?: 'tcp' | 'udp' }} [options]
+ */
+export function accumulateDnsTcpResponse(responseBuffer, chunk, options = { transport: 'tcp' }) {
+  const buffer = Buffer.concat([responseBuffer, chunk]);
+  const parsed = parseDnsResponseHeader(buffer, options);
+  return { buffer, parsed, complete: parsed.incomplete !== true };
+}

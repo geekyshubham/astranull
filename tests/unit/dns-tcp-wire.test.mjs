@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
+  accumulateDnsTcpResponse,
   buildAxfrDnsMessage,
   encodeDnsQName,
   frameDnsTcpMessage,
@@ -71,5 +72,17 @@ describe('dnsTcpWire', () => {
     const framed = frameDnsTcpMessage(message);
     assert.equal(framed.readUInt16BE(0), message.length);
     assert.deepEqual(framed.subarray(2), message);
+  });
+
+  it('accumulateDnsTcpResponse completes only after split chunks arrive', () => {
+    const framed = frameDnsTcpMessage(refusedDnsMessage(5));
+    const first = accumulateDnsTcpResponse(Buffer.alloc(0), framed.subarray(0, 4));
+    assert.equal(first.complete, false);
+    assert.equal(first.parsed.incomplete, true);
+
+    const second = accumulateDnsTcpResponse(first.buffer, framed.subarray(4));
+    assert.equal(second.complete, true);
+    assert.equal(second.parsed.rcode, 5);
+    assert.equal(second.parsed.answer_count, 0);
   });
 });
