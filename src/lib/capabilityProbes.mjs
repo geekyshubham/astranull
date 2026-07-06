@@ -483,25 +483,48 @@ export async function probeDnssecPosture(job, deps = {}) {
   };
 }
 
-function buildAxfrQuery(zone) {
-  const labels = zone.split('.').filter(Boolean);
-  const qname = Buffer.alloc(labels.reduce((n, l) => n + l.length + 1, 1));
-  let offset = 0;
+export function encodeDnsQName(zone) {
+  const labels = String(zone).split('.').filter(Boolean);
+  const parts = [];
   for (const label of labels) {
-    qname[offset] = label.length;
-    offset += 1;
-    qname.write(label, offset, 'ascii');
-    offset += label.length;
+    parts.push(Buffer.from([label.length]));
+    parts.push(Buffer.from(label, 'ascii'));
   }
+  parts.push(Buffer.from([0]));
+  return Buffer.concat(parts);
+}
+
+/** Build a single AXFR DNS query message (UDP/TCP payload without length prefix). */
+export function buildAxfrDnsMessage(zone) {
+  const qname = encodeDnsQName(zone);
   const header = Buffer.alloc(12);
   header.writeUInt16BE(0x1234, 0);
-  header.writeUInt16BE(0x0100, 2);
-  header.writeUInt16BE(1, 4);
-  const question = Buffer.alloc(qname.length + 5);
+  header.writeUInt16BE(0x0100, 2); // standard query, recursion desired
+  header.writeUInt16BE(1, 4); // QDCOUNT = 1
+  const question = Buffer.alloc(qname.length + 4);
   qname.copy(question, 0);
-  question.writeUInt16BE(252, qname.length);
-  question.writeUInt16BE(1, qname.length + 2);
+  question.writeUInt16BE(252, qname.length); // QTYPE AXFR
+  question.writeUInt16BE(1, qname.length + 2); // QCLASS IN
   return Buffer.concat([header, question]);
+}
+
+/** RFC 1035 §4.2.2 — prepend 16-bit message length for DNS-over-TCP. */
+export function frameDnsTcpMessage(message) {
+  const framed = Buffer.alloc(2 + message.length);
+  framed.writeUInt16BE(message.length, 0);
+  message.copy(framed, 2);
+  return framed;
+}
+
+/** Parse DNS header from a TCP DNS response (strips 2-byte length prefix when present). */
+export function parseDnsResponseHeader(chunk) {
+  const hasTcpPrefix = chunk.length >= 14;
+  const dnsMessage = hasTcpPrefix && chunk.readUInt16BE(0) === chunk.length - 2
+    ? chunk.subarray(2)
+    : chunk;
+  const rcode = (dnsMessage[3] ?? 0) & 0x0f;
+  const answerCount = dnsMessage.length >= 8 ? dnsMessage.readUInt16BE(6) : 0;
+  return { rcode, answer_count: answerCount, dns_message: dnsMessage };
 }
 
 /**
@@ -540,15 +563,14 @@ export async function probeAxfrLeak(job, deps = {}) {
     }, timeoutMs);
 
     socket.once('connect', () => {
-      socket.write(buildAxfrQuery(zone));
+      socket.write(frameDnsTcpMessage(buildAxfrDnsMessage(zone)));
     });
     socket.once('data', (chunk) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       socket.destroy();
-      const rcode = (chunk[3] ?? 0) & 0x0f;
-      const answerCount = chunk.length >= 8 ? chunk.readUInt16BE(6) : 0;
+      const { rcode, answer_count: answerCount } = parseDnsResponseHeader(chunk);
       if (rcode === 0 && answerCount > 0) {
         resolve({ axfr_leak: true, rcode, answer_count: answerCount });
       } else {

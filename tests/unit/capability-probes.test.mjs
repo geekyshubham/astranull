@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
+  buildAxfrDnsMessage,
+  encodeDnsQName,
+  frameDnsTcpMessage,
+  parseDnsResponseHeader,
   probeApiSurfaceScan,
   probeAxfrLeak,
   probeBotChallenge,
@@ -164,11 +168,42 @@ describe('capability probes P0/P1', () => {
     assert.equal(outcome.external_result, 'connected');
   });
 
-  it('axfr leak probe treats REFUSED rcode as blocked', async () => {
-    const refusedHeader = Buffer.alloc(12);
-    refusedHeader.writeUInt16BE(0, 0);
-    refusedHeader[3] = 0x05;
-    refusedHeader.writeUInt16BE(0, 6);
+  it('buildAxfrDnsMessage encodes QNAME and AXFR QTYPE without trailing garbage', () => {
+    const qname = encodeDnsQName('example.test');
+    assert.equal(qname.length, 14);
+    assert.equal(qname[0], 7);
+    assert.equal(qname.toString('ascii', 1, 8), 'example');
+    assert.equal(qname[8], 4);
+    assert.equal(qname.toString('ascii', 9, 13), 'test');
+    assert.equal(qname[13], 0);
+
+    const message = buildAxfrDnsMessage('example.test');
+    assert.equal(message.length, 12 + qname.length + 4);
+    assert.equal(message.readUInt16BE(qname.length + 12), 252);
+    assert.equal(message.readUInt16BE(qname.length + 14), 1);
+  });
+
+  it('frameDnsTcpMessage prefixes RFC 1035 TCP length', () => {
+    const message = buildAxfrDnsMessage('example.test');
+    const framed = frameDnsTcpMessage(message);
+    assert.equal(framed.readUInt16BE(0), message.length);
+    assert.deepEqual(framed.subarray(2), message);
+  });
+
+  it('parseDnsResponseHeader strips TCP prefix and reads REFUSED rcode', () => {
+    const dns = Buffer.alloc(12);
+    dns[3] = 0x05;
+    const framed = frameDnsTcpMessage(dns);
+    const parsed = parseDnsResponseHeader(framed);
+    assert.equal(parsed.rcode, 5);
+    assert.equal(parsed.answer_count, 0);
+  });
+
+  it('axfr leak probe sends TCP-framed query and treats REFUSED rcode as blocked', async () => {
+    let written = null;
+    const refusedDns = Buffer.alloc(12);
+    refusedDns[3] = 0x05;
+    const refusedFramed = frameDnsTcpMessage(refusedDns);
 
     const outcome = await probeAxfrLeak(job({
       probe_profile: { kind: 'dns_axfr_leak', zone: 'example.test' },
@@ -177,12 +212,19 @@ describe('capability probes P0/P1', () => {
       connectFn: () => ({
         once(event, handler) {
           if (event === 'connect') setImmediate(() => handler());
-          if (event === 'data') setImmediate(() => handler(refusedHeader));
+          if (event === 'data') setImmediate(() => handler(refusedFramed));
         },
-        write() {},
+        write(buf) {
+          written = buf;
+        },
         destroy() {},
       }),
     });
+
+    assert.ok(written);
+    assert.equal(written.readUInt16BE(0), written.length - 2);
+    const inner = written.subarray(2);
+    assert.equal(inner.readUInt16BE(encodeDnsQName('example.test').length + 12), 252);
     assert.equal(outcome.external_result, 'blocked');
     assert.equal(outcome.metadata.axfr_refused, true);
     assert.notEqual(outcome.metadata.axfr_leak, true);
