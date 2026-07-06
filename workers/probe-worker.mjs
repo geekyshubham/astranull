@@ -16,6 +16,7 @@ import {
   probeQuicReachability,
   probeTlsSession,
   probeUdpDatagram,
+  probeWebsocketUpgradePosture,
 } from '../src/lib/safeNetworkProbes.mjs';
 import { enrichProbeMetadataWithWafCatalog } from '../src/lib/wafProductCatalog.mjs';
 import {
@@ -680,6 +681,7 @@ export async function executeProbeForJob(job, deps = {}) {
   }
   if (profileKind === 'tls_session') return probeTlsSession(job);
   if (profileKind === 'http2_settings') return probeHttp2Settings(job);
+  if (profileKind === 'websocket_upgrade_posture') return probeWebsocketUpgradePosture(job);
   const vectorFamily = job.vector_family;
   if (DNS_VECTOR_FAMILIES.has(vectorFamily)) return probeDns(job);
   if (TCP_VECTOR_FAMILIES.has(vectorFamily)) return probeTcpConnect(job);

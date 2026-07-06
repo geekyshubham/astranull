@@ -7,7 +7,7 @@ import {
 } from '../../lib/agentPolicy.mjs';
 import { generateSalt, hashSecretWithSalt } from '../../lib/crypto.mjs';
 import { newId } from '../../lib/ids.mjs';
-import { validateProbeEndpoint } from '../../lib/probeEndpoint.mjs';
+import { checkProbeEndpointBinding, validateProbeEndpoint } from '../../lib/probeEndpoint.mjs';
 
 /** @type {readonly string[]} */
 export const AGENT_CONTROL_REPOSITORY_METHODS = Object.freeze([
@@ -67,6 +67,8 @@ function assertAgentServiceDependencies(repositories, tokens) {
  * @param {{
  *   agentControl?: Record<string, unknown>,
  *   audit?: { appendAuditEvent?: (...args: unknown[]) => unknown },
+ *   authTokens?: { getBootstrapTokenById?: (...args: unknown[]) => unknown },
+ *   coreCatalog?: { getTargetGroup?: (...args: unknown[]) => unknown },
  * }} repositories
  * @param {{
  *   tokens?: { consumeBootstrapToken?: (...args: unknown[]) => unknown },
@@ -79,6 +81,8 @@ export function createPostgresAgentServices(repositories, options = {}) {
   assertAgentServiceDependencies(repositories, tokens);
   const agentControl = repositories.agentControl;
   const audit = repositories.audit;
+  const authTokens = repositories.authTokens;
+  const coreCatalog = repositories.coreCatalog;
 
   const nowFn = options.now ?? (() => new Date());
   const newIdFn = options.newId ?? newId;
@@ -168,10 +172,49 @@ export function createPostgresAgentServices(repositories, options = {}) {
       if (body?.probe_endpoint !== undefined) {
         const result = validateProbeEndpoint(body.probe_endpoint);
         if (result.ok) {
-          heartbeatFields.probe_endpoint = result.normalized;
-          heartbeatFields.probe_endpoint_status = 'reported';
-          heartbeatFields.probe_endpoint_error = null;
-          probeEndpointAccepted = true;
+          let prebindFqdn = null;
+          let targetGroupFqdns = [];
+
+          if (
+            authTokens
+            && typeof authTokens.getBootstrapTokenById === 'function'
+            && agent.bootstrap_token_id
+          ) {
+            const token = await authTokens.getBootstrapTokenById(
+              { tenantId: agent.tenant_id },
+              agent.bootstrap_token_id,
+            );
+            prebindFqdn = token?.prebind_fqdn ?? null;
+          }
+
+          if (
+            coreCatalog
+            && typeof coreCatalog.getTargetGroup === 'function'
+            && agent.target_group_id
+          ) {
+            const targetGroup = await coreCatalog.getTargetGroup(
+              { tenantId: agent.tenant_id },
+              agent.target_group_id,
+            );
+            targetGroupFqdns = (targetGroup?.targets ?? [])
+              .filter((t) => t.kind === 'fqdn')
+              .map((t) => String(t.value).trim().toLowerCase());
+          }
+
+          const binding = checkProbeEndpointBinding(result.normalized, {
+            prebindFqdn,
+            targetGroupFqdns,
+          });
+          if (!binding.ok) {
+            heartbeatFields.probe_endpoint_status = 'rejected';
+            heartbeatFields.probe_endpoint_error = binding.error;
+            probeEndpointAccepted = false;
+          } else {
+            heartbeatFields.probe_endpoint = result.normalized;
+            heartbeatFields.probe_endpoint_status = 'reported';
+            heartbeatFields.probe_endpoint_error = null;
+            probeEndpointAccepted = true;
+          }
         } else {
           heartbeatFields.probe_endpoint_status = 'rejected';
           heartbeatFields.probe_endpoint_error = result.error;

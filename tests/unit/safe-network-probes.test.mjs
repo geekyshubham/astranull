@@ -7,6 +7,7 @@ import {
   probeQuicReachability,
   probeTlsSession,
   probeUdpDatagram,
+  probeWebsocketUpgradePosture,
   resolveAlertWebhookUrl,
 } from '../../src/lib/safeNetworkProbes.mjs';
 
@@ -266,5 +267,134 @@ describe('safe network probes', () => {
     );
     assert.equal(outcome.external_result, 'blocked');
     assert.equal(outcome.metadata.error_class, 'EHOSTUNREACH');
+  });
+
+  it('probeWebsocketUpgradePosture requires HTTP-capable target', async () => {
+    const outcome = await probeWebsocketUpgradePosture(
+      baseJob({
+        probe_profile: { kind: 'websocket_upgrade_posture', max_requests: 1, timeout_ms: 1000 },
+        vector_family: 'protocol',
+        target: { kind: 'fqdn', value: '' },
+      }),
+    );
+    assert.equal(outcome.external_result, 'error');
+    assert.equal(outcome.metadata.error_class, 'unsupported_target');
+    assert.equal(outcome.requests_sent, 0);
+  });
+
+  it('probeWebsocketUpgradePosture sends bounded upgrade headers and classifies 101', async () => {
+    let captured = null;
+    const outcome = await probeWebsocketUpgradePosture(
+      baseJob({
+        probe_profile: { kind: 'websocket_upgrade_posture', max_requests: 1, timeout_ms: 1000, marker: 'ws-marker' },
+        vector_family: 'protocol',
+        target: { kind: 'fqdn', value: 'ws.example.test' },
+        nonce: 'nonce-ws',
+      }),
+      {
+        fetchFn: async (url, options) => {
+          captured = { url, options };
+          return {
+            status: 101,
+            headers: {
+              get(name) {
+                if (name === 'upgrade') return 'websocket';
+                if (name === 'connection') return 'Upgrade';
+                return null;
+              },
+            },
+          };
+        },
+      },
+    );
+    assert.equal(outcome.external_result, 'connected');
+    assert.equal(outcome.metadata.upgrade_accepted, true);
+    assert.equal(outcome.metadata.status_code, 101);
+    assert.equal(outcome.requests_sent, 1);
+    assert.equal(captured.url, 'https://ws.example.test/');
+    assert.equal(captured.options.method, 'GET');
+    assert.equal(captured.options.headers.Connection, 'Upgrade');
+    assert.equal(captured.options.headers.Upgrade, 'websocket');
+    assert.equal(captured.options.headers['Sec-WebSocket-Version'], '13');
+    assert.ok(typeof captured.options.headers['Sec-WebSocket-Key'] === 'string');
+    assert.equal(captured.options.headers['x-astranull-marker'], 'ws-marker');
+    assert.equal(captured.options.headers['x-astranull-nonce'], 'nonce-ws');
+  });
+
+  it('probeWebsocketUpgradePosture classifies 403 as upgrade denied', async () => {
+    const outcome = await probeWebsocketUpgradePosture(
+      baseJob({
+        probe_profile: { kind: 'websocket_upgrade_posture', max_requests: 1, timeout_ms: 1000 },
+        vector_family: 'protocol',
+        target: { kind: 'url', value: 'https://ws.example.test/socket' },
+      }),
+      {
+        fetchFn: async () => ({
+          status: 403,
+          headers: { get: () => null },
+        }),
+      },
+    );
+    assert.equal(outcome.external_result, 'blocked');
+    assert.equal(outcome.metadata.upgrade_denied, true);
+    assert.equal(outcome.metadata.status_code, 403);
+  });
+
+  it('probeWebsocketUpgradePosture classifies 426 as upgrade required', async () => {
+    const outcome = await probeWebsocketUpgradePosture(
+      baseJob({
+        probe_profile: { kind: 'websocket_upgrade_posture', max_requests: 1, timeout_ms: 1000 },
+        vector_family: 'protocol',
+        target: { kind: 'fqdn', value: 'ws.example.test' },
+      }),
+      {
+        fetchFn: async () => ({
+          status: 426,
+          headers: { get: () => null },
+        }),
+      },
+    );
+    assert.equal(outcome.external_result, 'blocked');
+    assert.equal(outcome.metadata.upgrade_required, true);
+    assert.equal(outcome.metadata.status_code, 426);
+  });
+
+  it('probeWebsocketUpgradePosture reports timeout on abort', async () => {
+    const outcome = await probeWebsocketUpgradePosture(
+      baseJob({
+        constraints: { timeout_ms: 50, max_requests: 1 },
+        probe_profile: { kind: 'websocket_upgrade_posture', max_requests: 1, timeout_ms: 50 },
+        vector_family: 'protocol',
+        target: { kind: 'fqdn', value: 'ws.example.test' },
+      }),
+      {
+        fetchFn: async (_url, options) => new Promise((_resolve, reject) => {
+          options.signal?.addEventListener('abort', () => {
+            reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+          });
+        }),
+      },
+    );
+    assert.equal(outcome.external_result, 'timeout');
+    assert.equal(outcome.metadata.error_class, 'timeout');
+    assert.equal(outcome.requests_sent, 1);
+  });
+
+  it('probeWebsocketUpgradePosture reports blocked on DNS failure', async () => {
+    const outcome = await probeWebsocketUpgradePosture(
+      baseJob({
+        probe_profile: { kind: 'websocket_upgrade_posture', max_requests: 1, timeout_ms: 1000 },
+        vector_family: 'protocol',
+        target: { kind: 'fqdn', value: 'ws.example.test' },
+      }),
+      {
+        fetchFn: async () => {
+          throw Object.assign(new Error('not found'), { code: 'ENOTFOUND' });
+        },
+      },
+    );
+    assert.equal(outcome.external_result, 'blocked');
+    assert.equal(outcome.metadata.error_class, 'ENOTFOUND');
+    assert.equal(outcome.requests_sent, 1);
   });
 });

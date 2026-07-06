@@ -191,6 +191,14 @@ export function simulateProbeResult(check, target, overrideProfile) {
       graphql_exposed: external_result === 'connected',
       note: 'Simulated GraphQL posture probe.',
     });
+  } else if (probeProfileKind === 'websocket_upgrade_posture') {
+    Object.assign(baseMetadata, {
+      probe_kind: 'websocket_upgrade_posture',
+      upgrade_accepted: external_result === 'connected',
+      upgrade_denied: external_result === 'blocked',
+      status_code: external_result === 'connected' ? 101 : 403,
+      note: 'Simulated WebSocket upgrade posture probe.',
+    });
   } else {
     baseMetadata.note = 'Metadata-only safe probe simulation — no live traffic to customer targets.';
   }

@@ -27,6 +27,7 @@ export const ALLOWED_PROBE_PROFILE_KINDS = Object.freeze([
   'cors_posture_probe',
   'bot_challenge_probe',
   'graphql_posture_probe',
+  'websocket_upgrade_posture',
   'outside_in_waf_scan',
 ]);
 
@@ -46,6 +47,7 @@ export const MAX_REQUESTS_BY_PROBE_KIND = Object.freeze({
   cors_posture_probe: 1,
   bot_challenge_probe: 1,
   graphql_posture_probe: 1,
+  websocket_upgrade_posture: 1,
   outside_in_waf_scan: 10,
 });
 
@@ -1041,6 +1043,7 @@ export const CHECK_CATALOG = [
     default_expected_behavior: 'must_block_before_origin',
     probe_simulation_profile: 'external_blocked',
   }),
+  // Deferred: live gRPC reflection probe not implemented — metadata_marker only (unsafe disclosure scope).
   safeCheck({
     check_id: 'protocol.grpc_reflection_stream.safe',
     version: '1.0.0',
@@ -1069,8 +1072,8 @@ export const CHECK_CATALOG = [
     required_customer_setup: ['declared_websocket_endpoint', 'connection_limit_expectation'],
     evidence_required: ['probe_result', 'agent_observation'],
     stop_conditions: ['max_events_reached', 'max_duration_elapsed', 'customer_cancel', 'tenant_kill_switch'],
-    verdict_logic: 'Metadata marker documents WS endpoint; correlate upgrade policy without sustained open connections.',
-    probe_profile: { kind: 'metadata_marker', max_requests: 1, timeout_ms: 5000, marker: 'astranull-safe-marker' },
+    verdict_logic: 'Single bounded WebSocket upgrade request documents upgrade acceptance or denial without sustained open connections.',
+    probe_profile: { kind: 'websocket_upgrade_posture', max_requests: 1, timeout_ms: 5000, marker: 'astranull-safe-marker' },
     safety_constraints: { max_events: 3, max_duration_seconds: 90, max_concurrent_runs_per_target_group: 1 },
     default_expected_behavior: 'must_block_before_origin',
     probe_simulation_profile: 'external_blocked',

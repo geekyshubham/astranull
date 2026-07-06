@@ -2,6 +2,7 @@
  * Bounded safe network probes — single datagram/request caps, no amplification or flooding.
  */
 
+import { randomBytes } from 'node:crypto';
 import dgram from 'node:dgram';
 import dns from 'node:dns/promises';
 import http2 from 'node:http2';
@@ -617,6 +618,158 @@ export async function probeAlertWebhookPing(job, deps = {}) {
         error_class: code,
         duration_ms: durationMs,
         webhook_host: parsedUrl.hostname,
+      }),
+      requests_sent: 1,
+      duration_ms: durationMs,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const WEBSOCKET_UPGRADE_DENIED_STATUSES = new Set([401, 403, 405, 429]);
+
+function safeWebsocketKey() {
+  return randomBytes(16).toString('base64');
+}
+
+function classifyWebsocketUpgradeStatus(status) {
+  if (status === 101) {
+    return {
+      external_result: 'connected',
+      upgrade_accepted: true,
+      upgrade_denied: false,
+      upgrade_required: false,
+    };
+  }
+  if (WEBSOCKET_UPGRADE_DENIED_STATUSES.has(status)) {
+    return {
+      external_result: 'blocked',
+      upgrade_accepted: false,
+      upgrade_denied: true,
+      upgrade_required: false,
+    };
+  }
+  if (status === 426) {
+    return {
+      external_result: 'blocked',
+      upgrade_accepted: false,
+      upgrade_denied: false,
+      upgrade_required: true,
+    };
+  }
+  return {
+    external_result: 'error',
+    upgrade_accepted: false,
+    upgrade_denied: false,
+    upgrade_required: false,
+  };
+}
+
+/**
+ * @param {Record<string, unknown>} job
+ * @param {{ fetchFn?: typeof fetch }} deps
+ */
+export async function probeWebsocketUpgradePosture(job, deps = {}) {
+  const fetchFn = deps.fetchFn ?? fetch;
+  const httpUrl = resolveHttpUrl(job);
+  if (!httpUrl) {
+    return {
+      external_result: 'error',
+      metadata: withProfileKind(job, {
+        probe_kind: 'websocket_upgrade_posture',
+        error_class: 'unsupported_target',
+      }),
+      requests_sent: 0,
+      duration_ms: 0,
+    };
+  }
+
+  const maxRequests = Math.min(1, job.constraints?.max_requests ?? 1);
+  if (maxRequests < 1) {
+    return {
+      external_result: 'error',
+      metadata: withProfileKind(job, {
+        probe_kind: 'websocket_upgrade_posture',
+        error_class: 'zero_request_cap',
+      }),
+      requests_sent: 0,
+      duration_ms: 0,
+    };
+  }
+
+  const timeoutMs = job.constraints?.timeout_ms ?? 5000;
+  const started = Date.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  const headers = {
+    Connection: 'Upgrade',
+    Upgrade: 'websocket',
+    'Sec-WebSocket-Version': '13',
+    'Sec-WebSocket-Key': safeWebsocketKey(),
+  };
+  const marker = job.probe_profile?.marker;
+  if (marker) headers['x-astranull-marker'] = String(marker);
+  if (job.nonce) headers['x-astranull-nonce'] = String(job.nonce);
+
+  try {
+    const res = await fetchFn(httpUrl, {
+      method: 'GET',
+      headers,
+      redirect: 'manual',
+      signal: controller.signal,
+    });
+    const durationMs = Date.now() - started;
+    const classification = classifyWebsocketUpgradeStatus(res.status);
+    return {
+      external_result: classification.external_result,
+      metadata: withProfileKind(job, {
+        probe_kind: 'websocket_upgrade_posture',
+        status_code: res.status,
+        upgrade_accepted: classification.upgrade_accepted,
+        upgrade_denied: classification.upgrade_denied,
+        upgrade_required: classification.upgrade_required,
+        response_upgrade_header: res.headers.get('upgrade'),
+        response_connection_header: res.headers.get('connection'),
+        duration_ms: durationMs,
+      }),
+      requests_sent: 1,
+      duration_ms: durationMs,
+    };
+  } catch (err) {
+    const durationMs = Date.now() - started;
+    const code = err?.name === 'AbortError' ? 'ETIMEOUT' : (err?.code ?? '');
+    if (code === 'ETIMEOUT') {
+      return {
+        external_result: 'timeout',
+        metadata: withProfileKind(job, {
+          probe_kind: 'websocket_upgrade_posture',
+          error_class: 'timeout',
+          duration_ms: durationMs,
+        }),
+        requests_sent: 1,
+        duration_ms: durationMs,
+      };
+    }
+    if (TLS_BLOCKED_CODES.has(code)) {
+      return {
+        external_result: 'blocked',
+        metadata: withProfileKind(job, {
+          probe_kind: 'websocket_upgrade_posture',
+          error_class: code,
+          duration_ms: durationMs,
+        }),
+        requests_sent: 1,
+        duration_ms: durationMs,
+      };
+    }
+    return {
+      external_result: 'error',
+      metadata: withProfileKind(job, {
+        probe_kind: 'websocket_upgrade_posture',
+        error_class: code || 'probe_failed',
+        duration_ms: durationMs,
       }),
       requests_sent: 1,
       duration_ms: durationMs,

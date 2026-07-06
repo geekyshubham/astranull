@@ -522,8 +522,16 @@ function createRecordingAgentRepositories(overrides = {}) {
     },
   };
 
+  const repositories = { agentControl, audit };
+  if (overrides.authTokens) {
+    repositories.authTokens = overrides.authTokens;
+  }
+  if (overrides.coreCatalog) {
+    repositories.coreCatalog = overrides.coreCatalog;
+  }
+
   return {
-    repositories: { agentControl, audit },
+    repositories,
     auditEvents,
     agentControlCalls,
   };
@@ -676,6 +684,60 @@ describe('postgres agent service adapters', () => {
     assert.equal(agentControlCalls[2].method, 'updateAgentHeartbeat');
     assert.deepEqual(agentControlCalls[3].args[0], { tenantId: 'ten_demo', agentId: 'agent_1' });
     assert.equal(agentControlCalls[4].method, 'ackAgentJob');
+  });
+
+  it('heartbeatAgent rejects probe_endpoint when declared_fqdn is not in target group', async () => {
+    const matchingFqdn = 'api.shop.example.com';
+    const agent = {
+      id: 'agent_bind',
+      tenant_id: 'ten_demo',
+      bootstrap_token_id: 'token_prebind',
+      target_group_id: 'tg_shop',
+      credential_hash: 'h',
+      credential_salt: 's',
+    };
+    const probeEndpoint = {
+      declared_fqdn: matchingFqdn,
+      discovered_public_ip: '203.0.113.55',
+      listen_port: 18080,
+      path_prefix: '/astranull-canary',
+      discovered_via: 'dns_resolve',
+    };
+    let heartbeatFields;
+    const { repositories } = createRecordingAgentRepositories({
+      updateAgentHeartbeat: async (_scope, fields) => {
+        heartbeatFields = fields;
+        return { ...agent, ...fields };
+      },
+      authTokens: {
+        getBootstrapTokenById: async (ctx, id) => {
+          assert.deepEqual(ctx, { tenantId: 'ten_demo' });
+          assert.equal(id, 'token_prebind');
+          return { id, prebind_fqdn: matchingFqdn };
+        },
+      },
+      coreCatalog: {
+        getTargetGroup: async (ctx, id) => {
+          assert.deepEqual(ctx, { tenantId: 'ten_demo' });
+          assert.equal(id, 'tg_shop');
+          return {
+            id,
+            targets: [{ kind: 'fqdn', value: 'cdn.example.com' }],
+          };
+        },
+      },
+    });
+    const { agents } = createPostgresAgentServices(repositories, {
+      tokens: { consumeBootstrapToken: async () => ({}) },
+      now: () => FIXED_NOW,
+    });
+
+    const result = await agents.heartbeatAgent(agent, { probe_endpoint: probeEndpoint });
+
+    assert.equal(result.probe_endpoint_accepted, false);
+    assert.equal(heartbeatFields.probe_endpoint_status, 'rejected');
+    assert.equal(heartbeatFields.probe_endpoint_error, 'target_group_mismatch');
+    assert.equal(heartbeatFields.probe_endpoint, undefined);
   });
 
   it('requireAgentAuth accepts valid addressed credential and audits invalid only when row exists', async () => {

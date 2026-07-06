@@ -117,6 +117,13 @@ function validationModeBadgeTone(mode: string): BadgeProps['tone'] {
   return normalizeStatusKey(mode) === 'external_only' ? 'warn' : 'info';
 }
 
+function probeEndpointStatusBadgeTone(status: string): BadgeProps['tone'] {
+  const normalized = normalizeStatusKey(status);
+  if (normalized === 'reported') return 'success';
+  if (normalized === 'rejected') return 'danger';
+  return 'muted';
+}
+
 type ReportExportPreview = {
   reportId: string;
   format: string;
@@ -1669,6 +1676,37 @@ function TargetGroupDetailView({
     await refreshOwnershipVerifications();
   }
 
+  async function verifyOwnershipSetup() {
+    const onlineAgent = relatedAgents.find((agent) => getString(agent, ['status']) === 'online');
+    if (!onlineAgent) {
+      setError('No online agent bound to this target group.');
+      setMessage('');
+      return;
+    }
+    const agentId = getString(onlineAgent, ['id'], '');
+    setBusy(`verify-setup-${entityId}`);
+    setError('');
+    setMessage('');
+    try {
+      const result = await requestJson(config, session, '/v1/ownership-verifications/verify-setup', {
+        method: 'POST',
+        body: { target_group_id: entityId, agent_id: agentId },
+      }) as DataItem;
+      if (result.ready === false) {
+        const payload = result as DataItem & { message?: string };
+        setError(payload.message ?? getString(result, ['error'], 'Setup verification failed.'));
+        return;
+      }
+      const declaredFqdn = getString(result, ['declared_fqdn'], '—');
+      setMessage(`Setup verified for ${declaredFqdn}: agent online, bound, token valid, FQDN declared in group.`);
+    } catch (err) {
+      const payload = (err as Error & { payload?: unknown }).payload as { error?: string; message?: string } | undefined;
+      setError(payload?.message ?? payload?.error ?? (err instanceof Error ? err.message : 'Setup verification failed.'));
+    } finally {
+      setBusy('');
+    }
+  }
+
   return (
     <div className="content">
       <div className="page-head">
@@ -1876,6 +1914,15 @@ function TargetGroupDetailView({
                 >
                   External only
                 </Button>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  loading={busy === `verify-setup-${entityId}`}
+                  disabled={busy !== '' || relatedAgents.length === 0}
+                  onClick={() => void verifyOwnershipSetup()}
+                >
+                  Verify my setup
+                </Button>
               </div>
               {validationMode === 'external_only' ? (
                 <p className="muted small">
@@ -2028,6 +2075,12 @@ function AgentDetailView({
   const [auxLoading, setAuxLoading] = useState(false);
   const tabOptions = routeTabs('agent-detail').map((item) => ({ id: item.id, label: item.label }));
   const targetGroupId = getString(entity, ['target_group_id'], '');
+  const probeEndpoint = getNestedItem(entity, ['probe_endpoint']);
+  const probeEndpointStatus = getString(entity, ['probe_endpoint_status'], '');
+  const probeEndpointError = getString(entity, ['probe_endpoint_error'], '');
+  const declaredProbeFqdn = probeEndpoint ? getNestedString(probeEndpoint, ['declared_fqdn'], '') : '';
+  const declaredProbeIp = probeEndpoint ? getNestedString(probeEndpoint, ['declared_ip'], '') : '';
+  const hasProbeEndpointDetails = Boolean(probeEndpointStatus || probeEndpointError || probeEndpoint);
   const placementReview = Array.isArray(placementReviews?.reviews)
     ? (placementReviews.reviews as DataItem[]).find((review) => getString(review, ['target_group_id'], '') === targetGroupId)
     : null;
@@ -2116,6 +2169,27 @@ function AgentDetailView({
               <div><span>Last heartbeat</span><strong>{formatDate(entity.last_heartbeat_at ?? entity.updated_at)}</strong></div>
               <div><span>Version</span><strong>{getString(entity, ['version'], 'unknown')}</strong></div>
               <div><span>Gateway fingerprint</span><strong><code>{getString(entity, ['fingerprint'], 'not registered')}</code></strong></div>
+              {hasProbeEndpointDetails ? (
+                <>
+                  <div>
+                    <span>Probe endpoint status</span>
+                    {probeEndpointStatus ? (
+                      <Badge tone={probeEndpointStatusBadgeTone(probeEndpointStatus)}>{formatFactorLabel(probeEndpointStatus)}</Badge>
+                    ) : (
+                      <strong>—</strong>
+                    )}
+                  </div>
+                  {probeEndpointError ? (
+                    <div><span>Probe endpoint error</span><strong><code>{probeEndpointError}</code></strong></div>
+                  ) : null}
+                  {declaredProbeFqdn && declaredProbeFqdn !== '—' ? (
+                    <div><span>Declared FQDN</span><strong><code>{declaredProbeFqdn}</code></strong></div>
+                  ) : null}
+                  {declaredProbeIp && declaredProbeIp !== '—' ? (
+                    <div><span>Declared IP</span><strong><code>{declaredProbeIp}</code></strong></div>
+                  ) : null}
+                </>
+              ) : null}
             </CardContent>
           </Card>
           <Card>
@@ -2145,6 +2219,27 @@ function AgentDetailView({
             <div><span>Last heartbeat</span><strong>{formatDate(entity.last_heartbeat_at)}</strong></div>
             <div><span>Status</span><StatusBadge value={getString(entity, ['status'], 'unknown')} tone={agentStatusBadgeTone(getString(entity, ['status'], 'unknown'))} fallback="unknown" /></div>
             <div><span>Version</span><strong>{getString(entity, ['version'], 'unknown')}</strong></div>
+            {hasProbeEndpointDetails ? (
+              <>
+                <div>
+                  <span>Probe endpoint status</span>
+                  {probeEndpointStatus ? (
+                    <Badge tone={probeEndpointStatusBadgeTone(probeEndpointStatus)}>{formatFactorLabel(probeEndpointStatus)}</Badge>
+                  ) : (
+                    <strong>—</strong>
+                  )}
+                </div>
+                {probeEndpointError ? (
+                  <div><span>Probe endpoint error</span><strong><code>{probeEndpointError}</code></strong></div>
+                ) : null}
+                {declaredProbeFqdn && declaredProbeFqdn !== '—' ? (
+                  <div><span>Declared FQDN</span><strong><code>{declaredProbeFqdn}</code></strong></div>
+                ) : null}
+                {declaredProbeIp && declaredProbeIp !== '—' ? (
+                  <div><span>Declared IP</span><strong><code>{declaredProbeIp}</code></strong></div>
+                ) : null}
+              </>
+            ) : null}
           </CardContent>
         </Card>
       ) : null}
