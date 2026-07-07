@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
-import { CHECK_CATALOG } from '../../src/contracts/checks.mjs';
+import { CHECK_CATALOG, customerSelectableChecks } from '../../src/contracts/checks.mjs';
 import { seedIfEmpty } from '../../src/seed.mjs';
 import { listChecks } from '../../src/services/testRuns.mjs';
 import { createServer } from '../../src/server.mjs';
@@ -93,7 +93,7 @@ describe('dev store migration', () => {
     assert.deepEqual(after.supplyChainRisks, []);
     assert.deepEqual(after.wafActionItems, []);
     assert.deepEqual(after.supplyChainTickets, []);
-    assert.equal(listChecks().length, CHECK_CATALOG.length);
+    assert.equal(listChecks().length, customerSelectableChecks(CHECK_CATALOG).length);
     assert.ok(after.tenants[0].privacy_settings?.metadata_retention_days === 365);
   });
 
@@ -353,7 +353,7 @@ describe('dev store migration', () => {
     try {
       const res = await request(baseUrl, 'GET', '/v1/checks');
       assert.equal(res.status, 200);
-      assert.equal(res.json.items.length, CHECK_CATALOG.length);
+      assert.equal(res.json.items.length, customerSelectableChecks(CHECK_CATALOG).length);
     } finally {
       server.close();
     }

@@ -1,6 +1,7 @@
 import { isIP } from 'node:net';
 import { audit } from '../audit.mjs';
 import {
+  customerSelectableChecks,
   evaluateCheckPrerequisites,
   getCheckById,
   isCustomerRunnable,
@@ -107,7 +108,7 @@ function rejectObservation(ctx, tenantId, agentId, reason, error, status, resour
 }
 
 export function listChecks() {
-  return getStore().checkCatalog ?? [];
+  return customerSelectableChecks(getStore().checkCatalog ?? []);
 }
 
 export function listTestRuns(ctx, options = {}) {

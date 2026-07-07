@@ -1,5 +1,6 @@
 import {
   CHECK_CATALOG,
+  customerSelectableChecks,
   evaluateCheckPrerequisites,
   getCheckById,
   isCustomerRunnable,
@@ -657,7 +658,7 @@ export function createPostgresValidationServices(repositories, options = {}) {
 
   const testRuns = {
     listChecks() {
-      return CHECK_CATALOG;
+      return customerSelectableChecks(CHECK_CATALOG);
     },
     async listTestRuns(ctx) {
       return validationEvidence.listTestRuns(ctx);

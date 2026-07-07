@@ -67,7 +67,7 @@ import {
 import {
   POSTGRES_EVENTS_SERVICE_METHODS,
 } from '../../src/persistence/postgres/validationServiceAdapters.mjs';
-import { CHECK_CATALOG } from '../../src/contracts/checks.mjs';
+import { CHECK_CATALOG, customerSelectableChecks } from '../../src/contracts/checks.mjs';
 import { createAddressedSecret } from '../../src/lib/addressedSecrets.mjs';
 import { generateSalt, hashSecretWithSalt } from '../../src/lib/crypto.mjs';
 import { buildAgentPackage } from '../../scripts/package-agent.mjs';
@@ -1042,7 +1042,7 @@ describe('postgres validation service adapters', () => {
   it('listChecks returns safe catalog without dev store', () => {
     const { repositories } = createRecordingValidationRepositories();
     const { testRuns } = createPostgresValidationServices(repositories);
-    assert.deepEqual(testRuns.listChecks(), CHECK_CATALOG);
+    assert.deepEqual(testRuns.listChecks(), customerSelectableChecks(CHECK_CATALOG));
   });
 
   it('getTestRun merges verdict and getRunEvents returns null when run is missing', async () => {

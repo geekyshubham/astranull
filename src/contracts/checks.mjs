@@ -1399,6 +1399,36 @@ export function isCustomerRunnable(check) {
   return true;
 }
 
+/**
+ * True when a check cannot run from a plain (target group + check) selection because it
+ * needs additional run-time input or setup the customer must supply:
+ *  - host_sni_bypass probes require a direct origin IP (else `missing_direct_origin_ip`)
+ *  - checks with an `agent_mode:*` prerequisite require an installed/bound agent
+ * These are excluded from the customer-selectable catalog so the UI never surfaces a
+ * check that would immediately error. Definitions remain in CHECK_CATALOG so getCheckById
+ * and internal orchestrator delegation (which supply the extra input) still resolve them.
+ */
+export function checkRequiresAdditionalInput(check) {
+  if (!check) return false;
+  if (check.probe_profile?.kind === 'host_sni_bypass') return true;
+  if (
+    Array.isArray(check.prerequisites)
+    && check.prerequisites.some((p) => String(p).startsWith('agent_mode:'))
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * The catalog a customer may browse and select in the portal: everything except checks
+ * that would error without additional run-time input/setup.
+ */
+export function customerSelectableChecks(catalog) {
+  const source = Array.isArray(catalog) ? catalog : CHECK_CATALOG;
+  return source.filter((check) => !checkRequiresAdditionalInput(check));
+}
+
 export function evaluateCheckPrerequisites(check, { onlineAgents = [] } = {}) {
   const missing = [];
   for (const prereq of check.prerequisites ?? []) {
