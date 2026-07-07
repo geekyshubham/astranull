@@ -489,6 +489,33 @@ describe('postgres validation evidence repository', () => {
     assertUsesTenantPredicate(q.text, q.params, CTX.tenantId);
   });
 
+  it('listFindings applies test_run_id, target, and bounded limit filters', async () => {
+    let captured;
+    const pool = createRecordingPool((text, params) => {
+      if (text.includes('FROM findings') && text.includes('ORDER BY')) {
+        captured = { text, params };
+        return { rows: [] };
+      }
+      return { rows: [] };
+    });
+    const repo = createValidationEvidenceRepository(pool);
+    await repo.listFindings(CTX, {
+      test_run_id: 'run_1',
+      target_group_id: 'tg_1',
+      target_id: 'tgt_1',
+      limit: 25,
+    });
+    assertTenantWrapped(pool.client, CTX.tenantId);
+    assert.match(captured.text, /test_run_id = \$\d+/);
+    assert.match(captured.text, /target_group_id = \$\d+/);
+    assert.match(captured.text, /target_id = \$\d+/);
+    assert.match(captured.text, /LIMIT \$\d+/);
+    assert.ok(captured.params.includes('run_1'));
+    assert.ok(captured.params.includes('tg_1'));
+    assert.ok(captured.params.includes('tgt_1'));
+    assert.ok(captured.params.includes(25));
+  });
+
   it('listTestRuns applies bounded LIMIT and optional filters with parameterized tenant', async () => {
     const pool = createRecordingPool((text) => {
       if (text.includes('FROM test_runs')) {

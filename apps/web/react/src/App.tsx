@@ -130,8 +130,6 @@ export default function App() {
       ...activeSession,
       mode: activeSession.mode ?? 'dev-headers',
       principal: 'customer',
-      tenant_id: activeSession.tenant_id ?? 'ten_demo',
-      user_id: activeSession.user_id ?? 'usr_admin',
       role
     };
     saveSession(next);

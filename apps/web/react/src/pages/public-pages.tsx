@@ -391,7 +391,7 @@ export function PublicLandingPage({ config }: PublicPageProps) {
 export function LoginPage({ config }: PublicPageProps) {
   usePageMeta({ title: 'Log in — AstraNull Customer Portal' });
 
-  const [userId, setUserId] = useState('usr_admin');
+  const [userId, setUserId] = useState('');
   const [role, setRole] = useState('admin');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -438,7 +438,7 @@ export function LoginPage({ config }: PublicPageProps) {
         mode: 'dev-headers',
         principal: 'customer',
         tenant_id: 'ten_demo',
-        user_id: userId.trim() || 'usr_admin',
+        user_id: userId.trim(),
         role
       });
       window.location.href = config.portalPath;
@@ -452,7 +452,7 @@ export function LoginPage({ config }: PublicPageProps) {
         body: JSON.stringify({
           principal: 'customer',
           tenant_id: 'ten_demo',
-          user_id: userId.trim() || 'usr_admin',
+          user_id: userId.trim(),
           role
         })
       });
@@ -926,7 +926,7 @@ export function SignupStatusPage() {
 export function StaffLoginPage({ config }: PublicPageProps) {
   usePageMeta({ title: 'Staff sign-in — AstraNull Internal', robots: 'noindex, nofollow' });
 
-  const [staffId, setStaffId] = useState('staff_admin');
+  const [staffId, setStaffId] = useState('');
   const [staffRole, setStaffRole] = useState('internal_admin');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -971,7 +971,7 @@ export function StaffLoginPage({ config }: PublicPageProps) {
       saveSession({
         mode: 'dev-headers',
         principal: 'staff',
-        staff_id: staffId.trim() || 'staff_admin',
+        staff_id: staffId.trim(),
         staff_role: staffRole,
         staff_login_path: staffLoginPath
       });
@@ -985,7 +985,7 @@ export function StaffLoginPage({ config }: PublicPageProps) {
         headers: { 'Content-Type': 'application/json', accept: 'application/json' },
         body: JSON.stringify({
           principal: 'staff',
-          staff_id: staffId.trim() || 'staff_admin',
+          staff_id: staffId.trim(),
           staff_role: staffRole
         })
       });

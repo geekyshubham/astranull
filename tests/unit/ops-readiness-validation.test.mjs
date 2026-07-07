@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
+  buildOpsReadinessData,
   executeOpsReadinessProbe,
   isOpsReadinessProbeKind,
+  pickLatestAcceptedEvidence,
+  resolveOpsReadinessScenario,
 } from '../../src/lib/opsReadinessValidation.mjs';
 import { getCheckById } from '../../src/contracts/checks.mjs';
 import { getStore } from '../../src/store.mjs';
@@ -120,5 +123,102 @@ describe('ops readiness validation', () => {
     assert.equal(probe.external_result, 'connected');
     assert.equal(probe.metadata.dry_run, true);
     assert.deepEqual(probe.metadata.readiness_signals, ['kill_switch_audit']);
+  });
+});
+
+describe('ops readiness validation — Postgres injected data path', () => {
+  it('resolves scenario from probe profile and check id', () => {
+    assert.equal(
+      resolveOpsReadinessScenario(getCheckById('ops.runbook_contact_validation.safe')),
+      'runbook_contacts',
+    );
+    assert.equal(
+      resolveOpsReadinessScenario(getCheckById('ops.kill_switch_drill.safe')),
+      'kill_switch_readiness',
+    );
+  });
+
+  it('pickLatestAcceptedEvidence filters by tenant, kind, status, and recency', () => {
+    const ledger = [
+      { id: 'old', kind: 'support_readiness', tenant_id: 'ten_demo', status: 'accepted', created_at: '2026-01-01T00:00:00.000Z', evidence: {} },
+      { id: 'new', kind: 'support_readiness', tenant_id: 'ten_demo', status: 'approved', created_at: '2026-06-01T00:00:00.000Z', evidence: {} },
+      { id: 'other_tenant', kind: 'support_readiness', tenant_id: 'ten_other', status: 'accepted', created_at: '2026-07-01T00:00:00.000Z', evidence: {} },
+      { id: 'rejected', kind: 'support_readiness', tenant_id: 'ten_demo', status: 'rejected', created_at: '2026-08-01T00:00:00.000Z', evidence: {} },
+    ];
+    assert.equal(pickLatestAcceptedEvidence(ledger, 'support_readiness', 'ten_demo').id, 'new');
+    assert.equal(pickLatestAcceptedEvidence(ledger, 'kill_switch_drill', 'ten_demo'), null);
+    assert.equal(pickLatestAcceptedEvidence([], 'support_readiness', 'ten_demo'), null);
+  });
+
+  it('buildOpsReadinessData derives runbook evidence from a Postgres-style ledger', () => {
+    const data = buildOpsReadinessData({
+      scenario: 'runbook_contacts',
+      tenantId: 'ten_demo',
+      releaseEvidenceLedger: [
+        { id: 'evd', kind: 'support_readiness', tenant_id: 'ten_demo', status: 'accepted', created_at: '2026-06-01T00:00:00.000Z', evidence: SUPPORT_EVIDENCE },
+      ],
+    });
+    assert.equal(data.evidenceRecord.id, 'evd');
+  });
+
+  it('buildOpsReadinessData derives kill-switch signals from record, audit, and drill inputs', () => {
+    const data = buildOpsReadinessData({
+      scenario: 'kill_switch_readiness',
+      tenantId: 'ten_demo',
+      killSwitchRecord: { updated_at: '2026-06-01T00:00:00.000Z' },
+      auditEntries: [{ action: 'soc.kill_switch.cleared' }],
+      releaseEvidenceLedger: [
+        { id: 'drill', kind: 'kill_switch_drill', tenant_id: 'ten_demo', status: 'accepted', created_at: '2026-06-02T00:00:00.000Z', evidence: {} },
+      ],
+    });
+    assert.equal(data.hasKillSwitchState, true);
+    assert.ok(data.auditHit);
+    assert.equal(data.drillRecord.id, 'drill');
+  });
+
+  it('executeOpsReadinessProbe honors explicit readiness data without touching the dev store', () => {
+    freshStore();
+    // Intentionally leave the dev store empty: the probe must use injected data.
+    const check = getCheckById('ops.runbook_contact_validation.safe');
+    const data = buildOpsReadinessData({
+      scenario: 'runbook_contacts',
+      tenantId: 'ten_demo',
+      releaseEvidenceLedger: [
+        { id: 'evd', kind: 'support_readiness', tenant_id: 'ten_demo', status: 'accepted', created_at: '2026-06-01T00:00:00.000Z', evidence: SUPPORT_EVIDENCE },
+      ],
+    });
+    const probe = executeOpsReadinessProbe({ tenantId: 'ten_demo' }, check, { id: 'tgt_1', value: 'canary' }, data);
+    assert.equal(probe.external_result, 'connected');
+    assert.equal(probe.metadata.ops_validation_ok, true);
+    assert.equal(getStore().productionReleaseEvidence.length, 0);
+  });
+
+  it('executeOpsReadinessProbe returns error from injected empty ledger (never a hardcoded pass)', () => {
+    freshStore();
+    const check = getCheckById('ops.runbook_contact_validation.safe');
+    const data = buildOpsReadinessData({
+      scenario: 'runbook_contacts',
+      tenantId: 'ten_demo',
+      releaseEvidenceLedger: [],
+    });
+    const probe = executeOpsReadinessProbe({ tenantId: 'ten_demo' }, check, { id: 'tgt_1', value: 'canary' }, data);
+    assert.equal(probe.external_result, 'error');
+    assert.equal(probe.metadata.ops_validation_ok, false);
+  });
+
+  it('executeOpsReadinessProbe kill-switch scenario reports state signal from injected record', () => {
+    freshStore();
+    const check = getCheckById('ops.kill_switch_drill.safe');
+    const data = buildOpsReadinessData({
+      scenario: 'kill_switch_readiness',
+      tenantId: 'ten_demo',
+      killSwitchRecord: { updated_at: '2026-06-01T00:00:00.000Z' },
+      auditEntries: [],
+      releaseEvidenceLedger: [],
+    });
+    const probe = executeOpsReadinessProbe({ tenantId: 'ten_demo' }, check, { id: 'tgt_1', value: 'canary' }, data);
+    assert.equal(probe.external_result, 'connected');
+    assert.deepEqual(probe.metadata.readiness_signals, ['kill_switch_state']);
+    assert.equal(probe.metadata.kill_switch_activated ?? false, false);
   });
 });

@@ -733,7 +733,7 @@ export function ReleaseEvidencePage({ data, session }: { data: PortalData; sessi
   function gapLedgerTechnicalPayload() {
     return {
       exported_at: new Date().toISOString(),
-      tenant_id: session.tenant_id ?? 'ten_demo',
+      tenant_id: session.tenant_id ?? data.state?.tenant_id ?? 'unknown',
       coverage,
       attestation,
       records: data.releaseEvidence.map((item) => ({
@@ -750,7 +750,7 @@ export function ReleaseEvidencePage({ data, session }: { data: PortalData; sessi
       ? `Missing kinds: ${coverage.missing.join(', ')}.`
       : 'All required kinds are recorded.';
     const summary = [
-      `Release evidence gap ledger — ${session.tenant_id ?? 'ten_demo'}`,
+      `Release evidence gap ledger — ${session.tenant_id ?? data.state?.tenant_id ?? 'unknown'}`,
       `Recorded ${coverage.recorded} of ${coverage.expected} required kinds.`,
       missingLine,
       `Attestation signoff: ${getNestedString(attestation, ['signoff_status'], 'unknown')}.`,

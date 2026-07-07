@@ -54,6 +54,8 @@ import {
   createPostgresWafOrchestratorServices,
   createPostgresInternalManagementServices,
 } from './serviceAdapters.mjs';
+import { createPostgresTestPolicyServices } from './testPolicyServiceAdapters.mjs';
+import { createPostgresTestPolicyRepository } from './testPolicyRepository.mjs';
 import { createPostgresCvePipelineServices } from './cvePipelineServiceAdapters.mjs';
 import { createCvePipelineRepository } from './cvePipelineRepository.mjs';
 import { createPostgresExternalDiscoveryServices } from './externalDiscoveryServiceAdapters.mjs';
@@ -232,6 +234,12 @@ export async function createPostgresRuntime(env = process.env, options = {}) {
     const wafDriftServices = createPostgresWafDriftServices(repositories);
     const wafCoverageRollupServices = createPostgresWafCoverageRollupServices(repositories);
     const internalManagementServices = createPostgresInternalManagementServices(repositories);
+    const testPolicyRepository = createPostgresTestPolicyRepository(pool);
+    const testPolicyServices = createPostgresTestPolicyServices({
+      testPolicies: testPolicyRepository,
+      coreCatalog: repositories.coreCatalog,
+      audit: repositories.audit,
+    });
     const ownershipVerificationBase = createPostgresOwnershipVerificationServices({
       repositories,
       agentControl: repositories.agentControl,
@@ -264,6 +272,7 @@ export async function createPostgresRuntime(env = process.env, options = {}) {
       placement: placementServices,
       probeJobs: probeJobServices,
       highScale: highScaleServices,
+      testPolicies: testPolicyServices,
       productionReleaseEvidence: productionReleaseEvidenceServices,
       retention: retentionServices,
       wafPosture: {

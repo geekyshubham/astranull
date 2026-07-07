@@ -72,6 +72,9 @@ export function listFindings(ctx, options = {}) {
   if (options.target_id) {
     rows = rows.filter((f) => f.target_id === options.target_id);
   }
+  if (options.test_run_id) {
+    rows = rows.filter((f) => f.test_run_id === options.test_run_id);
+  }
   const limit = Number(options.limit);
   if (Number.isFinite(limit) && limit > 0) rows = rows.slice(0, limit);
   return rows;
@@ -89,7 +92,9 @@ export function listFindingsEnvelope(ctx, options = {}) {
           ? 'No findings match this target group filter.'
           : options.target_id
             ? 'No findings match this target filter.'
-            : 'No findings have been published for this tenant yet.',
+            : options.test_run_id
+              ? 'No findings match this test run filter.'
+              : 'No findings have been published for this tenant yet.',
     },
   };
 }

@@ -111,20 +111,6 @@ export async function fetchPortalConfig(): Promise<PortalConfig> {
   };
 }
 
-export function ensureDevSession(config: PortalConfig, current: Session | null): Session {
-  if (current) return current;
-  if (config.authMode !== 'dev-headers') return {};
-  const session = {
-    mode: 'dev-headers',
-    principal: 'customer',
-    tenant_id: 'ten_demo',
-    user_id: 'usr_admin',
-    role: 'admin'
-  };
-  saveSession(session);
-  return session;
-}
-
 export async function ensurePortalSession(surface: 'customer' | 'staff' = 'customer'): Promise<PortalSessionGate> {
   const config = await fetchPortalConfig();
   const session = loadSession();

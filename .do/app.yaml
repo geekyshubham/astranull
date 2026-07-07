@@ -60,6 +60,16 @@ services:
       - key: ASTRANULL_AUTH_MODE
         scope: RUN_TIME
         value: oidc-jwt
+      # OIDC identity is PINNED to the live host so tokens stay valid.
+      # bundledStagingOidc derives issuer/JWKS from ASTRANULL_PUBLIC_BASE_URL
+      # when these are unset; pinning them here prevents a silent issuer flip
+      # (and mass token invalidation) if the base URL ever changes.
+      - key: ASTRANULL_OIDC_ISSUER
+        scope: RUN_TIME
+        value: https://astranull-qteog.ondigitalocean.app/staging-oidc
+      - key: ASTRANULL_OIDC_JWKS_URL
+        scope: RUN_TIME
+        value: https://astranull-qteog.ondigitalocean.app/.well-known/jwks.json
       - key: ASTRANULL_PUBLIC_LOGIN_URL
         scope: RUN_TIME
         value: /login

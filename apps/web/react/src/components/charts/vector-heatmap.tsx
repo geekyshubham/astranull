@@ -50,7 +50,16 @@ function checkMatchesFamily(check: Record<string, unknown>, family: { keys: stri
   return family.keys.some((key) => haystack.includes(key));
 }
 
-function familyScore({
+type FamilyCoverageStatus = 'evidence' | 'run' | 'policy' | 'none' | 'no-data';
+
+type FamilyCoverage = {
+  status: FamilyCoverageStatus;
+  policyCount: number;
+  runCount: number;
+  evidenceCount: number;
+};
+
+function familyCoverage({
   checkIds,
   groupId,
   testPolicies,
@@ -62,15 +71,42 @@ function familyScore({
   testPolicies: Record<string, unknown>[];
   runs: Record<string, unknown>[];
   evidence: Record<string, unknown>[];
-}) {
-  if (!groupId || checkIds.size === 0) return null;
+}): FamilyCoverage {
+  // No declared group or no checks mapped to this vector family: nothing real to score.
+  if (!groupId || checkIds.size === 0) {
+    return { status: 'no-data', policyCount: 0, runCount: 0, evidenceCount: 0 };
+  }
   const policyCount = testPolicies.filter((policy) => itemTargetGroupId(policy) === groupId && checkIds.has(itemCheckId(policy))).length;
   const runCount = runs.filter((run) => itemTargetGroupId(run) === groupId && checkIds.has(itemCheckId(run))).length;
   const evidenceCount = evidence.filter((record) => itemTargetGroupId(record) === groupId && checkIds.has(itemCheckId(record))).length;
-  if (evidenceCount > 0) return 100;
-  if (runCount > 0) return 75;
-  if (policyCount > 0) return 50;
-  return 0;
+  let status: FamilyCoverageStatus = 'none';
+  if (evidenceCount > 0) status = 'evidence';
+  else if (runCount > 0) status = 'run';
+  else if (policyCount > 0) status = 'policy';
+  return { status, policyCount, runCount, evidenceCount };
+}
+
+const COVERAGE_TONE: Record<FamilyCoverageStatus, string> = {
+  evidence: 'success',
+  run: 'warn',
+  policy: 'warn',
+  none: 'danger',
+  'no-data': 'muted'
+};
+
+const COVERAGE_LABEL: Record<FamilyCoverageStatus, string> = {
+  evidence: 'Evidence',
+  run: 'Run',
+  policy: 'Policy',
+  none: 'No record',
+  'no-data': 'No data'
+};
+
+function coverageTitle(coverage: FamilyCoverage) {
+  if (coverage.status === 'no-data') {
+    return 'No checks mapped to this vector family for this target group.';
+  }
+  return `${coverage.evidenceCount} evidence · ${coverage.runCount} runs · ${coverage.policyCount} policies`;
 }
 
 export function VectorHeatmap({ checks, targetGroups, testPolicies, runs, evidence }: VectorHeatmapProps) {
@@ -108,11 +144,11 @@ export function VectorHeatmap({ checks, targetGroups, testPolicies, runs, eviden
                   .map((check) => String(check.check_id ?? check.id ?? ''))
                   .filter(Boolean)
               );
-              const score = familyScore({ checkIds: familyCheckIds, groupId, testPolicies, runs, evidence });
-              const tone = score === null ? 'muted' : score >= 100 ? 'success' : score >= 50 ? 'warn' : 'danger';
+              const score = familyCoverage({ checkIds: familyCheckIds, groupId, testPolicies, runs, evidence });
+              const tone = COVERAGE_TONE[score.status];
               return (
-                <span key={`${groupIndex}-${family.label}`} className={`heatmap-cell heatmap-${tone}`}>
-                  {score === null ? 'n/a' : `${score}%`}
+                <span key={`${groupIndex}-${family.label}`} className={`heatmap-cell heatmap-${tone}`} title={coverageTitle(score)}>
+                  {COVERAGE_LABEL[score.status]}
                 </span>
               );
             })}
@@ -123,6 +159,7 @@ export function VectorHeatmap({ checks, targetGroups, testPolicies, runs, eviden
         <Badge tone="success">Evidence</Badge>
         <Badge tone="warn">Policy/run</Badge>
         <Badge tone="danger">No record</Badge>
+        <Badge tone="muted">No data</Badge>
       </div>
     </div>
   );

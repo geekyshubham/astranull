@@ -61,6 +61,22 @@ services:
       - key: ASTRANULL_AUTH_MODE
         scope: RUN_TIME
         value: oidc-jwt
+      # OIDC identity is PINNED to the currently LIVE host
+      # (astranull-qteog.ondigitalocean.app), NOT to ASTRANULL_PUBLIC_BASE_URL.
+      # Rationale: bundledStagingOidc derives issuer/JWKS from the public base URL
+      # when these are unset. This spec keeps the astranull.site custom domain as
+      # the public base URL, but existing tokens were minted with the
+      # ondigitalocean issuer. Pinning here keeps both DO specs consistent on
+      # OIDC identity and prevents a `doctl apps update` from silently flipping
+      # the issuer and invalidating all live tokens. The app serves
+      # /.well-known/jwks.json on every hostname it answers, so the pinned JWKS
+      # URL resolves regardless of the public base URL.
+      - key: ASTRANULL_OIDC_ISSUER
+        scope: RUN_TIME
+        value: https://astranull-qteog.ondigitalocean.app/staging-oidc
+      - key: ASTRANULL_OIDC_JWKS_URL
+        scope: RUN_TIME
+        value: https://astranull-qteog.ondigitalocean.app/.well-known/jwks.json
       - key: ASTRANULL_PUBLIC_LOGIN_URL
         scope: RUN_TIME
         value: /login

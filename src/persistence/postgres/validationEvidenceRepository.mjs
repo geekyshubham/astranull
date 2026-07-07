@@ -879,14 +879,42 @@ export function createValidationEvidenceRepository(pool) {
       });
     },
 
-    async listFindings(ctx) {
+    async listFindings(ctx, options = {}) {
       return withTenantContext(pool, ctx.tenantId, async (client) => {
+        const params = [ctx.tenantId];
+        const conditions = ['tenant_id = $1'];
+        let paramIndex = 2;
+
+        if (options.target_group_id != null && options.target_group_id !== '') {
+          conditions.push(`target_group_id = $${paramIndex}`);
+          params.push(options.target_group_id);
+          paramIndex += 1;
+        }
+        if (options.target_id != null && options.target_id !== '') {
+          conditions.push(`target_id = $${paramIndex}`);
+          params.push(options.target_id);
+          paramIndex += 1;
+        }
+        if (options.test_run_id != null && options.test_run_id !== '') {
+          conditions.push(`test_run_id = $${paramIndex}`);
+          params.push(options.test_run_id);
+          paramIndex += 1;
+        }
+
+        const limit = Number(options.limit);
+        let limitClause = '';
+        if (Number.isFinite(limit) && limit > 0) {
+          params.push(Math.floor(limit));
+          limitClause = ` LIMIT $${paramIndex}`;
+          paramIndex += 1;
+        }
+
         const { rows } = await client.query(
           `SELECT ${FINDING_COLUMNS}
            FROM findings
-           WHERE tenant_id = $1
-           ORDER BY created_at DESC`,
-          [ctx.tenantId],
+           WHERE ${conditions.join(' AND ')}
+           ORDER BY created_at DESC${limitClause}`,
+          params,
         );
         return rows.map(mapFindingRow);
       });

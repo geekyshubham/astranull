@@ -50,8 +50,8 @@ export function AppShell({ route, session, data, onRouteChange, onRoleChange, ch
     }
   });
   const current = ROUTE_BY_ID.get(route) ?? NAV_ITEMS[0];
-  const tenantId = session.tenant_id ?? data.state?.tenant_id ?? 'ten_demo';
-  const environment = (data.state as { environment?: string } | null)?.environment ?? 'dev';
+  const tenantId = session.tenant_id ?? data.state?.tenant_id ?? 'unknown';
+  const environment = (data.state as { environment?: string } | null)?.environment ?? '';
   const visibleNavItems = useMemo(() => {
     const role = session.role ?? 'admin';
     return NAV_ITEMS.filter((item) => {
@@ -131,7 +131,8 @@ export function AppShell({ route, session, data, onRouteChange, onRoleChange, ch
         </nav>
         <div className="sidebar-foot">
           <span>
-            <b>{tenantId}</b> · {environment}
+            <b>{tenantId}</b>
+            {environment ? <> · {environment}</> : null}
           </span>
           <span>safe-by-default · SOC-gated</span>
           <Select

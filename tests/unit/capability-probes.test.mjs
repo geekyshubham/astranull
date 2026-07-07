@@ -510,6 +510,57 @@ describe('capability probes P0/P1', () => {
     assert.equal(outcome.external_result, 'connected');
   });
 
+  it('open recursion probe derives the query name from the target when not specified', async () => {
+    let observedName = null;
+    const outcome = await probeOpenRecursion(job({
+      target: { kind: 'fqdn', value: 'shop.example.test' },
+      probe_profile: { kind: 'dns_open_recursion', resolver_host: '8.8.8.8' },
+    }), {
+      resolve4ExternalFn: async (_resolver, name) => {
+        observedName = name;
+        return ['93.184.216.34'];
+      },
+    });
+    assert.equal(observedName, 'shop.example.test');
+    assert.equal(outcome.metadata.recursion_test_name, 'shop.example.test');
+    assert.equal(outcome.external_result, 'connected');
+  });
+
+  it('open recursion probe honors an explicit recursion_test_name', async () => {
+    let observedName = null;
+    await probeOpenRecursion(job({
+      target: { kind: 'fqdn', value: 'shop.example.test' },
+      probe_profile: {
+        kind: 'dns_open_recursion',
+        resolver_host: '8.8.8.8',
+        recursion_test_name: 'canary.declared.test',
+      },
+    }), {
+      resolve4ExternalFn: async (_resolver, name) => {
+        observedName = name;
+        return [];
+      },
+    });
+    assert.equal(observedName, 'canary.declared.test');
+  });
+
+  it('open recursion probe errors with explicit class when no target-derived name exists', async () => {
+    let called = false;
+    const outcome = await probeOpenRecursion(job({
+      target: { kind: 'fqdn', value: '' },
+      probe_profile: { kind: 'dns_open_recursion', resolver_host: '8.8.8.8' },
+    }), {
+      resolve4ExternalFn: async () => {
+        called = true;
+        return [];
+      },
+    });
+    assert.equal(outcome.external_result, 'error');
+    assert.equal(outcome.metadata.error_class, 'missing_recursion_test_name');
+    assert.equal(outcome.requests_sent, 0);
+    assert.equal(called, false);
+  });
+
   it('dns failover posture flags weak secondary NS coverage', async () => {
     const outcome = await probeDnsFailoverPosture(job({
       probe_profile: { kind: 'dns_failover_posture', secondary_nameservers: ['ns2.example.test'] },

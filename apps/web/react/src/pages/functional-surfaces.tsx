@@ -1182,7 +1182,7 @@ export function ValidationSurfacePage({
         verdicts,
         findings: data.findings
       });
-      const custody = await buildEvidenceCustodyManifest(exportData.payload, session.tenant_id ?? 'ten_demo');
+      const custody = await buildEvidenceCustodyManifest(exportData.payload, session.tenant_id ?? data.state?.tenant_id ?? 'unknown');
       const verified = await requestJson(config, session, '/v1/custody/verify', {
         method: 'POST',
         body: { payload: exportData.payload, custody }

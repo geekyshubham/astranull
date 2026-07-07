@@ -140,6 +140,14 @@ export {
   createPostgresInternalManagementServices,
 } from './internalManagementServiceAdapters.mjs';
 
+export {
+  TEST_POLICY_REPOSITORY_METHODS,
+  TEST_POLICY_CORE_CATALOG_REPOSITORY_METHODS,
+  TEST_POLICY_AUDIT_REPOSITORY_METHODS,
+  POSTGRES_TEST_POLICY_SERVICE_METHODS,
+  createPostgresTestPolicyServices,
+} from './testPolicyServiceAdapters.mjs';
+
 /**
  * @param {{ coreCatalog?: Record<string, unknown> }} repositories
  * @returns {{ tenants: Record<string, (...args: unknown[]) => unknown>, targetGroups: Record<string, (...args: unknown[]) => unknown> }}

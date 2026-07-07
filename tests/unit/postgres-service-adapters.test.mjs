@@ -57,6 +57,8 @@ import {
   WAF_ORCHESTRATOR_REPOSITORY_METHODS,
   POSTGRES_WAF_ORCHESTRATOR_SERVICE_METHODS,
   createPostgresWafOrchestratorServices,
+  POSTGRES_TEST_POLICY_SERVICE_METHODS,
+  createPostgresTestPolicyServices,
 } from '../../src/persistence/postgres/serviceAdapters.mjs';
 import {
   buildRetestResultsFromDelegatedRuns,
@@ -6936,5 +6938,282 @@ describe('postgres WAF orchestrator service adapters', () => {
     assert.equal(result.retest_request.id, 'rt_pg_1');
     assert.equal(repoCalls.some((c) => c.method === 'patchWafDriftEvent'), true);
     assert.equal(auditEvents[0].action, 'waf.retest.requested');
+  });
+});
+
+
+function createTestPolicyRepositories(overrides = {}) {
+  const auditEvents = [];
+  const stored = new Map();
+  const testPolicies = {
+    listTestPolicies: async () => overrides.listRows ?? [],
+    getActiveTestPolicy: async (ctx, id) =>
+      overrides.getActive ? overrides.getActive(ctx, id) : stored.get(id) ?? null,
+    createTestPolicy: async (ctx, record) => {
+      stored.set(record.id, { ...record });
+      return { ...record };
+    },
+    updateTestPolicy: async (ctx, id, patch) => {
+      const existing = stored.get(id) ?? overrides.getActive?.(ctx, id);
+      if (!existing) return null;
+      const next = { ...existing, ...patch };
+      stored.set(id, next);
+      return next;
+    },
+    archiveTestPolicy: async (ctx, id, opts) => {
+      const existing = stored.get(id) ?? overrides.getActive?.(ctx, id);
+      if (!existing) return null;
+      const next = { ...existing, state: 'archived', archived_at: opts?.now ?? 'now' };
+      stored.set(id, next);
+      return next;
+    },
+  };
+  const coreCatalog = {
+    getTargetGroup: async (ctx, id) =>
+      overrides.getTargetGroup ? overrides.getTargetGroup(ctx, id) : null,
+  };
+  const audit = {
+    appendAuditEvent: async (entry) => {
+      auditEvents.push(entry);
+      return entry;
+    },
+  };
+  return { repositories: { testPolicies, coreCatalog, audit }, auditEvents, stored };
+}
+
+describe('postgres test policy service adapter', () => {
+  const ctx = { tenantId: 'ten_demo', userId: 'usr_eng', role: 'engineer' };
+  const activeGroup = {
+    id: 'tg_1',
+    tenant_id: 'ten_demo',
+    name: 'TG',
+    environment_id: 'env_1',
+    expected_behavior_default: 'must_block_before_origin',
+    safety_policy: { max_runs_per_hour: 10 },
+    targets: [{ id: 'tgt_1', value: 'a.example' }],
+  };
+
+  it('exposes stable service method list', () => {
+    assert.deepEqual(POSTGRES_TEST_POLICY_SERVICE_METHODS, [
+      'listTestPolicies',
+      'createTestPolicy',
+      'patchTestPolicy',
+      'archiveTestPolicy',
+    ]);
+  });
+
+  it('throws when required repositories are missing', () => {
+    assert.throws(
+      () => createPostgresTestPolicyServices({}),
+      /requires repositories\.testPolicies/,
+    );
+  });
+
+  it('creates a customer-runnable policy, enriches it, and audits creation', async () => {
+    const { repositories, auditEvents } = createTestPolicyRepositories({
+      getTargetGroup: async (c, id) => (id === 'tg_1' ? activeGroup : null),
+    });
+    const svc = createPostgresTestPolicyServices(repositories, { now: () => FIXED_NOW });
+    const created = await svc.createTestPolicy(ctx, {
+      target_group_id: 'tg_1',
+      check_id: 'dns.authoritative_response.safe',
+      cadence: 'weekly',
+      expected_verdict: 'pass',
+      safe_windows: [{ day: 'Mon', start: '09:00', end: '11:00' }],
+    });
+    assert.equal(created.check_id, 'dns.authoritative_response.safe');
+    assert.equal(created.cadence, 'weekly');
+    assert.equal(created.target_group.name, 'TG');
+    assert.equal(created.target_count, 1);
+    assert.equal(created.check.safety_class, 'safe');
+    assert.equal(created.safe_windows[0].timezone, 'UTC');
+    assert.ok(auditEvents.some((e) => e.action === 'test_policy.created'));
+  });
+
+  it('rejects missing target group, unknown check, and SOC-gated checks', async () => {
+    const { repositories } = createTestPolicyRepositories({
+      getTargetGroup: async (c, id) => (id === 'tg_1' ? activeGroup : null),
+    });
+    const svc = createPostgresTestPolicyServices(repositories, { now: () => FIXED_NOW });
+
+    assert.deepEqual(await svc.createTestPolicy(ctx, {}), {
+      error: 'missing_target_group_id',
+      status: 400,
+    });
+    assert.deepEqual(await svc.createTestPolicy(ctx, { target_group_id: 'tg_missing' }), {
+      error: 'target_group_not_found',
+      status: 404,
+    });
+    assert.deepEqual(
+      await svc.createTestPolicy(ctx, { target_group_id: 'tg_1', check_id: 'nope' }),
+      { error: 'unknown_check', status: 400 },
+    );
+    const soc = await svc.createTestPolicy(ctx, {
+      target_group_id: 'tg_1',
+      check_id: 'high_scale.volumetric.request_only',
+    });
+    assert.equal(soc.error, 'soc_gated_check');
+    assert.equal(soc.status, 403);
+  });
+
+  it('lists only policies whose target group is still active', async () => {
+    const rows = [
+      { id: 'p1', tenant_id: 'ten_demo', target_group_id: 'tg_1', check_id: 'dns.authoritative_response.safe', cadence: 'manual', expected_verdict: 'pass', safe_windows: [], state: 'active' },
+      { id: 'p2', tenant_id: 'ten_demo', target_group_id: 'tg_gone', check_id: 'dns.authoritative_response.safe', cadence: 'manual', expected_verdict: 'pass', safe_windows: [], state: 'active' },
+    ];
+    const { repositories } = createTestPolicyRepositories({
+      listRows: rows,
+      getTargetGroup: async (c, id) => (id === 'tg_1' ? activeGroup : null),
+    });
+    const svc = createPostgresTestPolicyServices(repositories, { now: () => FIXED_NOW });
+    const listed = await svc.listTestPolicies(ctx);
+    assert.equal(listed.length, 1);
+    assert.equal(listed[0].id, 'p1');
+    assert.equal(listed[0].target_count, 1);
+  });
+
+  it('patches and archives with audit and null for missing policies', async () => {
+    const { repositories, auditEvents } = createTestPolicyRepositories({
+      getTargetGroup: async (c, id) => (id === 'tg_1' ? activeGroup : null),
+    });
+    const svc = createPostgresTestPolicyServices(repositories, { now: () => FIXED_NOW });
+    const created = await svc.createTestPolicy(ctx, {
+      target_group_id: 'tg_1',
+      check_id: 'dns.authoritative_response.safe',
+    });
+    const patched = await svc.patchTestPolicy(ctx, created.id, {
+      cadence: 'monthly',
+      expected_verdict: 'warn',
+    });
+    assert.equal(patched.cadence, 'monthly');
+    assert.equal(patched.expected_verdict, 'warn');
+    assert.ok(auditEvents.some((e) => e.action === 'test_policy.updated'));
+
+    const archived = await svc.archiveTestPolicy(ctx, created.id);
+    assert.deepEqual(archived, { archived: true, id: created.id });
+    assert.ok(auditEvents.some((e) => e.action === 'test_policy.archived'));
+
+    assert.equal(await svc.patchTestPolicy(ctx, 'p_missing', {}), null);
+    assert.equal(await svc.archiveTestPolicy(ctx, 'p_missing'), null);
+  });
+});
+
+describe('postgres ops-readiness inline probe uses injected repositories', () => {
+  const ctx = { tenantId: 'ten_demo', userId: 'usr_eng', role: 'engineer' };
+  const SUPPORT_READINESS_EVIDENCE = {
+    readiness_id: 'support_readiness_2026_07_02_staging',
+    environment: 'staging',
+    on_call_rotation: {
+      rotation_name: 'platform-primary',
+      owner: 'support-oncall-lead',
+      schedule_reference: 'pagerduty://services/astranull-platform-primary',
+    },
+    escalation_contacts: [
+      { role: 'support', contact_reference: 'escalation://support/primary-queue' },
+      { role: 'engineering', contact_reference: 'escalation://eng/platform-oncall' },
+      { role: 'soc', contact_reference: 'escalation://soc/high-scale' },
+    ],
+    sla_policy: {
+      policy_reference: 'policy://support/customer-sla/v2026-07',
+      severity_tiers: [
+        { severity: 'S1', response_minutes: 15 },
+        { severity: 'S2', response_minutes: 60 },
+        { severity: 'S3', response_minutes: 240 },
+      ],
+    },
+    incident_tabletop: {
+      tabletop_id: 'tabletop_2026_07_01_soc_escalation',
+      conducted_at: '2026-07-01T18:00:00.000Z',
+      scenario_reference: 'scenario://drills/agent-mass-offline-s2',
+      owner: 'incident-commander',
+      evidence_uri: 'evidence://support/tabletop/2026-07-01',
+    },
+    soc_escalation_path: {
+      path_reference: 'runbook://support/soc-escalation-v3',
+      severity_routes: [
+        { severity: 'S1', escalation_reference: 'escalation://soc/kill-switch-page' },
+        { severity: 'S2', escalation_reference: 'escalation://soc/review-queue' },
+      ],
+    },
+    customer_comms_templates: [
+      {
+        template_id: 'incident_initial_notice',
+        purpose: 'initial_customer_notification',
+        reference_uri: 'template://comms/incident-initial-v2',
+      },
+      {
+        template_id: 'incident_resolution',
+        purpose: 'resolution_summary',
+        reference_uri: 'template://comms/incident-resolution-v2',
+      },
+    ],
+    support_signoff: {
+      signoff_owner: 'support-operations-lead',
+      signed_at: '2026-07-02T12:00:00.000Z',
+      signoff_reference: 'signoff://support/readiness-ga-prep',
+    },
+  };
+
+  function opsRepositories(releaseLedger, overrides = {}) {
+    const group = baseStartTargetGroup();
+    let createdRun;
+    const { repositories, validationCalls } = createRecordingValidationRepositories({
+      getTargetGroup: async (c, id) => (id === 'tg_1' ? group : null),
+      listAgents: async () => [],
+      createTestRun: async (c, record) => {
+        createdRun = record;
+        return { ...record, awaiting_external_probe: false };
+      },
+      updateTestRun: async (c, id, patch) => ({ ...createdRun, id, ...patch }),
+      appendEvent: async (c, event) => event,
+      appendEvidence: async () => ({ id: 'ev_ops' }),
+      ...overrides,
+    });
+    repositories.productionReleaseEvidence = {
+      listProductionReleaseEvidence: async () => releaseLedger,
+    };
+    return { repositories, validationCalls };
+  }
+
+  it('reports connected when accepted support_readiness evidence exists (no dev store)', async () => {
+    const { repositories, validationCalls } = opsRepositories([
+      {
+        id: 'evd_1',
+        tenant_id: 'ten_demo',
+        kind: 'support_readiness',
+        status: 'accepted',
+        evidence: SUPPORT_READINESS_EVIDENCE,
+        created_at: '2026-06-01T00:00:00.000Z',
+      },
+    ]);
+    const { testRuns } = createPostgresValidationServices(repositories, { now: () => FIXED_NOW });
+    const result = await testRuns.startTestRun(ctx, {
+      check_id: 'ops.runbook_contact_validation.safe',
+      target_group_id: 'tg_1',
+      target_id: 'tgt_1',
+    });
+    const probeEvent = validationCalls.find(
+      (c) => c.method === 'appendEvent' && c.args[1]?.signal_type === 'probe_result',
+    );
+    assert.ok(probeEvent, 'expected an inline ops-readiness probe event');
+    assert.equal(probeEvent.args[1].metadata.external_result, 'connected');
+    assert.equal(probeEvent.args[1].metadata.ops_validation_ok, true);
+    assert.equal(result.run.probe_external_result, 'connected');
+  });
+
+  it('reports error when no accepted support_readiness evidence exists', async () => {
+    const { repositories, validationCalls } = opsRepositories([]);
+    const { testRuns } = createPostgresValidationServices(repositories, { now: () => FIXED_NOW });
+    await testRuns.startTestRun(ctx, {
+      check_id: 'ops.runbook_contact_validation.safe',
+      target_group_id: 'tg_1',
+      target_id: 'tgt_1',
+    });
+    const probeEvent = validationCalls.find(
+      (c) => c.method === 'appendEvent' && c.args[1]?.signal_type === 'probe_result',
+    );
+    assert.ok(probeEvent);
+    assert.equal(probeEvent.args[1].metadata.external_result, 'error');
+    assert.equal(probeEvent.args[1].metadata.ops_validation_ok, false);
   });
 });

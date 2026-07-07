@@ -279,6 +279,23 @@ CREATE TABLE ownership_verifications (
   created_by TEXT
 );
 
+CREATE TABLE test_policies (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL REFERENCES tenants(id),
+  target_group_id TEXT NOT NULL,
+  check_id TEXT NOT NULL,
+  cadence TEXT NOT NULL DEFAULT 'manual'
+    CHECK (cadence IN ('manual', 'daily', 'weekly', 'monthly', 'event_driven')),
+  expected_verdict TEXT NOT NULL DEFAULT 'pass'
+    CHECK (expected_verdict IN ('pass', 'warn', 'fail', 'manual_review')),
+  safe_windows JSONB NOT NULL DEFAULT '[]',
+  state TEXT NOT NULL DEFAULT 'active',
+  safety_policy_snapshot JSONB NOT NULL DEFAULT '{}',
+  archived_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE agent_jobs (
   id TEXT PRIMARY KEY,
   tenant_id TEXT NOT NULL REFERENCES tenants(id),
@@ -1170,6 +1187,7 @@ CREATE INDEX idx_internal_audit_log_tenant_created ON internal_audit_log(tenant_
 CREATE INDEX idx_internal_audit_log_staff_created ON internal_audit_log(staff_id, created_at DESC);
 CREATE INDEX idx_target_groups_tenant ON target_groups(tenant_id);
 CREATE INDEX idx_ownership_verifications_tenant_target ON ownership_verifications(tenant_id, target_group_id);
+CREATE INDEX idx_test_policies_tenant_active ON test_policies(tenant_id, target_group_id) WHERE archived_at IS NULL;
 CREATE INDEX idx_targets_tenant_group ON targets(tenant_id, target_group_id);
 CREATE INDEX idx_agents_tenant_heartbeat ON agents(tenant_id, last_heartbeat_at);
 CREATE INDEX idx_agents_tenant_group ON agents(tenant_id, target_group_id);
@@ -1263,6 +1281,8 @@ ALTER TABLE probe_jobs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE probe_jobs FORCE ROW LEVEL SECURITY;
 ALTER TABLE ownership_verifications ENABLE ROW LEVEL SECURITY;
 ALTER TABLE ownership_verifications FORCE ROW LEVEL SECURITY;
+ALTER TABLE test_policies ENABLE ROW LEVEL SECURITY;
+ALTER TABLE test_policies FORCE ROW LEVEL SECURITY;
 ALTER TABLE agent_jobs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE agent_jobs FORCE ROW LEVEL SECURITY;
 ALTER TABLE events ENABLE ROW LEVEL SECURITY;
@@ -1380,6 +1400,9 @@ CREATE POLICY tenant_isolation_probe_jobs ON probe_jobs
   USING (tenant_id = current_setting('app.tenant_id', true))
   WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
 CREATE POLICY tenant_isolation_ownership_verifications ON ownership_verifications
+  USING (tenant_id = current_setting('app.tenant_id', true))
+  WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+CREATE POLICY tenant_isolation_test_policies ON test_policies
   USING (tenant_id = current_setting('app.tenant_id', true))
   WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
 CREATE POLICY tenant_isolation_agent_jobs ON agent_jobs

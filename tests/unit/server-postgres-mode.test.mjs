@@ -986,6 +986,84 @@ describe('createServer postgres mode — route wiring', () => {
     assert.equal(unwired.json.error, 'postgres_route_not_wired');
   });
 
+  it('returns postgres_route_not_wired for test policies when service is missing', async () => {
+    ({ server, baseUrl } = listenPostgresServer({
+      tenants: { getCurrentTenant: async () => ({ id: 'ten_demo' }) },
+    }));
+
+    const headers = demoHeaders('engineer');
+    const unwired = await request(baseUrl, 'GET', '/v1/test-policies', { headers });
+    assert.equal(unwired.status, 503);
+    assert.equal(unwired.json.error, 'postgres_route_not_wired');
+  });
+
+  it('handles test policy routes via injected service (no postgres_route_not_wired)', async () => {
+    const policy = {
+      id: 'policy_pg_1',
+      tenant_id: 'ten_demo',
+      target_group_id: 'tg_1',
+      check_id: 'dns.authoritative_response.safe',
+      cadence: 'weekly',
+      expected_verdict: 'pass',
+      safe_windows: [],
+      state: 'active',
+      target_group: { id: 'tg_1', name: 'TG' },
+      target_count: 1,
+    };
+    const calls = [];
+    ({ server, baseUrl } = listenPostgresServer({
+      tenants: { getCurrentTenant: async () => ({ id: 'ten_demo' }) },
+      testPolicies: {
+        async listTestPolicies(ctx) {
+          calls.push({ method: 'list', ctx });
+          return [policy];
+        },
+        async createTestPolicy(ctx, body) {
+          calls.push({ method: 'create', ctx, body });
+          return { ...policy, cadence: body.cadence ?? 'weekly' };
+        },
+        async patchTestPolicy(ctx, id, body) {
+          calls.push({ method: 'patch', ctx, id, body });
+          return id === policy.id ? { ...policy, ...body } : null;
+        },
+        async archiveTestPolicy(ctx, id) {
+          calls.push({ method: 'archive', ctx, id });
+          return id === policy.id ? { archived: true, id } : null;
+        },
+      },
+    }));
+
+    const headers = demoHeaders('engineer');
+
+    const listed = await request(baseUrl, 'GET', '/v1/test-policies', { headers });
+    assert.equal(listed.status, 200);
+    assert.equal(listed.json.items.length, 1);
+    assert.equal(listed.json.items[0].id, 'policy_pg_1');
+
+    const created = await request(baseUrl, 'POST', '/v1/test-policies', {
+      headers,
+      body: { target_group_id: 'tg_1', check_id: 'dns.authoritative_response.safe', cadence: 'monthly' },
+    });
+    assert.equal(created.status, 201);
+    assert.equal(created.json.cadence, 'monthly');
+
+    const patched = await request(baseUrl, 'PATCH', '/v1/test-policies/policy_pg_1', {
+      headers,
+      body: { cadence: 'daily' },
+    });
+    assert.equal(patched.status, 200);
+    assert.equal(patched.json.cadence, 'daily');
+
+    const archived = await request(baseUrl, 'DELETE', '/v1/test-policies/policy_pg_1', { headers });
+    assert.equal(archived.status, 200);
+    assert.equal(archived.json.archived, true);
+
+    assert.deepEqual(
+      calls.map((c) => c.method),
+      ['list', 'create', 'patch', 'archive'],
+    );
+  });
+
   it('handles production release evidence routes via injected service without dev store', async () => {
     resetStoreForTests({ productionReleaseEvidence: [{ id: 'evd_dev_only', tenant_id: 'ten_demo' }] });
     const calls = [];

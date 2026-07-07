@@ -4026,7 +4026,7 @@ export function StaffSurfacePage({
   const [busy, setBusy] = useState('');
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
-  const [entitlementTenantId, setEntitlementTenantId] = useState(() => getString(data.internalTenants[0] ?? {}, ['tenant_id', 'id'], 'ten_demo'));
+  const [entitlementTenantId, setEntitlementTenantId] = useState(() => getString(data.internalTenants[0] ?? {}, ['tenant_id', 'id'], ''));
   const [entitlementFeature, setEntitlementFeature] = useState('waf_posture');
   const [entitlementAction, setEntitlementAction] = useState('true');
   const [subscriptionSnapshot, setSubscriptionSnapshot] = useState<DataItem | null>(null);

@@ -599,8 +599,30 @@ describe('postgres migrations', () => {
   it('getLatestMigrationVersion returns last sorted file', () => {
     const files = listMigrationFiles(MIGRATIONS_DIR);
     const latest = getLatestMigrationVersion(files);
-    assert.equal(latest, '0036_signup_queue_events_public_rls');
+    assert.equal(latest, '0037_test_policies');
     assert.equal(latest, files[files.length - 1].version);
+  });
+
+  it('lists test policies migration after signup queue events public RLS', () => {
+    const files = listMigrationFiles(MIGRATIONS_DIR);
+    const versions = files.map((f) => f.version);
+    assert.ok(versions.includes('0037_test_policies'));
+    assert.equal(
+      versions.indexOf('0037_test_policies'),
+      versions.indexOf('0036_signup_queue_events_public_rls') + 1,
+    );
+  });
+
+  it('0037 migration creates test_policies with tenant RLS and isolation policy', () => {
+    const sql = fs.readFileSync(
+      path.join(MIGRATIONS_DIR, '0037_test_policies.sql'),
+      'utf8',
+    );
+    assert.match(sql, /CREATE TABLE IF NOT EXISTS test_policies/);
+    assert.match(sql, /ALTER TABLE test_policies ENABLE ROW LEVEL SECURITY/);
+    assert.match(sql, /ALTER TABLE test_policies FORCE ROW LEVEL SECURITY/);
+    assert.match(sql, /test_policies_tenant_isolation/);
+    assert.match(sql, /current_setting\('app\.tenant_id', true\)/);
   });
 
   it('0010 migration adds notification delivery attempt retry columns', () => {

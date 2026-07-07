@@ -23,7 +23,12 @@ import {
   correlateVerdict,
   withinCorrelationWindow,
 } from '../../services/correlation.mjs';
-import { executeOpsReadinessProbe, isOpsReadinessProbeKind } from '../../lib/opsReadinessValidation.mjs';
+import {
+  buildOpsReadinessData,
+  executeOpsReadinessProbe,
+  isOpsReadinessProbeKind,
+  resolveOpsReadinessScenario,
+} from '../../lib/opsReadinessValidation.mjs';
 import { simulateProbeResult } from '../../services/probeStub.mjs';
 
 /** @type {readonly string[]} */
@@ -324,7 +329,42 @@ export function createPostgresValidationServices(repositories, options = {}) {
   const agentControl = repositories.agentControl;
   const probeJobs = repositories.probeJobs;
   const killSwitch = repositories.killSwitch;
+  const productionReleaseEvidence = repositories.productionReleaseEvidence;
   const nowFn = options.now ?? (() => new Date());
+
+  /**
+   * Gather ops-readiness governance records from Postgres repositories so the
+   * inline ops-readiness probe computes a real result from persisted data. Any
+   * repository that is genuinely unavailable degrades to empty inputs, which
+   * yields an accurate error/no-evidence verdict rather than a hardcoded pass.
+   */
+  async function gatherOpsReadinessData(ctx, check) {
+    const scenario = resolveOpsReadinessScenario(check);
+    let releaseEvidenceLedger = [];
+    if (
+      productionReleaseEvidence
+      && typeof productionReleaseEvidence.listProductionReleaseEvidence === 'function'
+    ) {
+      releaseEvidenceLedger = await productionReleaseEvidence.listProductionReleaseEvidence(ctx);
+    }
+    let killSwitchRecord = null;
+    let auditEntries = [];
+    if (scenario === 'kill_switch_readiness') {
+      if (typeof killSwitch.getKillSwitchRecord === 'function') {
+        killSwitchRecord = await killSwitch.getKillSwitchRecord(ctx);
+      }
+      if (typeof audit.listAuditEntries === 'function') {
+        auditEntries = await audit.listAuditEntries(ctx, { limit: 500 });
+      }
+    }
+    return buildOpsReadinessData({
+      scenario,
+      tenantId: ctx.tenantId,
+      releaseEvidenceLedger,
+      killSwitchRecord,
+      auditEntries,
+    });
+  }
 
   async function appendAudit(ctx, action, resourceType, resourceId, metadata) {
     await audit.appendAuditEvent(
@@ -740,7 +780,7 @@ export function createPostgresValidationServices(repositories, options = {}) {
         });
       } else {
         probe = isOpsReadinessProbeKind(check)
-          ? executeOpsReadinessProbe(ctx, check, target)
+          ? executeOpsReadinessProbe(ctx, check, target, await gatherOpsReadinessData(ctx, check))
           : simulateProbeResult(check, target, body.probe_profile);
         if (wouldExceedEventCap(run, 0, 1)) {
           await validationEvidence.updateTestRun(ctx, runId, {
@@ -1102,8 +1142,8 @@ export function createPostgresValidationServices(repositories, options = {}) {
   };
 
   const findings = {
-    async listFindings(ctx) {
-      return validationEvidence.listFindings(ctx);
+    async listFindings(ctx, options = {}) {
+      return validationEvidence.listFindings(ctx, options);
     },
     async getFinding(ctx, id) {
       return validationEvidence.getFinding(ctx, id);

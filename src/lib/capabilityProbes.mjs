@@ -1036,8 +1036,17 @@ export async function probeOpenRecursion(job, deps = {}) {
     };
   }
 
+  const queryName = job.probe_profile?.recursion_test_name ?? apexDomain(job);
+  if (!queryName) {
+    return {
+      external_result: 'error',
+      metadata: withKind(job, kind, { error_class: 'missing_recursion_test_name' }),
+      requests_sent: 0,
+      duration_ms: 0,
+    };
+  }
+
   const started = Date.now();
-  const queryName = job.probe_profile?.recursion_test_name ?? 'example.com';
   const resolveExternal = deps.resolve4ExternalFn ?? (async (resolver, name) => {
     const resolverClient = new Resolver();
     resolverClient.setServers([resolver]);
