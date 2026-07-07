@@ -45,20 +45,41 @@ function withKind(job, kind, metadata) {
 }
 
 function apexDomain(job) {
-  const raw = String(job.target?.value ?? '').trim().replace(/^https?:\/\//i, '').split('/')[0].split(':')[0];
-  return raw || null;
+  const value = String(job.target?.value ?? '').trim();
+  if (!value) return null;
+  if (/^https?:\/\//i.test(value)) {
+    try {
+      return new URL(value).hostname || null;
+    } catch {
+      return null;
+    }
+  }
+  const withoutPath = value.split('/')[0];
+  const bracketedIpv6 = withoutPath.match(/^\[([^\]]+)\](?::\d+)?$/);
+  if (bracketedIpv6) return bracketedIpv6[1];
+  if (net.isIP(withoutPath)) return withoutPath;
+  const hostPort = withoutPath.match(/^([^:]+):(\d+)$/);
+  return (hostPort ? hostPort[1] : withoutPath) || null;
 }
 
 function resolveHostSniTargets(job) {
   const targetValue = String(job.target?.value ?? '').trim();
   let hostname = job.probe_profile?.protected_host ?? apexDomain(job);
+  let hostHeader = hostname;
   let directIp = job.probe_profile?.direct_ip ?? job.target?.metadata?.direct_origin_ip ?? null;
   let requestUrl = null;
+  let requestPort = null;
+  let requestPath = '/';
 
   if (targetValue.startsWith('http')) {
     try {
       const url = new URL(targetValue);
-      if (!job.probe_profile?.protected_host) hostname = url.hostname;
+      if (!job.probe_profile?.protected_host) {
+        hostname = url.hostname;
+        hostHeader = url.host;
+      }
+      requestPort = url.port ? Number(url.port) : null;
+      requestPath = `${url.pathname || '/'}${url.search || ''}`;
       if (!directIp && /^\d{1,3}(\.\d{1,3}){3}$/.test(url.hostname)) {
         directIp = url.hostname;
         requestUrl = targetValue;
@@ -71,23 +92,30 @@ function resolveHostSniTargets(job) {
     directIp = targetValue;
   }
 
-  return { hostname, directIp, requestUrl };
+  return { hostname, hostHeader, directIp, requestUrl, requestPort, requestPath };
 }
 
 function baseUrlForHost(host, https = true) {
   return `${https ? 'https' : 'http'}://${host}/`;
 }
 
-function httpsHeadWithSni(directIp, hostname, { headers = {}, timeoutMs = 5000 }, deps = {}) {
+function httpsHeadWithSni(directIp, hostname, {
+  hostHeader = hostname,
+  headers = {},
+  timeoutMs = 5000,
+  port,
+  path = '/',
+} = {}, deps = {}) {
   const requestFn = deps.httpsRequestFn ?? https.request;
   return new Promise((resolve) => {
     const req = requestFn(
       {
         host: directIp,
+        ...(port != null ? { port } : {}),
         servername: hostname,
-        path: '/',
+        path,
         method: 'HEAD',
-        headers: { Host: hostname, ...headers },
+        headers: { Host: hostHeader, ...headers },
         timeout: timeoutMs,
         rejectUnauthorized: false,
       },
@@ -109,6 +137,13 @@ function httpsHeadWithSni(directIp, hostname, { headers = {}, timeoutMs = 5000 }
     req.on('error', (err) => resolve({ res: null, error: err }));
     req.end();
   });
+}
+
+function directHttpProbeUrl(directIp, port, path = '/') {
+  const host = String(directIp).includes(':') && !String(directIp).startsWith('[')
+    ? `[${directIp}]`
+    : directIp;
+  return `http://${host}${port != null ? `:${port}` : ''}${path || '/'}`;
 }
 
 async function boundedFetch(url, options = {}, deps = {}) {
@@ -218,9 +253,6 @@ export async function probeOriginLeakScan(job, deps = {}) {
   if (apex6.length > 0 && apex4.length === 0) {
     leak_signals.push('ipv6_only_dns');
   }
-  if (apex6.length > 0) {
-    leak_signals.push('ipv6_present');
-  }
 
   let edge_ip = null;
   const edgeProbe = await boundedFetch(baseUrlForHost(domain), {
@@ -239,7 +271,6 @@ export async function probeOriginLeakScan(job, deps = {}) {
     const ips = await resolve4(host, deps);
     requestsSent += 1;
     if (ips.length > 0) {
-      leak_signals.push(`subdomain_resolves:${prefix}`);
       ips.forEach((ip) => origin_ips.add(ip));
       const unique = [...new Set(ips)];
       if (apex4.length && unique.some((ip) => !apex4.includes(ip))) {
@@ -280,7 +311,7 @@ export async function probeOriginLeakScan(job, deps = {}) {
  */
 export async function probeHostSniBypass(job, deps = {}) {
   const kind = 'host_sni_bypass';
-  const { hostname, directIp, requestUrl } = resolveHostSniTargets(job);
+  const { hostname, hostHeader, directIp, requestUrl, requestPort, requestPath } = resolveHostSniTargets(job);
   if (!hostname || !directIp) {
     return { external_result: 'error', metadata: withKind(job, kind, { error_class: 'missing_direct_ip_or_host' }), requests_sent: 0, duration_ms: 0 };
   }
@@ -288,15 +319,21 @@ export async function probeHostSniBypass(job, deps = {}) {
   const started = Date.now();
   const timeoutMs = job.constraints?.timeout_ms ?? 5000;
   const headers = {
-    Host: hostname,
+    Host: hostHeader,
     ...(job.nonce ? { 'x-astranull-nonce': job.nonce } : {}),
     ...(job.probe_profile?.marker ? { 'x-astranull-marker': String(job.probe_profile.marker) } : {}),
   };
   const hasInjectedFetch = typeof deps.fetchFn === 'function';
   const useHttps = !hasInjectedFetch && job.probe_profile?.use_https !== false && !requestUrl;
   const { res, error } = useHttps
-    ? await httpsHeadWithSni(directIp, hostname, { headers, timeoutMs }, deps)
-    : await boundedFetch(requestUrl ?? `http://${directIp}/`, {
+    ? await httpsHeadWithSni(directIp, hostname, {
+      headers,
+      hostHeader,
+      timeoutMs,
+      port: requestPort,
+      path: requestPath,
+    }, deps)
+    : await boundedFetch(requestUrl ?? directHttpProbeUrl(directIp, requestPort, requestPath), {
       timeoutMs,
       fetchOptions: { method: 'HEAD', headers, redirect: 'manual' },
     }, deps);
@@ -330,7 +367,10 @@ export async function probeHostSniBypass(job, deps = {}) {
  */
 export async function probePortScanBounded(job, deps = {}) {
   const kind = 'port_scan_bounded';
-  const host = job.probe_profile?.scan_host ?? apexDomain(job) ?? job.target?.value;
+  const targetHost = job.target?.kind === 'ip'
+    ? String(job.target.value ?? '').trim()
+    : apexDomain(job);
+  const host = job.probe_profile?.scan_host ?? targetHost ?? job.target?.value;
   if (!host) {
     return { external_result: 'error', metadata: withKind(job, kind, { error_class: 'unsupported_target' }), requests_sent: 0, duration_ms: 0 };
   }
@@ -344,9 +384,8 @@ export async function probePortScanBounded(job, deps = {}) {
   let requestsSent = 0;
 
   let resolvedHost = host;
-  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) {
+  if (net.isIP(host) === 0) {
     const ips = await resolve4(host, deps);
-    requestsSent += 1;
     resolvedHost = ips[0] ?? host;
   }
 

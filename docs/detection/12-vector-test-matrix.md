@@ -16,10 +16,9 @@ This matrix defines what AstraNull should validate. It intentionally describes d
 
 | Vector | Safe validation | High-scale/SOC validation | Evidence | Done means |
 |---|---|---|---|---|
-| Direct IP reachability | Probe declared origin IP with nonce | Sustained approved direct-path scenario | Probe + agent observation | Direct traffic is blocked or finding created |
-| Host header bypass | Use declared Host/SNI combination safely | Approved path stress if needed | HTTP/TLS response + agent | Forged host path cannot reach origin unexpectedly |
-| SNI bypass | TLS handshake/request with declared SNI | Approved TLS scenario | TLS metadata + agent/log | Origin does not accept unauthorized SNI path |
-| Legacy DNS/origin leak | Customer-declared legacy target probe | Not typical high-scale | DNS/probe evidence | Legacy path not bypassable |
+| Direct IP reachability | Probe declared direct-origin IP or literal-IP URL with nonce | Sustained approved direct-path scenario | Probe + agent observation | Direct traffic is blocked or finding created |
+| Host/SNI direct-origin bypass | Use declared direct-origin IP with protected Host/SNI safely | Approved path stress if needed | HTTP/TLS response + agent | Protected host path cannot reach origin unexpectedly |
+| Legacy DNS/origin leak | Bounded DNS/subdomain/IPv6 scan on customer-declared host | Not typical high-scale | DNS/probe evidence | Legacy path not bypassable |
 | Admin/management exposure | Safe reachability only | Never high-scale by default | TCP/HTTP metadata | Admin surfaces not externally reachable |
 
 ## L3/L4 vectors

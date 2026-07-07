@@ -54,4 +54,29 @@ describe('probeJobs capability profile plumbing', () => {
     assert.equal(job.probe_profile.protected_host, 'edge.example.test');
     assert.equal(job.target.metadata.direct_origin_ip, '198.51.100.7');
   });
+
+  it('buildSignedProbeJobRecord enriches direct reachability from target metadata', () => {
+    const check = getCheckById('origin.direct_reachability.safe');
+    const job = buildSignedProbeJobRecord({
+      run: { id: 'run_1', tenant_id: 'ten_1', safety_constraints: { max_requests: 1 } },
+      check,
+      target: {
+        id: 'tgt_1',
+        kind: 'fqdn',
+        value: 'edge.example.test',
+        metadata: {
+          direct_origin_ip: '198.51.100.8',
+          protected_host: 'edge.example.test',
+        },
+      },
+      probeProfile: undefined,
+      probeWorkerSecret: SECRET,
+      now: new Date('2026-07-06T00:00:00.000Z'),
+      newId: () => 'pjob_direct',
+    });
+    assert.equal(job.probe_profile.kind, 'host_sni_bypass');
+    assert.equal(job.probe_profile.direct_ip, '198.51.100.8');
+    assert.equal(job.probe_profile.protected_host, 'edge.example.test');
+    assert.equal(job.target.metadata.direct_origin_ip, '198.51.100.8');
+  });
 });

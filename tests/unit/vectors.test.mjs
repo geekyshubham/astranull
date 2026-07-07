@@ -70,6 +70,30 @@ import { freshStore } from '../helpers/reset.mjs';
 import { startTestRun } from '../../src/services/testRuns.mjs';
 import { getStore } from '../../src/store.mjs';
 
+function makeSeedTargetCompatibleWith(check) {
+  const target = getStore().targets.find((t) => t.id === 'tgt_1');
+  if (!target) return;
+  if (check.supported_targets?.includes('url') && !check.supported_targets?.includes('fqdn')) {
+    target.kind = 'url';
+    target.value = 'https://origin.test/astranull-canary';
+    return;
+  }
+  if (check.supported_targets?.includes('fqdn')) {
+    target.kind = 'fqdn';
+    target.value = 'origin.test';
+    return;
+  }
+  if (check.supported_targets?.includes('ip')) {
+    target.kind = 'ip';
+    target.value = '198.51.100.7';
+    return;
+  }
+  if (check.supported_targets?.includes('url')) {
+    target.kind = 'url';
+    target.value = 'https://origin.test/';
+  }
+}
+
 describe('vector catalog', () => {
   it('blocks all soc_gated checks from test-runs', () => {
     freshStore();
@@ -96,6 +120,7 @@ describe('vector catalog', () => {
     });
 
     for (const check of CHECK_CATALOG.filter((c) => isCustomerRunnable(c))) {
+      makeSeedTargetCompatibleWith(check);
       const result = startTestRun(ctx, {
         check_id: check.check_id,
         target_group_id: 'tg_1',
@@ -120,6 +145,86 @@ describe('vector catalog', () => {
       }
     }
     assert.ok(getCheckById('dns.authoritative_response.safe'));
+  });
+
+  it('rejects target kinds outside a check supported target contract', () => {
+    freshStore();
+    const ctx = { tenantId: 'ten_demo', userId: 'u1', role: 'engineer' };
+    getStore().agents.push({
+      id: 'ag_1',
+      tenant_id: 'ten_demo',
+      status: 'online',
+      capabilities: ['heartbeat', 'canary'],
+      target_group_id: 'tg_1',
+    });
+    const result = startTestRun(ctx, {
+      check_id: 'path.protected_canary.safe',
+      target_group_id: 'tg_1',
+      target_id: 'tgt_1',
+    });
+    assert.equal(result.error, 'target_kind_not_supported');
+    assert.equal(result.status, 400);
+    assert.deepEqual(result.supported_targets, ['url']);
+  });
+
+  it('allows protected canary only when a full URL target is declared', () => {
+    freshStore();
+    const ctx = { tenantId: 'ten_demo', userId: 'u1', role: 'engineer' };
+    getStore().agents.push({
+      id: 'ag_1',
+      tenant_id: 'ten_demo',
+      status: 'online',
+      capabilities: ['heartbeat', 'canary'],
+      target_group_id: 'tg_1',
+    });
+    const target = getStore().targets.find((t) => t.id === 'tgt_1');
+    target.kind = 'url';
+    target.value = 'https://origin.test/astranull-canary';
+    const result = startTestRun(ctx, {
+      check_id: 'path.protected_canary.safe',
+      target_group_id: 'tg_1',
+      target_id: 'tgt_1',
+    });
+    assert.ok(result.run);
+    assert.equal(result.run.check_id, 'path.protected_canary.safe');
+  });
+
+  it('preflights signed-worker Host/SNI checks for declared direct origin IP', () => {
+    freshStore();
+    const ctx = { tenantId: 'ten_demo', userId: 'u1', role: 'engineer' };
+    getStore().agents.push({
+      id: 'ag_1',
+      tenant_id: 'ten_demo',
+      status: 'online',
+      capabilities: ['heartbeat', 'canary', 'packet'],
+      target_group_id: 'tg_1',
+    });
+    const missing = startTestRun(
+      ctx,
+      {
+        check_id: 'origin.direct_bypass.safe',
+        target_group_id: 'tg_1',
+        target_id: 'tgt_1',
+      },
+      { probeMode: 'signed-worker', probeWorkerSecret: 's'.repeat(32) },
+    );
+    assert.equal(missing.error, 'missing_direct_origin_ip');
+    assert.equal(missing.status, 400);
+
+    getStore().targets.find((t) => t.id === 'tgt_1').metadata = {
+      direct_origin_ip: '198.51.100.7',
+    };
+    const accepted = startTestRun(
+      ctx,
+      {
+        check_id: 'origin.direct_bypass.safe',
+        target_group_id: 'tg_1',
+        target_id: 'tgt_1',
+      },
+      { probeMode: 'signed-worker', probeWorkerSecret: 's'.repeat(32) },
+    );
+    assert.ok(accepted.run);
+    assert.ok(accepted.probe_job);
   });
 
   it('requires bounded probe and evidence metadata on every customer-runnable check', () => {

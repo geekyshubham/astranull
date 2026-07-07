@@ -31,7 +31,7 @@ import { getCheckById } from '../../src/contracts/checks.mjs';
 
 function job(overrides = {}) {
   return {
-    constraints: { timeout_ms: 1000, max_requests: 14 },
+    constraints: { timeout_ms: 1000, max_requests: 15 },
     probe_profile: { kind: 'origin_leak_scan' },
     target: { kind: 'fqdn', value: 'shop.example.test' },
     ...overrides,
@@ -63,8 +63,46 @@ describe('capability probes P0/P1', () => {
       fetchFn: async () => ({ status: 200, headers: { get: () => null } }),
     });
     assert.equal(outcome.external_result, 'connected');
-    assert.ok(outcome.metadata.leak_signals.includes('ipv6_present'));
+    assert.equal(outcome.metadata.leak_signals.includes('ipv6_present'), false);
     assert.ok(outcome.metadata.leak_signals.some((s) => s.startsWith('subdomain_origin_divergence:')));
+  });
+
+  it('origin leak scan does not flag normal dual-stack DNS as a leak', async () => {
+    const outcome = await probeOriginLeakScan(job(), {
+      resolve4Fn: async (host) => (host === 'shop.example.test' ? ['203.0.113.10'] : []),
+      resolve6Fn: async () => ['2001:db8::1'],
+      fetchFn: async () => ({ status: 200, headers: { get: () => null } }),
+    });
+    assert.equal(outcome.external_result, 'blocked');
+    assert.deepEqual(outcome.metadata.leak_signals, []);
+    assert.deepEqual(outcome.metadata.ipv6_addrs, ['2001:db8::1']);
+  });
+
+  it('origin leak scan does not flag subdomains that resolve to the apex edge IP', async () => {
+    const outcome = await probeOriginLeakScan(job({
+      constraints: { max_requests: 4, timeout_ms: 1000 },
+    }), {
+      resolve4Fn: async (host) => {
+        if (host === 'shop.example.test') return ['203.0.113.10'];
+        if (host === 'www.shop.example.test') return ['203.0.113.10'];
+        return [];
+      },
+      resolve6Fn: async () => [],
+      fetchFn: async () => ({ status: 200, headers: { get: () => null } }),
+    });
+    assert.equal(outcome.external_result, 'blocked');
+    assert.deepEqual(outcome.metadata.leak_signals, []);
+    assert.equal(outcome.metadata.subdomains_scanned.length, 1);
+  });
+
+  it('origin leak scan default budget covers the full bounded prefix list', async () => {
+    const outcome = await probeOriginLeakScan(job(), {
+      resolve4Fn: async () => [],
+      resolve6Fn: async () => [],
+      fetchFn: async () => ({ status: 404, headers: { get: () => null } }),
+    });
+    assert.equal(outcome.requests_sent, 15);
+    assert.equal(outcome.metadata.subdomains_scanned.length, BOUNDED_SUBDOMAIN_PREFIXES.length);
   });
 
   it('host/SNI bypass derives direct IP and URL from declared http target', async () => {
@@ -83,6 +121,54 @@ describe('capability probes P0/P1', () => {
     );
     assert.equal(outcome.metadata.bypass_signal, true);
     assert.equal(outcome.metadata.direct_ip, '198.51.100.7');
+  });
+
+  it('host/SNI bypass reports missing direct IP before live probing', async () => {
+    const outcome = await probeHostSniBypass(
+      job({
+        target: { kind: 'fqdn', value: 'edge.example.test' },
+        probe_profile: { kind: 'host_sni_bypass', protected_host: 'edge.example.test' },
+      }),
+      {
+        fetchFn: async () => {
+          throw new Error('should not execute without direct IP');
+        },
+      },
+    );
+    assert.equal(outcome.external_result, 'error');
+    assert.equal(outcome.metadata.error_class, 'missing_direct_ip_or_host');
+    assert.equal(outcome.requests_sent, 0);
+  });
+
+  it('host/SNI bypass preserves URL port and path when direct IP comes from metadata', async () => {
+    let captured = null;
+    const outcome = await probeHostSniBypass(
+      job({
+        target: {
+          kind: 'url',
+          value: 'https://edge.example.test:8443/health?probe=1',
+          metadata: { direct_origin_ip: '198.51.100.7' },
+        },
+        probe_profile: { kind: 'host_sni_bypass' },
+      }),
+      {
+        httpsRequestFn: (opts, cb) => {
+          captured = opts;
+          return {
+            on() { return this; },
+            end() {
+              cb({ statusCode: 200, headers: {}, resume() {} });
+            },
+          };
+        },
+      },
+    );
+    assert.equal(captured.host, '198.51.100.7');
+    assert.equal(captured.servername, 'edge.example.test');
+    assert.equal(captured.port, 8443);
+    assert.equal(captured.path, '/health?probe=1');
+    assert.equal(captured.headers.Host, 'edge.example.test:8443');
+    assert.equal(outcome.metadata.bypass_signal, true);
   });
 
   it('host/SNI bypass detects direct IP reachability via injectable fetchFn', async () => {
@@ -156,6 +242,62 @@ describe('capability probes P0/P1', () => {
     );
     assert.deepEqual(probedPorts, [22, 443, 80]);
     assert.equal(outcome.requests_sent, 3);
+  });
+
+  it('port scan preserves IPv6 literal IP targets', async () => {
+    let resolved = false;
+    const probed = [];
+    const outcome = await probePortScanBounded(
+      job({
+        constraints: { timeout_ms: 1000, max_requests: 1 },
+        target: { kind: 'ip', value: '2001:db8::1' },
+        probe_profile: { kind: 'port_scan_bounded', ports: [443] },
+      }),
+      {
+        resolve4Fn: async () => {
+          resolved = true;
+          return [];
+        },
+        connectFn: ({ host, port }) => {
+          probed.push({ host, port });
+          return {
+            once(event, handler) {
+              if (event === 'error') setImmediate(() => handler({ code: 'ECONNREFUSED' }));
+            },
+            destroy() {},
+          };
+        },
+      },
+    );
+    assert.equal(resolved, false);
+    assert.deepEqual(probed, [{ host: '2001:db8::1', port: 443 }]);
+    assert.equal(outcome.requests_sent, 1);
+  });
+
+  it('port scan uses the full port budget for FQDN targets', async () => {
+    const probedPorts = [];
+    const outcome = await probePortScanBounded(
+      job({
+        constraints: { timeout_ms: 1000, max_requests: 15 },
+        target: { kind: 'fqdn', value: 'scan.example.test' },
+        probe_profile: { kind: 'port_scan_bounded', max_requests: 15 },
+      }),
+      {
+        resolve4Fn: async () => ['203.0.113.55'],
+        connectFn: ({ port }) => {
+          probedPorts.push(port);
+          return {
+            once(event, handler) {
+              if (event === 'error') setImmediate(() => handler({ code: 'ECONNREFUSED' }));
+            },
+            destroy() {},
+          };
+        },
+      },
+    );
+    assert.equal(probedPorts.length, 15);
+    assert.equal(probedPorts.at(-1), 8443);
+    assert.equal(outcome.requests_sent, 15);
   });
 
   it('port scan bounded reports risky admin ports', async () => {

@@ -26,8 +26,8 @@ Customer-runnable checks declare a **probe_profile** object alongside `probe_sim
 
 | Field | Rule |
 |---|---|
-| `kind` | One of `http_head`, `tcp_connect`, `dns_resolve`, `metadata_marker`. |
-| `max_requests` | `1` for most checks; up to `5` only where safety constraints already allow low-rate sequences. |
+| `kind` | One of the catalog allowlist in `ALLOWED_PROBE_PROFILE_KINDS` (`http_head`, `tcp_connect`, `dns_resolve`, `metadata_marker`, plus bounded capability probes such as `host_sni_bypass`, `origin_leak_scan`, `port_scan_bounded`, `rate_limit_sequence`, DNS/TLS/protocol posture probes, and WAF marker/fingerprint probes). |
+| `max_requests` | `1` for most checks; up to `5` for low-rate sequences, `8-10` for bounded API/WAF scans, and `15` only for the fixed origin-leak or risky-port catalogs. |
 | `timeout_ms` | Bounded; must not exceed `5000` ms in the safe catalog. |
 | `marker` | Optional harmless label (for example `astranull-safe-marker`). |
 | `method` | `HEAD` only when `kind` is `http_head`. |
@@ -38,8 +38,8 @@ Orchestration copies the catalog profile into signed probe jobs. `canonicalJobSi
 
 | Check | Risk | What it proves | Required setup |
 |---|---|---|---|
-| Direct-Origin Bypass | Safe | Whether direct origin traffic reaches internal zone. | Target IP/FQDN + agent on origin/canary/mirror. |
-| Protected-Path Canary | Safe | Whether protected route reaches intended canary. | Canary endpoint behind protected path. |
+| Direct-Origin Bypass | Safe | Whether direct origin traffic reaches internal zone. | Target IP/literal-IP URL, or FQDN with declared `direct_origin_ip`, plus agent on origin/canary/mirror. |
+| Protected-Path Canary | Safe | Whether protected route reaches intended canary. | Full URL for the canary endpoint behind protected path. |
 | Forbidden TCP Port | Safe | Whether forbidden TCP port is reachable. | IP/port target + expected block. |
 | Forbidden UDP Port | Safe | Whether UDP packet reaches observation point. | Agent packet/mirror mode. |
 | Basic L3/L4 Deny Rule | Safe | Whether a denied protocol/port penetrates. | Agent observation mode. |

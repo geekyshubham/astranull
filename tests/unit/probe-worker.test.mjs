@@ -586,7 +586,10 @@ describe('probe worker poll integration', () => {
 describe('executeProbeForJob routing', () => {
   const CAPABILITY_ROUTING_CASES = [
     { kind: 'origin_leak_scan', check_id: 'origin.leak_scan.safe', vector_family: 'origin' },
+    { kind: 'host_sni_bypass', check_id: 'origin.direct_reachability.safe', vector_family: 'origin', target: { kind: 'fqdn', value: 'edge.test', metadata: { direct_origin_ip: '198.51.100.7' } }, probe_profile: { kind: 'host_sni_bypass', protected_host: 'edge.test', max_requests: 1, timeout_ms: 500 } },
+    { kind: 'host_sni_bypass', check_id: 'origin.direct_bypass.safe', vector_family: 'origin', target: { kind: 'fqdn', value: 'edge.test', metadata: { direct_origin_ip: '198.51.100.7' } }, probe_profile: { kind: 'host_sni_bypass', protected_host: 'edge.test', max_requests: 1, timeout_ms: 500 } },
     { kind: 'host_sni_bypass', check_id: 'origin.host_sni_bypass.safe', vector_family: 'origin', target: { kind: 'url', value: 'http://198.51.100.7/' }, probe_profile: { kind: 'host_sni_bypass', protected_host: 'edge.test', direct_ip: '198.51.100.7', max_requests: 1, timeout_ms: 500 } },
+    { kind: 'host_sni_bypass', check_id: 'waf.origin_bypass.safe', vector_family: 'waf', target: { kind: 'fqdn', value: 'edge.test', metadata: { direct_origin_ip: '198.51.100.7' } }, probe_profile: { kind: 'host_sni_bypass', protected_host: 'edge.test', max_requests: 1, timeout_ms: 500 } },
     { kind: 'port_scan_bounded', check_id: 'l3.firewall_exposure_scan.safe', vector_family: 'l3_l4' },
     { kind: 'rate_limit_sequence', check_id: 'l7.low_rate_rate_limit.safe', vector_family: 'l7' },
     { kind: 'waf_enforcement_probe', check_id: 'waf.enforcement.safe', vector_family: 'waf' },
@@ -646,6 +649,34 @@ describe('executeProbeForJob routing', () => {
       assert.notEqual(outcome.metadata.error_class, 'live_probe_requires_signed_worker');
     });
   }
+
+  it('routes Host/SNI bypass with declared URL port and path preserved', async () => {
+    const { executeProbeForJob } = await import('../../workers/probe-worker.mjs');
+    const check = getCheckById('origin.direct_bypass.safe');
+    let captured = null;
+    const job = baseJob({
+      check_id: check.check_id,
+      vector_family: check.vector_family,
+      probe_profile: check.probe_profile,
+      target: {
+        kind: 'url',
+        value: 'https://edge.test:8443/health?probe=1',
+        metadata: { direct_origin_ip: '198.51.100.7' },
+      },
+      constraints: { timeout_ms: 500, max_requests: 1 },
+    });
+    const outcome = await executeProbeForJob(job, {
+      signedJobVerified: true,
+      fetchFn: async (url, init) => {
+        captured = { url, init };
+        return { status: 200, headers: { get: () => null } };
+      },
+    });
+    assert.equal(captured.url, 'http://198.51.100.7:8443/health?probe=1');
+    assert.equal(captured.init.headers.Host, 'edge.test:8443');
+    assert.equal(outcome.metadata.probe_kind, 'host_sni_bypass');
+    assert.equal(outcome.external_result, 'connected');
+  });
 
   it('routes udp_probe profile kind to bounded UDP datagram probe', async () => {
     const { executeProbeForJob } = await import('../../workers/probe-worker.mjs');

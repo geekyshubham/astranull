@@ -39,7 +39,7 @@ This catalog lists vectors AstraNull should understand for readiness validation.
 
 ## Catalog implementation (DET-015)
 
-The production-safe catalog in `src/contracts/checks.mjs` maps matrix rows to versioned `check_id` entries. Customer-runnable checks use bounded `probe_profile` kinds (`http_head`, `tcp_connect`, `dns_resolve`, `metadata_marker`) with `stop_conditions`, `evidence_required`, and `required_customer_setup`. Disruptive or high-scale matrix rows (connection exhaustion, multi-vector drills, provider telemetry validation, kill-switch drills) are **SOC-gated request markers** without customer probe profiles.
+The production-safe catalog in `src/contracts/checks.mjs` maps matrix rows to versioned `check_id` entries. Customer-runnable checks use bounded allowlisted `probe_profile` kinds, from simple `http_head` / `tcp_connect` / `dns_resolve` / `metadata_marker` probes to fixed capability probes such as `host_sni_bypass`, `origin_leak_scan`, `port_scan_bounded`, DNS/TLS/protocol posture probes, and WAF marker/fingerprint probes. Each customer-runnable entry must carry `stop_conditions`, `evidence_required`, and `required_customer_setup`. Disruptive or high-scale matrix rows (connection exhaustion, multi-vector drills, provider telemetry validation, kill-switch drills) are **SOC-gated request markers** without customer probe profiles.
 
 This catalog is defensive metadata: it must not be interpreted as a library of amplification, reflection, spoofing, or unmanaged traffic-generation recipes.
 

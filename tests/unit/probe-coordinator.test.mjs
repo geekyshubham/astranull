@@ -49,6 +49,10 @@ function seedAgent() {
     capabilities: ['canary', 'packet', 'heartbeat'],
     target_group_id: 'tg_1',
   });
+  const target = getStore().targets.find((t) => t.id === 'tgt_1');
+  if (target) {
+    target.metadata = { direct_origin_ip: '198.51.100.7' };
+  }
 }
 
 function ackedJobForAgent(agentId, runId) {
@@ -280,7 +284,10 @@ describe('signed probe coordinator', () => {
 
     const job = getStore().probeJobs.find((j) => j.test_run_id === started.run.id);
     const check = getCheckById('origin.direct_bypass.safe');
-    assert.deepEqual(job.probe_profile, check.probe_profile);
+    assert.deepEqual(job.probe_profile, {
+      ...check.probe_profile,
+      direct_ip: '198.51.100.7',
+    });
     assert.equal(job.constraints.max_requests, check.probe_profile.max_requests);
     assert.equal(job.constraints.timeout_ms, 5000);
     const body = probeResultBody(job, 'blocked', { metadata: { region: 'us-east' } });

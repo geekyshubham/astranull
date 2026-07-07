@@ -1,3 +1,4 @@
+import { isIP } from 'node:net';
 import { audit } from '../audit.mjs';
 import { evaluateCheckPrerequisites, getCheckById, isCustomerRunnable } from '../contracts/checks.mjs';
 import { incMetric } from '../lib/metrics.mjs';
@@ -235,6 +236,37 @@ function denyEventCap(ctx, run, metadata = {}) {
   );
 }
 
+function normalizedUrlHostname(value) {
+  try {
+    return new URL(String(value)).hostname.replace(/^\[|\]$/g, '');
+  } catch {
+    return null;
+  }
+}
+
+function effectiveTargetKind(target) {
+  if (/^https?:\/\//i.test(String(target?.value ?? ''))) return 'url';
+  return target?.kind;
+}
+
+function hasDirectOriginForHostSni(target, body = {}) {
+  const overrideDirectIp =
+    body?.probe_profile != null && typeof body.probe_profile === 'object' && !Array.isArray(body.probe_profile)
+      ? body.probe_profile.direct_ip
+      : null;
+  const metadata = target?.metadata_json ?? target?.metadata ?? {};
+  const directIp = overrideDirectIp ?? metadata.direct_origin_ip;
+  if (typeof directIp === 'string' && directIp.trim()) return true;
+  if (target?.kind === 'ip' && isIP(String(target.value ?? '').replace(/^\[|\]$/g, '')) !== 0) {
+    return true;
+  }
+  if (/^https?:\/\//i.test(String(target?.value ?? ''))) {
+    const host = normalizedUrlHostname(target.value);
+    if (host && isIP(host) !== 0) return true;
+  }
+  return false;
+}
+
 export function maybeFinalizeRunAfterProbeIngest(ctxOrRunId, maybeRunId) {
   let ctx = null;
   let runId;
@@ -338,6 +370,33 @@ export function startTestRun(ctx, body, runtimeConfig = { probeMode: 'simulation
     (t) => t.id === targetId && t.tenant_id === ctx.tenantId && t.target_group_id === targetGroupId,
   );
   if (!target) return { error: 'target_not_found', status: 404 };
+
+  const kind = effectiveTargetKind(target);
+  if (Array.isArray(check.supported_targets) && check.supported_targets.length > 0) {
+    if (!check.supported_targets.includes(kind)) {
+      return {
+        error: 'target_kind_not_supported',
+        status: 400,
+        check_id: check.check_id,
+        target_kind: kind ?? null,
+        supported_targets: check.supported_targets,
+      };
+    }
+  }
+
+  if (
+    runtimeConfig.probeMode === 'signed-worker'
+    && check.probe_profile?.kind === 'host_sni_bypass'
+    && !hasDirectOriginForHostSni(target, body)
+  ) {
+    return {
+      error: 'missing_direct_origin_ip',
+      status: 400,
+      check_id: check.check_id,
+      message:
+        'Signed-worker Host/SNI bypass checks require an IP target, literal-IP URL, probe_profile.direct_ip, or target.metadata.direct_origin_ip.',
+    };
+  }
 
   const onlineAgents = getStore().agents.filter(
     (a) =>

@@ -9,8 +9,7 @@ Enterprises often place CDN/WAF/DDoS protection in front of apps, but the origin
 | Check | What it validates | Evidence |
 |---|---|---|
 | Direct IP reachability | Direct traffic to origin IP should not reach origin. | Probe result + agent observation. |
-| Host header bypass | Direct request with expected host should not route to app. | Probe result + agent observation/log. |
-| SNI bypass | TLS SNI should not allow direct origin route. | TLS/probe result + agent/log. |
+| Host/SNI direct-origin bypass | Direct request to declared origin IP with the protected HTTP Host and TLS SNI should not route to app. | Probe result + agent observation/log. |
 | DNS-only hostname bypass | Unprotected hostname should not reach origin. | DNS/probe + agent. |
 | Canary path bypass | Canary should only be reachable through intended path. | Protected path vs direct path comparison. |
 | Origin auth missing | Origin should require CDN/scrubber authentication where configured. | Marker/response evidence. |
@@ -27,7 +26,9 @@ Enterprises often place CDN/WAF/DDoS protection in front of apps, but the origin
 
 ## Safe validation method
 
-AstraNull sends a small labeled probe with unique nonce to the declared origin/direct path and checks whether the agent observes it.
+AstraNull sends a small labeled probe with unique nonce to the declared origin/direct path and checks whether the agent observes it. In developer simulation mode this is `SAFE_PROBE_SIMULATION`; in signed-worker mode, Host/SNI-backed origin checks send one bounded HEAD request to a declared direct-origin IP or literal-IP URL while preserving the protected Host/SNI value and declared URL path.
+
+FQDN origin-bypass checks therefore require explicit direct-origin metadata such as `target.metadata.direct_origin_ip` or `probe_profile.direct_ip`. AstraNull must reject signed-worker origin-bypass runs before queueing a job when that direct path is missing.
 
 Do not rely only on external response. A timeout can still mean traffic reached the origin and was dropped later. Agent observation is the key proof.
 
