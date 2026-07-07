@@ -31,6 +31,9 @@ import * as reports from './services/reports.mjs';
 import * as targetGroups from './services/targetGroups.mjs';
 import * as ownershipVerification from './services/ownershipVerification.mjs';
 import * as dnsOwnership from './services/dnsOwnership.mjs';
+import * as loa from './services/loa.mjs';
+import * as targetDetail from './services/targetDetail.mjs';
+import * as remediation from './services/remediation.mjs';
 import * as testPolicies from './services/testPolicies.mjs';
 import * as testRuns from './services/testRuns.mjs';
 import * as tokens from './services/tokens.mjs';
@@ -74,6 +77,8 @@ import {
   isNotificationManagementRoute,
   isHighScaleRoute,
   isPlacementRoute,
+  isPortalRevampRoute,
+  portalRevampServicesWired,
   requiredAgentUpdateServiceMethods,
   requiredHighScaleServiceMethods,
   requiredPlacementServiceMethods,
@@ -95,9 +100,15 @@ function defaultServiceDeps() {
     evidence,
     findings: {
       listFindings: findings.listFindings,
+      listFindingsEnvelope: findings.listFindingsEnvelope,
       getFinding: findings.getFinding,
       patchFinding: findings.patchFinding,
+      getEvidenceBundle: findings.getEvidenceBundle,
     },
+    loa,
+    targetDetail,
+    remediation,
+    signupIntake,
     reports,
     secretVault,
     events,
@@ -402,6 +413,14 @@ function blockPostgresAgentUpdateRoute(runtimeConfig, serviceDeps, path, method,
   if (required.every((name) => typeof svc?.[name] === 'function')) {
     return false;
   }
+  respondPostgresRouteNotWired(res);
+  return true;
+}
+
+function blockPostgresPortalRevampRoute(runtimeConfig, serviceDeps, path, method, res) {
+  if (runtimeConfig.persistenceMode !== 'postgres') return false;
+  if (!isPortalRevampRoute(path, method)) return false;
+  if (portalRevampServicesWired(serviceDeps, path, method)) return false;
   respondPostgresRouteNotWired(res);
   return true;
 }
@@ -1021,6 +1040,13 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
       ...(windowDays ? { window_days: windowDays } : {}),
     }));
   }
+  if (method === 'GET' && path === '/v1/waf/coverage/summary') {
+    const gate = requirePermission(ctx, 'waf:read');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    if (blockPostgresPortalRevampRoute(runtimeConfig, serviceDeps, path, method, res)) return;
+    const getSummaryFn = wafSvc.getCoverageSummary ?? wafPosture.getCoverageSummary;
+    return json(res, 200, await getSummaryFn(ctx));
+  }
   if (method === 'GET' && path === '/v1/waf/coverage/vendors') {
     const gate = requirePermission(ctx, 'waf:read');
     if (!gate.ok) return json(res, gate.status, gate.body);
@@ -1205,7 +1231,17 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
   if (method === 'GET' && path === '/v1/connectors') {
     const gate = requirePermission(ctx, 'waf:connector_read');
     if (!gate.ok) return json(res, gate.status, gate.body);
-    return json(res, 200, { items: await wafSvc.listConnectors(ctx) });
+    const listFn = wafSvc.listConnectorsEnvelope ?? (async (scope) => {
+      const items = await wafSvc.listConnectors(scope);
+      return {
+        items,
+        count: items.length,
+        meta: {
+          empty_reason: items.length ? null : 'No connectors are configured for this tenant.',
+        },
+      };
+    });
+    return json(res, 200, await listFn(ctx));
   }
   if (method === 'POST' && path === '/v1/connectors') {
     const gate = requirePermission(ctx, 'waf:connector_write');
@@ -1248,6 +1284,19 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
     const result = await wafSvc.disableConnector(ctx, connectorDisableMatch[1], body);
     if (result.error) return json(res, result.status ?? 400, result);
     return json(res, 200, { connector: result.connector });
+  }
+  const connectorInventoryMatch = path.match(/^\/v1\/connectors\/([^/]+)\/inventory$/);
+  if (connectorInventoryMatch && method === 'GET') {
+    const gate = requirePermission(ctx, 'waf:connector_read');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    if (blockPostgresPortalRevampRoute(runtimeConfig, serviceDeps, path, method, res)) return;
+    const getInventoryFn = wafSvc.getConnectorInventory ?? wafPosture.getConnectorInventory;
+    const result = await getInventoryFn(ctx, connectorInventoryMatch[1], {
+      cursor: url.searchParams.get('cursor') ?? undefined,
+      limit: url.searchParams.get('limit') ?? undefined,
+    });
+    if (result.error) return json(res, result.status ?? 400, result);
+    return json(res, 200, result);
   }
 
   if (method === 'GET' && path === '/v1/waf/cve-pipeline') {
@@ -1637,7 +1686,28 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
   if (path === '/v1/target-groups' && method === 'GET') {
     const gate = requirePermission(ctx, 'target_group:read');
     if (!gate.ok) return json(res, gate.status, gate.body);
-    return json(res, 200, { items: await serviceDeps.targetGroups.listTargetGroups(ctx) });
+    const archived = url.searchParams.get('archived') === 'true';
+    const tgSvc = serviceDeps.targetGroups;
+    let envelope;
+    if (tgSvc.listTargetGroupsEnvelope) {
+      envelope = await tgSvc.listTargetGroupsEnvelope(ctx, { archived });
+    } else if (tgSvc.listTargetGroups) {
+      const items = await tgSvc.listTargetGroups(ctx, { archived });
+      envelope = {
+        items,
+        count: items.length,
+        meta: {
+          empty_reason: items.length
+            ? null
+            : archived
+              ? 'No archived target groups match this tenant.'
+              : 'No target groups have been declared for this tenant yet.',
+        },
+      };
+    } else {
+      envelope = await targetGroups.listTargetGroupsEnvelope(ctx, { archived });
+    }
+    return json(res, 200, envelope);
   }
   if (path === '/v1/target-groups' && method === 'POST') {
     const gate = requirePermission(ctx, 'target_group:write');
@@ -1669,6 +1739,67 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
     if (result.error) return json(res, result.status ?? 400, result);
     return json(res, 200, result);
   }
+  const tgRestoreMatch = path.match(/^\/v1\/target-groups\/([^/]+)\/restore$/);
+  if (tgRestoreMatch && method === 'POST') {
+    const gate = requirePermission(ctx, 'target_group:write');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    if (blockPostgresPortalRevampRoute(runtimeConfig, serviceDeps, path, method, res)) return;
+    const restoreFn = serviceDeps.targetGroups.restoreArchived ?? targetGroups.restoreArchived;
+    const result = await restoreFn(ctx, tgRestoreMatch[1]);
+    if (result.error) return json(res, result.status ?? 404, result);
+    return json(res, 200, result);
+  }
+  const tgLoaMatch = path.match(/^\/v1\/target-groups\/([^/]+)\/loa$/);
+  if (tgLoaMatch && method === 'GET') {
+    const gate = requirePermission(ctx, 'target_group:read');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    if (blockPostgresPortalRevampRoute(runtimeConfig, serviceDeps, path, method, res)) return;
+    const getActiveFn = serviceDeps.loa?.getActive ?? loa.getActive;
+    return json(res, 200, await getActiveFn(ctx, tgLoaMatch[1]));
+  }
+  if (tgLoaMatch && method === 'POST') {
+    const gate = requirePermission(ctx, 'target_group:write');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    if (blockPostgresPortalRevampRoute(runtimeConfig, serviceDeps, path, method, res)) return;
+    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+    const signFn = serviceDeps.loa?.sign ?? loa.sign;
+    const result = await signFn(ctx, tgLoaMatch[1], body);
+    if (result.error) return json(res, result.status ?? 400, result);
+    return json(res, 201, result);
+  }
+  const tgLoaRevokeMatch = path.match(/^\/v1\/target-groups\/([^/]+)\/loa\/([^/]+)\/revoke$/);
+  if (tgLoaRevokeMatch && method === 'POST') {
+    const gate = requirePermission(ctx, 'target_group:write');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    if (blockPostgresPortalRevampRoute(runtimeConfig, serviceDeps, path, method, res)) return;
+    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+    const revokeFn = serviceDeps.loa?.revoke ?? loa.revoke;
+    const result = await revokeFn(ctx, tgLoaRevokeMatch[2], body.reason);
+    if (result.error) return json(res, result.status ?? 400, result);
+    return json(res, 200, result);
+  }
+  const tgLadderMatch = path.match(/^\/v1\/target-groups\/([^/]+)\/verification-ladder$/);
+  if (tgLadderMatch && method === 'GET') {
+    const gate = requirePermission(ctx, 'target_group:read');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    if (blockPostgresPortalRevampRoute(runtimeConfig, serviceDeps, path, method, res)) return;
+    const getLadderFn = serviceDeps.ownershipVerification?.getLadder
+      ?? ownershipVerification.getLadder;
+    const ladder = await getLadderFn(ctx, tgLadderMatch[1]);
+    if (ladder.error) return json(res, ladder.status ?? 404, ladder);
+    return json(res, 200, ladder);
+  }
+  const tgBulkImportMatch = path.match(/^\/v1\/target-groups\/([^/]+)\/targets:bulk-import$/);
+  if (tgBulkImportMatch && method === 'POST') {
+    const gate = requirePermission(ctx, 'target_group:write');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    if (blockPostgresPortalRevampRoute(runtimeConfig, serviceDeps, path, method, res)) return;
+    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+    const bulkImportFn = serviceDeps.targetGroups.bulkImportTargets ?? targetGroups.bulkImportTargets;
+    const result = await bulkImportFn(ctx, tgBulkImportMatch[1], body);
+    if (result.error) return json(res, result.status ?? 400, result);
+    return json(res, 201, result);
+  }
   const tgtMatch = path.match(/^\/v1\/target-groups\/([^/]+)\/targets$/);
   if (tgtMatch && method === 'POST') {
     const gate = requirePermission(ctx, 'target_group:write');
@@ -1677,6 +1808,18 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
     const t = await serviceDeps.targetGroups.addTarget(ctx, tgtMatch[1], body);
     if (!t) return json(res, 404, { error: 'not_found' });
     return json(res, 201, t);
+  }
+  const tgtConfirmMatch = path.match(/^\/v1\/target-groups\/([^/]+)\/targets\/([^/]+):confirm$/);
+  if (tgtConfirmMatch && method === 'POST') {
+    const gate = requirePermission(ctx, 'target_group:write');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    if (blockPostgresPortalRevampRoute(runtimeConfig, serviceDeps, path, method, res)) return;
+    const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
+    const confirmFn = serviceDeps.ownershipVerification?.confirmTarget
+      ?? ownershipVerification.confirmTarget;
+    const result = await confirmFn(ctx, tgtConfirmMatch[1], tgtConfirmMatch[2], body);
+    if (result.error) return json(res, result.status ?? 400, result);
+    return json(res, 200, result);
   }
   const tgtIdMatch = path.match(/^\/v1\/target-groups\/([^/]+)\/targets\/([^/]+)$/);
   if (tgtIdMatch && method === 'PATCH') {
@@ -1697,29 +1840,77 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
   }
 
   const dnsOwnershipVerifyMatch = path.match(/^\/v1\/target-groups\/([^/]+)\/dns-ownership\/verify$/);
-  const dnsOwnershipIssueMatch = path.match(/^\/v1\/target-groups\/([^/]+)\/dns-ownership$/);
-  if (dnsOwnershipVerifyMatch || dnsOwnershipIssueMatch) {
+  const dnsOwnershipIssuePathMatch = path.match(/^\/v1\/target-groups\/([^/]+)\/dns-ownership\/issue$/);
+  const dnsOwnershipListMatch = path.match(/^\/v1\/target-groups\/([^/]+)\/dns-ownership$/);
+  const dnsOwnershipLegacyIssueMatch =
+    dnsOwnershipListMatch && method === 'POST' ? dnsOwnershipListMatch : null;
+  if (
+    dnsOwnershipVerifyMatch
+    || dnsOwnershipIssuePathMatch
+    || dnsOwnershipListMatch
+    || dnsOwnershipLegacyIssueMatch
+  ) {
     if (!serviceDeps.dnsOwnership) {
       return respondPostgresRouteNotWired(res);
     }
     if (dnsOwnershipVerifyMatch && method === 'POST') {
       const gate = requirePermission(ctx, 'target_group:write');
       if (!gate.ok) return json(res, gate.status, gate.body);
+      if (blockPostgresPortalRevampRoute(runtimeConfig, serviceDeps, path, method, res)) return;
+      const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
       const result = await serviceDeps.dnsOwnership.verifyDnsOwnership(ctx, {
         target_group_id: dnsOwnershipVerifyMatch[1],
+        challenge_id: body.challenge_id,
       });
-      if (result.error) return json(res, result.status ?? 400, result);
+      if (result.error) {
+        if (result.status === 429) {
+          if (result.retry_after_seconds) {
+            res.setHeader('Retry-After', String(result.retry_after_seconds));
+          }
+          return json(res, 429, result);
+        }
+        return json(res, result.status ?? 400, result);
+      }
       return json(res, 200, result);
     }
-    if (dnsOwnershipIssueMatch && method === 'POST') {
+    const issueGroupId =
+      dnsOwnershipIssuePathMatch?.[1]
+      ?? dnsOwnershipLegacyIssueMatch?.[1]
+      ?? null;
+    if (issueGroupId && method === 'POST') {
       const gate = requirePermission(ctx, 'target_group:write');
       if (!gate.ok) return json(res, gate.status, gate.body);
+      const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
       const result = await serviceDeps.dnsOwnership.issueDnsOwnershipChallenge(ctx, {
-        target_group_id: dnsOwnershipIssueMatch[1],
+        target_group_id: issueGroupId,
+        target_id: body.target_id,
       });
       if (result.error) return json(res, result.status ?? 400, result);
-      return json(res, 201, result);
+      if (result.challenge) return json(res, 201, result);
+      return json(res, 201, { challenge: result, audit_entry_id: result.audit_entry_id });
     }
+    if (dnsOwnershipListMatch && method === 'GET') {
+      const gate = requirePermission(ctx, 'target_group:read');
+      if (!gate.ok) return json(res, gate.status, gate.body);
+      if (blockPostgresPortalRevampRoute(runtimeConfig, serviceDeps, path, method, res)) return;
+      const listFn = serviceDeps.dnsOwnership.listChallenges ?? dnsOwnership.listChallenges;
+      return json(res, 200, await listFn(ctx, dnsOwnershipListMatch[1]));
+    }
+  }
+
+  const targetDetailMatch = path.match(/^\/v1\/targets\/([^/]+)$/);
+  if (targetDetailMatch && method === 'GET') {
+    const gate = requirePermission(ctx, 'target_group:read');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    if (blockPostgresPortalRevampRoute(runtimeConfig, serviceDeps, path, method, res)) return;
+    const getDetailFn = serviceDeps.targetDetail?.getTargetDetail ?? targetDetail.getTargetDetail;
+    const payload = await getDetailFn(ctx, targetDetailMatch[1], {
+      runs_limit: url.searchParams.get('runs_limit') ?? undefined,
+      findings_limit: url.searchParams.get('findings_limit') ?? undefined,
+      findings_cursor: url.searchParams.get('findings_cursor') ?? undefined,
+    });
+    if (payload?.error) return json(res, payload.status ?? 404, payload);
+    return json(res, 200, payload);
   }
 
   const ownershipConfirmMatch = path.match(/^\/v1\/ownership-verifications\/([^/]+)\/confirm$/);
@@ -2064,7 +2255,19 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
   if (path === '/v1/test-runs' && method === 'GET') {
     const gate = requirePermission(ctx, 'test_run:read');
     if (!gate.ok) return json(res, gate.status, gate.body);
-    return json(res, 200, { items: await serviceDeps.testRuns.listTestRuns(ctx) });
+    const listOpts = {
+      target_group_id: url.searchParams.get('target_group_id') ?? undefined,
+      target_id: url.searchParams.get('target_id') ?? undefined,
+      limit: url.searchParams.get('limit') ?? undefined,
+    };
+    if (typeof serviceDeps.testRuns.listTestRunsEnvelope === 'function') {
+      return json(res, 200, await serviceDeps.testRuns.listTestRunsEnvelope(ctx, listOpts));
+    }
+    return json(res, 200, {
+      items: await serviceDeps.testRuns.listTestRuns(ctx, listOpts),
+      count: (await serviceDeps.testRuns.listTestRuns(ctx, listOpts)).length,
+      meta: {},
+    });
   }
   const runMatch = path.match(/^\/v1\/test-runs\/([^/]+)$/);
   if (runMatch && method === 'GET') {
@@ -2104,7 +2307,24 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
   if (path === '/v1/findings' && method === 'GET') {
     const gate = requirePermission(ctx, 'finding:read');
     if (!gate.ok) return json(res, gate.status, gate.body);
-    return json(res, 200, { items: await serviceDeps.findings.listFindings(ctx) });
+    const listOpts = {
+      target_group_id: url.searchParams.get('target_group_id') ?? undefined,
+      target_id: url.searchParams.get('target_id') ?? undefined,
+      limit: url.searchParams.get('limit') ?? undefined,
+    };
+    if (typeof serviceDeps.findings.listFindingsEnvelope === 'function') {
+      return json(res, 200, await serviceDeps.findings.listFindingsEnvelope(ctx, listOpts));
+    }
+    const items = await serviceDeps.findings.listFindings(ctx, listOpts);
+    return json(res, 200, { items, count: items.length, meta: {} });
+  }
+  const findingEvidenceMatch = path.match(/^\/v1\/findings\/([^/]+)\/evidence$/);
+  if (findingEvidenceMatch && method === 'GET') {
+    const gate = requirePermission(ctx, 'evidence:read');
+    if (!gate.ok) return json(res, gate.status, gate.body);
+    if (blockPostgresPortalRevampRoute(runtimeConfig, serviceDeps, path, method, res)) return;
+    const getBundleFn = serviceDeps.findings.getEvidenceBundle ?? findings.getEvidenceBundle;
+    return json(res, 200, await getBundleFn(ctx, findingEvidenceMatch[1]));
   }
   const fMatch = path.match(/^\/v1\/findings\/([^/]+)$/);
   if (fMatch && method === 'GET') {
@@ -2217,8 +2437,9 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
     const gate = requirePermission(ctx, 'high_scale:read');
     if (!gate.ok) return json(res, gate.status, gate.body);
     if (blockPostgresHighScaleRoute(runtimeConfig, serviceDeps, path, method, res)) return;
-    const items = await Promise.resolve(hsSvc.listHighScaleRequests(ctx));
-    return json(res, 200, { items });
+    const scope = url.searchParams.get('scope') ?? undefined;
+    const items = await Promise.resolve(hsSvc.listHighScaleRequests(ctx, { scope }));
+    return json(res, 200, { items, count: items.length });
   }
   const hsArtPost = path.match(/^\/v1\/high-scale-requests\/([^/]+)\/artifacts$/);
   if (hsArtPost && method === 'POST') {
@@ -2536,6 +2757,25 @@ async function handlePublicApi(req, res, url, runtimeConfig, options = {}) {
     const record = await signupService.getSignupRequest(signupGet[1]);
     if (!record) return json(res, 404, { error: 'not_found' });
     return json(res, 200, { request: signupService.sanitizeSignupForPublic(record) });
+  }
+
+  const signupEventsMatch = path.match(/^\/v1\/signup-requests\/([^/]+)\/events$/);
+  if (signupEventsMatch && method === 'GET') {
+    const serviceDeps = options.services ?? {};
+    if (blockPostgresPortalRevampRoute(runtimeConfig, serviceDeps, path, method, res)) {
+      return;
+    }
+    const listEventsFn = signupService.listEvents ?? signupIntake.listEvents;
+    const result = await listEventsFn(signupEventsMatch[1], {
+      rateLimitKey: `signup-events:${signupEventsMatch[1]}`,
+    });
+    if (result?.error === 'rate_limited') {
+      return json(res, result.status ?? 429, {
+        error: result.error,
+        retry_after_seconds: result.retry_after_seconds,
+      });
+    }
+    return json(res, 200, result);
   }
 
   return json(res, 404, { error: 'not_found' });

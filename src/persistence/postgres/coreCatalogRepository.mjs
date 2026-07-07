@@ -17,6 +17,7 @@ function asObject(value) {
 
 function mapTenantRow(row) {
   if (!row) return null;
+  const dashboardRollup = asObject(row.dashboard_rollup);
   return {
     id: row.id,
     name: row.name,
@@ -24,6 +25,7 @@ function mapTenantRow(row) {
     data_region: row.data_region ?? undefined,
     status: row.status ?? 'active',
     privacy_settings: normalizePrivacySettings(row.privacy_settings),
+    dashboard_rollup: dashboardRollup,
     created_at: toIso(row.created_at),
   };
 }
@@ -62,6 +64,9 @@ function mapTargetGroupRow(row) {
     safe_test_windows: Array.isArray(windows) ? windows : [],
     safety_policy: normalizeSafetyPolicy(row.safety_policy),
     created_at: toIso(row.created_at),
+    ...(row.deleted_at
+      ? { deleted_at: toIso(row.deleted_at), deleted_by: row.deleted_by ?? null }
+      : {}),
     ...(row.archived_at ? { archived_at: toIso(row.archived_at) } : {}),
     validation_mode: row.validation_mode ?? 'agent_assisted',
     ownership_status: row.ownership_status ?? 'unverified',
@@ -120,7 +125,7 @@ export function createCoreCatalogRepository(pool) {
     async getCurrentTenant(ctx) {
       return withTenantContext(pool, ctx.tenantId, async (client) => {
         const { rows } = await client.query(
-          `SELECT id, name, plan, data_region, status, privacy_settings, created_at
+          `SELECT id, name, plan, data_region, status, privacy_settings, dashboard_rollup, created_at
            FROM tenants
            WHERE id = $1`,
           [ctx.tenantId],
@@ -278,14 +283,18 @@ export function createCoreCatalogRepository(pool) {
       });
     },
 
-    async listTargetGroups(ctx) {
+    async listTargetGroups(ctx, options = {}) {
       return withTenantContext(pool, ctx.tenantId, async (client) => {
+        const archivedOnly = options.archived === true;
+        const activeFilter = archivedOnly
+          ? '(deleted_at IS NOT NULL OR archived_at IS NOT NULL)'
+          : 'deleted_at IS NULL AND archived_at IS NULL';
         const { rows } = await client.query(
           `SELECT id, tenant_id, environment_id, name, description, expected_behavior_default,
-                  timezone, safe_test_windows, safety_policy, archived_at, validation_mode,
-                  ownership_status, dns_ownership, created_at
+                  timezone, safe_test_windows, safety_policy, deleted_at, deleted_by,
+                  archived_at, validation_mode, ownership_status, dns_ownership, created_at
            FROM target_groups
-           WHERE tenant_id = $1 AND archived_at IS NULL
+           WHERE tenant_id = $1 AND ${activeFilter}
            ORDER BY created_at`,
           [ctx.tenantId],
         );
@@ -300,7 +309,7 @@ export function createCoreCatalogRepository(pool) {
                   timezone, safe_test_windows, safety_policy, archived_at, validation_mode,
                   ownership_status, dns_ownership, created_at
            FROM target_groups
-           WHERE id = $1 AND tenant_id = $2 AND archived_at IS NULL`,
+           WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL AND archived_at IS NULL`,
           [id, ctx.tenantId],
         );
         const group = mapTargetGroupRow(rows[0] ?? null);
@@ -324,7 +333,7 @@ export function createCoreCatalogRepository(pool) {
         environment_id: body.environment_id ?? 'env_demo',
         name: body.name ?? 'New target group',
         description: body.description ?? '',
-        expected_behavior_default: body.expected_behavior_default ?? 'must_block_before_origin',
+        expected_behavior_default: body.expected_behavior_default ?? null,
         timezone: body.timezone ?? 'UTC',
         safe_test_windows: Array.isArray(body.safe_test_windows) ? body.safe_test_windows : [],
         safety_policy: normalizeSafetyPolicy(body.safety_policy),
@@ -376,7 +385,7 @@ export function createCoreCatalogRepository(pool) {
         if (!group) return null;
 
         const kind = body.kind ?? 'fqdn';
-        const expectedBehavior = body.expected_behavior ?? group.expected_behavior_default;
+        const expectedBehavior = body.expected_behavior ?? null;
         const metadata = body.metadata && typeof body.metadata === 'object' ? body.metadata : {};
 
         const { rows } = await client.query(
@@ -427,10 +436,6 @@ export function createCoreCatalogRepository(pool) {
           sets.push(`environment_id = $${n++}`);
           params.push(String(body.environment_id).trim());
         }
-        if (body.expected_behavior_default !== undefined) {
-          sets.push(`expected_behavior_default = $${n++}`);
-          params.push(String(body.expected_behavior_default).trim());
-        }
         if (body.timezone !== undefined) {
           sets.push(`timezone = $${n++}`);
           params.push(String(body.timezone).trim() || 'UTC');
@@ -467,11 +472,12 @@ export function createCoreCatalogRepository(pool) {
 
     async archiveTargetGroup(ctx, id, options = {}) {
       const now = options.now ?? new Date().toISOString();
+      const deletedBy = options.deletedBy ?? ctx.userId ?? 'system';
       return withTenantContext(pool, ctx.tenantId, async (client) => {
         const existing = await client.query(
           `SELECT id
            FROM target_groups
-           WHERE id = $1 AND tenant_id = $2 AND archived_at IS NULL`,
+           WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL AND archived_at IS NULL`,
           [id, ctx.tenantId],
         );
         if (!existing.rows[0]) return null;
@@ -481,11 +487,13 @@ export function createCoreCatalogRepository(pool) {
 
         await client.query(
           `UPDATE target_groups
-           SET archived_at = $3::timestamptz
-           WHERE id = $1 AND tenant_id = $2 AND archived_at IS NULL`,
-          [id, ctx.tenantId, now],
+           SET deleted_at = $3::timestamptz,
+               deleted_by = $4,
+               archived_at = $3::timestamptz
+           WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL AND archived_at IS NULL`,
+          [id, ctx.tenantId, now, deletedBy],
         );
-        return { archived: true, id };
+        return { archived: true, id, deleted_at: now, deleted_by: deletedBy };
       });
     },
 
@@ -519,10 +527,6 @@ export function createCoreCatalogRepository(pool) {
         if (body.kind !== undefined) {
           sets.push(`kind = $${n++}`);
           params.push(String(body.kind).trim() || current.kind);
-        }
-        if (body.expected_behavior !== undefined) {
-          sets.push(`expected_behavior = $${n++}`);
-          params.push(String(body.expected_behavior).trim());
         }
         if (body.metadata !== undefined && typeof body.metadata === 'object' && !Array.isArray(body.metadata)) {
           sets.push(`metadata_json = $${n++}::jsonb`);

@@ -1,6 +1,11 @@
 import { isIP } from 'node:net';
 import { audit } from '../audit.mjs';
-import { evaluateCheckPrerequisites, getCheckById, isCustomerRunnable } from '../contracts/checks.mjs';
+import {
+  evaluateCheckPrerequisites,
+  getCheckById,
+  isCustomerRunnable,
+  resolveExpectedBehaviorForCheck,
+} from '../contracts/checks.mjs';
 import { incMetric } from '../lib/metrics.mjs';
 import { redactObject } from '../lib/redact.mjs';
 import { recordEvidence } from './evidence.mjs';
@@ -105,8 +110,35 @@ export function listChecks() {
   return getStore().checkCatalog ?? [];
 }
 
-export function listTestRuns(ctx) {
-  return getStore().testRuns.filter((r) => r.tenant_id === ctx.tenantId);
+export function listTestRuns(ctx, options = {}) {
+  let rows = getStore().testRuns.filter((r) => r.tenant_id === ctx.tenantId);
+  if (options.target_group_id) {
+    rows = rows.filter((r) => r.target_group_id === options.target_group_id);
+  }
+  if (options.target_id) {
+    rows = rows.filter((r) => r.target_id === options.target_id);
+  }
+  rows = rows.sort((a, b) => String(b.started_at ?? b.created_at).localeCompare(String(a.started_at ?? a.created_at)));
+  const limit = Number(options.limit);
+  if (Number.isFinite(limit) && limit > 0) rows = rows.slice(0, limit);
+  return rows;
+}
+
+export function listTestRunsEnvelope(ctx, options = {}) {
+  const items = listTestRuns(ctx, options);
+  return {
+    items,
+    count: items.length,
+    meta: {
+      empty_reason: items.length
+        ? null
+        : options.target_group_id
+          ? 'No test runs match this target group filter.'
+          : options.target_id
+            ? 'No test runs match this target filter.'
+            : 'No test runs have been started for this tenant yet.',
+    },
+  };
 }
 
 function collectionDeadlineMs(check) {
@@ -846,7 +878,7 @@ function finalizeVerdictIfReady(run, agent, options = {}) {
   }
 
   const externalResult = run.probe_external_result ?? probeEvent?.metadata?.external_result;
-  const expectedBehavior = target?.expected_behavior ?? 'must_block_before_origin';
+  const expectedBehavior = resolveExpectedBehaviorForCheck(run.check_id);
 
   const result = externalOnly
     ? correlateExternalOnlyVerdict({ externalResult, expectedBehavior })

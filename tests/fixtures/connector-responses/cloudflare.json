@@ -1,0 +1,6 @@
+{
+  "result": [
+    { "id": "zone_1", "name": "checkout.acme.com", "status": "active" },
+    { "id": "zone_2", "name": "api.acme.com", "status": "active" }
+  ]
+}

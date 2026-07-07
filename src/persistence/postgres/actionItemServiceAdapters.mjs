@@ -121,6 +121,7 @@ export function createPostgresActionItemServices(pool, options = {}) {
   const actionRepo = createActionItemRepository(pool);
   const wafRepo = createWafPostureRepository(pool);
   const auditRepo = createAuditRepository(pool);
+  const portalRevamp = options.portalRevamp ?? null;
   const nowFn = options.now ?? (() => new Date());
   const newIdFn = options.newId ?? newId;
 
@@ -351,6 +352,32 @@ export function createPostgresActionItemServices(pool, options = {}) {
         destination: options.destination,
       });
 
+      const findingId = record.finding_ids?.[0] ?? null;
+      let remediationRecord = null;
+      if (findingId && portalRevamp) {
+        let remediation = await portalRevamp.getFindingRemediationByFinding(ctx, findingId);
+        if (!remediation) {
+          remediation = await portalRevamp.insertFindingRemediation(ctx, {
+            id: newId('rem'),
+            finding_id: findingId,
+            action_slug: 'waf_action_delivery',
+            owner_group: 'edge-sre',
+            state: 'open',
+            description: 'Auto-attached remediation for WAF action-item delivery.',
+            steps: ['Deliver remediation ticket', 'Verify control', 'Re-run validation'],
+            audit_entry_id: newId('aud'),
+          });
+        }
+        if (remediation) {
+          remediationRecord = await portalRevamp.updateFindingRemediation(ctx, remediation.id, {
+            state: 'delivered',
+            delivered_at: nowFn().toISOString(),
+            delivered_via: normalizedChannel,
+            delivered_ref: options.body?.target_ref ?? options.targetRef ?? record.action_item_id,
+          });
+        }
+      }
+
       await auditRepo.appendAuditEvent({
         tenant_id: ctx.tenantId,
         actor_user_id: ctx.userId,
@@ -363,11 +390,21 @@ export function createPostgresActionItemServices(pool, options = {}) {
           connector: connectorType,
           status: delivery.status,
           dry_run: delivery.dry_run,
+          ...(findingId ? { finding_id: findingId } : {}),
+          ...(remediationRecord ? { remediation_id: remediationRecord.id } : {}),
           ...(delivery.destination_preview ? { destination_preview: delivery.destination_preview } : {}),
         }),
       });
 
       return {
+        action_item: formatActionItem(record),
+        delivery_receipt: {
+          action_item_id: record.action_item_id,
+          ...delivery,
+          ...(remediationRecord
+            ? { remediation_id: remediationRecord.id, remediation_state: remediationRecord.state }
+            : {}),
+        },
         delivery: {
           action_item_id: record.action_item_id,
           ...delivery,

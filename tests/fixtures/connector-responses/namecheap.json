@@ -1,0 +1,8 @@
+{
+  "DomainGetListResult": {
+    "Domain": [
+      { "ID": "nc_1", "Name": "checkout.acme.com" },
+      { "ID": "nc_2", "Name": "cdn.acme.com" }
+    ]
+  }
+}

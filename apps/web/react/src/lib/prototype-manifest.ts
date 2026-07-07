@@ -4,7 +4,7 @@ export type PrototypeSurface = {
   id: string;
   label: string;
   route: string;
-  routeId?: RouteId;
+  routeId?: string;
   audience: 'Public' | 'Customer' | 'Staff' | 'SOC' | 'Operator';
   group: SurfaceKind | 'public' | 'operator';
   source: string;
@@ -264,7 +264,7 @@ export const PROTOTYPE_SURFACES: PrototypeSurface[] = [
     route: '/waf-posture',
     routeId: 'waf-posture',
     audience: 'Customer',
-    group: 'posture',
+    group: 'validation',
     source: 'waf-posture.html',
     status: 'React implemented',
     summary: 'WAF assets, roadmap, scenario cadence, drift, connectors, validation plans, reports, and evidence.'
@@ -275,7 +275,7 @@ export const PROTOTYPE_SURFACES: PrototypeSurface[] = [
     route: '/waf-asset-detail',
     routeId: 'waf-asset-detail',
     audience: 'Customer',
-    group: 'posture',
+    group: 'validation',
     source: 'waf-asset-detail.html',
     status: 'React implemented',
     summary: 'Per-asset effectiveness, rules, geography, drift, exceptions, validation runs, and actions.'
@@ -286,7 +286,7 @@ export const PROTOTYPE_SURFACES: PrototypeSurface[] = [
     route: '/cve-pipeline',
     routeId: 'cve-pipeline',
     audience: 'Customer',
-    group: 'posture',
+    group: 'validation',
     source: 'cve-pipeline.html',
     status: 'React implemented',
     summary: 'Live exposure intake, triage, matches, recommendations, staged mitigations, retests, and playbooks.'
@@ -297,7 +297,7 @@ export const PROTOTYPE_SURFACES: PrototypeSurface[] = [
     route: '/supply-chain',
     routeId: 'supply-chain',
     audience: 'Customer',
-    group: 'posture',
+    group: 'validation',
     source: 'supply-chain.html',
     status: 'React implemented',
     summary: 'CNAME, dependency, vendor, redirect, and subdomain risk categories with custody-safe remediation.'
@@ -308,7 +308,7 @@ export const PROTOTYPE_SURFACES: PrototypeSurface[] = [
     route: '/remediation',
     routeId: 'remediation',
     audience: 'Customer',
-    group: 'posture',
+    group: 'validation',
     source: 'remediation.html',
     status: 'React implemented',
     summary: 'Action items, ticket previews, SIEM/SOAR-safe delivery, retests, and closure evidence.'
@@ -319,7 +319,7 @@ export const PROTOTYPE_SURFACES: PrototypeSurface[] = [
     route: '/discovery',
     routeId: 'discovery',
     audience: 'Customer',
-    group: 'posture',
+    group: 'validation',
     source: 'discovery.html',
     status: 'React implemented',
     summary: 'Approval-gated candidates, modes, sources, decisions, and imports into declared target groups.'
@@ -330,7 +330,7 @@ export const PROTOTYPE_SURFACES: PrototypeSurface[] = [
     route: '/discovery-entity',
     routeId: 'discovery-entity',
     audience: 'Customer',
-    group: 'posture',
+    group: 'validation',
     source: 'discovery-entity.html',
     status: 'React implemented',
     summary: 'Entity source evidence, confidence, decision trail, promote, and dismiss workflow.'
@@ -502,10 +502,8 @@ export const PROTOTYPE_SURFACES: PrototypeSurface[] = [
 
 export const PAGE_TAB_SETS: Partial<Record<RouteId, PageTab[]>> = {
   dashboard: [
-    { id: 'overview', label: 'Overview', summary: 'Readiness score, open gaps, and current operating state.', evidence: 'Readiness factors, findings, runs, and evidence counts.' },
-    { id: 'business-services', label: 'Business Services', summary: 'Declared groups mapped to owner, environment, and readiness.', evidence: 'Customer declarations plus target-group records.' },
-    { id: 'risk-trends', label: 'Risk Trends', summary: 'Score trend, vector coverage, and aging finding pressure.', evidence: 'Run and finding history.' },
-    { id: 'evidence-feed', label: 'Evidence Feed', summary: 'Newest evidence, custody events, and report-ready artifacts.', evidence: 'Evidence ledger and audit activity.' }
+    { id: 'overview', label: 'Overview', summary: 'Readiness score, open gaps, and current operating state.', evidence: 'Readiness factors, findings, runs, and WAF summary.' },
+    { id: 'risk-trends', label: 'Risk trends', summary: 'Score trend, vector coverage, and aging finding pressure.', evidence: 'Run and finding history.' }
   ],
   'target-groups': [
     { id: 'overview', label: 'Overview', summary: 'Declared target groups with readiness and owner context.', evidence: 'Customer-provided scope declaration.' },
@@ -561,62 +559,6 @@ export const PAGE_TAB_SETS: Partial<Record<RouteId, PageTab[]>> = {
     { id: 'closed', label: 'Closed', summary: 'Resolved findings with closure evidence.', evidence: 'Retest or explicit closure record.' },
     { id: 'sla', label: 'SLA', summary: 'Due dates, owner aging, and escalation state.', evidence: 'Finding timeline.' }
   ],
-  'waf-posture': [
-    { id: 'overview', label: 'Overview', summary: 'Vendor mix, criticality, geography, and coverage score.', evidence: 'WAF posture snapshots and declared assets.' },
-    { id: 'roadmap', label: 'Roadmap', summary: 'Risk-prioritized deployment and validation recommendations.', evidence: 'Coverage rollups and risk factors.' },
-    { id: 'assets', label: 'Assets', summary: 'Protected assets, rule health, scenario pass rate, and action links.', evidence: 'Asset records and validation evidence.' },
-    { id: 'scenarios', label: 'Scenarios', summary: 'Safe scenario cadence and product catalog guidance.', evidence: 'Scenario intake and catalog metadata.' },
-    { id: 'drift', label: 'Drift', summary: 'Drift queue, retest state, and exception context.', evidence: 'Drift scans and retest records.' },
-    { id: 'connectors', label: 'Connectors', summary: 'Optional read-only connector health and poll summaries.', evidence: 'Connector metadata only.' },
-    { id: 'reports', label: 'Reports', summary: 'Executive coverage, drift audit, connector health, and board brief.', evidence: 'Report records and custody preview.' },
-    { id: 'evidence', label: 'Evidence', summary: 'Protected-claim evidence and validation outputs.', evidence: 'Stored probe or agent observations.' }
-  ],
-  'cve-pipeline': [
-    { id: 'intake', label: 'Intake', summary: 'CVE feed ingestion and reviewed entries.', evidence: 'CVE source metadata.' },
-    { id: 'triage', label: 'Triage', summary: 'Severity, exposure, and protected-asset match factors.', evidence: 'Triage factors and WAF asset links.' },
-    { id: 'matches', label: 'Matches', summary: 'Affected declared assets and confidence.', evidence: 'Asset match records.' },
-    { id: 'recommendations', label: 'Recommendations', summary: 'Mitigation guidance for WAF and service owners.', evidence: 'Recommendation record.' },
-    { id: 'staged', label: 'Staged', summary: 'Reviewed changes waiting for approval.', evidence: 'Approval artifact and change context.' },
-    { id: 'retests', label: 'Retests', summary: 'Safe retest workflow after mitigation.', evidence: 'Retest result evidence.' },
-    { id: 'playbooks', label: 'Playbooks', summary: 'Multi-vendor playbook approval and closure.', evidence: 'Playbook decision artifacts.' }
-  ],
-  'supply-chain': [
-    { id: 'overview', label: 'Overview', summary: 'Digital supply-chain risks and state counts.', evidence: 'Discovery and supply-chain records.' },
-    { id: 'dependencies', label: 'Dependencies', summary: 'CNAME, redirect, script, vendor, and subdomain dependencies.', evidence: 'Metadata-only source evidence.' },
-    { id: 'candidates', label: 'Candidates', summary: 'Reviewed risk candidates and confidence.', evidence: 'Candidate source artifacts.' },
-    { id: 'phases', label: 'Phases', summary: 'Detect-only through governed active-protection states.', evidence: 'Phase authorization.' },
-    { id: 'tickets', label: 'Tickets', summary: 'Remediation links and owner workflow.', evidence: 'Action item references.' },
-    { id: 'custody', label: 'Custody', summary: 'Customer custody, accepted risk, and closure.', evidence: 'Audit and evidence exports.' }
-  ],
-  remediation: [
-    { id: 'items', label: 'Action Items', summary: 'Finding, CVE, and supply-chain remediation tasks.', evidence: 'Action item record.' },
-    { id: 'tickets', label: 'Ticket Preview', summary: 'Jira and ServiceNow-safe payload preview.', evidence: 'Redacted payload metadata.' },
-    { id: 'siem-soar', label: 'SIEM/SOAR', summary: 'Webhook and security operations delivery status.', evidence: 'Delivery metadata and retry state.' },
-    { id: 'retests', label: 'Retests', summary: 'Evidence-backed closure validation.', evidence: 'Retest run evidence.' },
-    { id: 'closure', label: 'Closure', summary: 'Resolution, accepted risk, or customer custody.', evidence: 'Closure decision and audit event.' }
-  ],
-  discovery: [
-    { id: 'inbox', label: 'Inbox', summary: 'Review candidates before they enter declared scope.', evidence: 'Discovery source metadata.' },
-    { id: 'entities', label: 'Entities', summary: 'Known entities, ownership, and source confidence.', evidence: 'Entity records.' },
-    { id: 'sources', label: 'Sources', summary: 'Safe D0-D4 source modes and schedule posture.', evidence: 'Mode and source records.' },
-    { id: 'decisions', label: 'Decisions', summary: 'Approve, dismiss, or request more context.', evidence: 'Decision audit trail.' },
-    { id: 'imports', label: 'Imports', summary: 'Approved candidates imported into existing declared groups.', evidence: 'Import action and target-group reference.' }
-  ],
-  'high-scale': [
-    { id: 'request', label: 'Request Form', summary: 'Customer submits objective, scope, window, contacts, and confirmation.', evidence: 'High-scale request record.' },
-    { id: 'authorization', label: 'Authorization', summary: 'Authorization pack with customer, provider, legal, and runbook artifacts.', evidence: 'Approval artifact ledger.' },
-    { id: 'soc-review', label: 'SOC Review', summary: 'Visible status only for customers; decisions remain staff/SOC-owned.', evidence: 'SOC decision artifact.' },
-    { id: 'schedule', label: 'Schedule', summary: 'Approved window and provider coordination status.', evidence: 'SOC schedule record.' },
-    { id: 'live-run', label: 'Live Run', summary: 'Customer-visible status while SOC owns execution controls.', evidence: 'SOC lifecycle events.' },
-    { id: 'post-test', label: 'Post-Test', summary: 'Closure, report, evidence bundle, and lessons learned.', evidence: 'Post-test report and custody export.' }
-  ],
-  soc: [
-    { id: 'queue', label: 'Queue', summary: 'SOC-visible high-scale requests and review status.', evidence: 'Request and authorization pack.' },
-    { id: 'review', label: 'Review', summary: 'Go/no-go checklist and authorization completeness.', evidence: 'Approval artifact ledger.' },
-    { id: 'schedule', label: 'Schedule', summary: 'Approved window, contacts, and coordination plan.', evidence: 'SOC schedule action.' },
-    { id: 'live-status', label: 'Live Status', summary: 'Lifecycle state and kill-switch posture.', evidence: 'SOC-controlled events.' },
-    { id: 'closeout', label: 'Closeout', summary: 'Post-test report, closure status, and custody.', evidence: 'Post-test report and audit.' }
-  ],
   reports: [
     { id: 'builder', label: 'Builder', summary: 'Report kind, period, audience, and included evidence.', evidence: 'Report request.' },
     { id: 'executive', label: 'Executive', summary: 'Readiness and business-risk summary.', evidence: 'Readiness score and findings.' },
@@ -637,12 +579,6 @@ export const PAGE_TAB_SETS: Partial<Record<RouteId, PageTab[]>> = {
     { id: 'tenant-audit', label: 'Tenant Audit', summary: 'Tenant-scoped security and custody activity.', evidence: 'Audit log records.' },
     { id: 'filters', label: 'Filters', summary: 'Actor, action, object, and time filters.', evidence: 'Audit query context.' },
     { id: 'exports', label: 'Exports', summary: 'Auditor-friendly export and report links.', evidence: 'Custody export references.' }
-  ],
-  'release-evidence': [
-    { id: 'attestation', label: 'Attestation', summary: 'Staging and production readiness statement.', evidence: 'Attestation record.' },
-    { id: 'required', label: 'Required Evidence', summary: 'Complete inventory of release evidence kinds.', evidence: 'Release ledger.' },
-    { id: 'gaps', label: 'Gaps', summary: 'Open launch blockers and accepted exceptions.', evidence: 'Gap audit.' },
-    { id: 'bundles', label: 'Bundles', summary: 'Evidence bundle coverage and provenance.', evidence: 'Bundle manifest.' }
   ],
   settings: [
     { id: 'organization', label: 'Organization', summary: 'Tenant profile, environments, support owner, and residency.', evidence: 'Tenant record.' },
@@ -671,6 +607,21 @@ export const PAGE_TAB_SETS: Partial<Record<RouteId, PageTab[]>> = {
 };
 
 export const DETAIL_TAB_SETS: Partial<Record<RouteId, PageTab[]>> = {
+  'target-detail': [
+    { id: 'overview', label: 'Overview', summary: 'Per-target verification, WAF posture, and counts.', evidence: 'GET /v1/targets/:id hydrator.' },
+    { id: 'ownership', label: 'Ownership', summary: 'Verification ladder and DNS/agent state.', evidence: 'target_verifications rows.' },
+    { id: 'findings', label: 'Findings', summary: 'Open and closed findings on this target.', evidence: 'findings filtered by target_id.' }
+  ],
+  'finding-detail': [
+    { id: 'overview', label: 'Overview', summary: 'Severity, status, and verdict explanation.', evidence: 'Finding detail API.' },
+    { id: 'remediation', label: 'Remediation', summary: 'Owner, SLA, steps, and delivery state.', evidence: 'Remediation contract fields.' },
+    { id: 'evidence', label: 'Evidence', summary: 'Bundle artifacts and custody chain.', evidence: 'Finding evidence hydrator.' }
+  ],
+  'queue-detail': [
+    { id: 'overview', label: 'Overview', summary: 'SOC-gated request lifecycle and authorization pack.', evidence: 'High-scale request API.' },
+    { id: 'artifacts', label: 'Artifacts', summary: 'Metadata-only authorization artifacts.', evidence: 'Artifact ledger.' },
+    { id: 'notes', label: 'Notes', summary: 'SOC execution notes thread.', evidence: 'SOC notes API.' }
+  ],
   'target-group-detail': [
     { id: 'overview', label: 'Overview', summary: 'Readiness, runs, and declaration metadata for this service.', evidence: 'Target group detail API.' },
     { id: 'scope', label: 'Scope & behavior', summary: 'Declared targets and expected protection behavior.', evidence: 'Customer-provided scope declaration.' },
@@ -685,32 +636,12 @@ export const DETAIL_TAB_SETS: Partial<Record<RouteId, PageTab[]>> = {
     { id: 'audit', label: 'Audit', summary: 'Metadata-only lifecycle events for this agent.', evidence: 'Tenant audit trail.' }
   ],
   'run-detail': PAGE_TAB_SETS.runs,
-  'supply-chain-detail': [
-    { id: 'overview', label: 'Overview', summary: 'Exposure state, confidence, and hostname context.', evidence: 'Supply-chain risk record.' },
-    { id: 'remediation', label: 'Remediation', summary: 'Documented remediation steps and owner workflow.', evidence: 'Remediation metadata.' },
-    { id: 'authorization', label: 'Authorization', summary: 'Phase authorizations and customer custody.', evidence: 'Phase authorization ledger.' },
-    { id: 'audit', label: 'Audit', summary: 'Custody references and linked evidence.', evidence: 'Audit and evidence exports.' }
-  ],
-  'discovery-entity': [
-    { id: 'overview', label: 'Overview', summary: 'Candidate metadata, confidence, and source.', evidence: 'Discovery source metadata.' },
-    { id: 'decision', label: 'Decision', summary: 'Approve, reject, import, and decision trail.', evidence: 'Decision audit trail.' },
-    { id: 'scope-impact', label: 'Scope impact', summary: 'Target groups and posture impact if imported.', evidence: 'Declared target-group reference.' }
-  ],
   'tenant-detail': [
     { id: 'overview', label: 'Overview', summary: 'Lifecycle, plan, and subscription summary.', evidence: 'Staff tenant detail API.' },
     { id: 'users', label: 'Users', summary: 'Tenant users and support owner.', evidence: 'Tenant user records.' },
     { id: 'entitlements', label: 'Entitlements', summary: 'Plan features and grant controls.', evidence: 'Subscription entitlements.' },
     { id: 'provisioning', label: 'Provisioning', summary: 'Signup request that created this tenant.', evidence: 'Signup request record.' },
     { id: 'audit', label: 'Audit', summary: 'Recent tenant-scoped audit entries.', evidence: 'Internal audit log.' }
-  ],
-  'waf-asset-detail': [
-    { id: 'score', label: 'Score', summary: 'Asset effectiveness score and risk tier.', evidence: 'WAF snapshot and validation evidence.' },
-    { id: 'ruleset', label: 'Ruleset', summary: 'Connector rule health and managed-rule posture.', evidence: 'Connector metadata.' },
-    { id: 'geo', label: 'Geo', summary: 'Geography, region, and business criticality context.', evidence: 'Declared asset metadata.' },
-    { id: 'drift', label: 'Drift', summary: 'Drift findings and retest status.', evidence: 'Drift event and retest records.' },
-    { id: 'exceptions', label: 'Exceptions', summary: 'Accepted exceptions and expiry.', evidence: 'Exception register.' },
-    { id: 'validation-runs', label: 'Validation Runs', summary: 'Safe validation history for the asset.', evidence: 'Validation plans and run evidence.' },
-    { id: 'actions', label: 'Actions', summary: 'Remediation links and owner next steps.', evidence: 'Action item records.' }
   ]
 };
 

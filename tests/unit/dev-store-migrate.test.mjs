@@ -94,7 +94,7 @@ describe('dev store migration', () => {
     assert.deepEqual(after.wafActionItems, []);
     assert.deepEqual(after.supplyChainTickets, []);
     assert.equal(listChecks().length, CHECK_CATALOG.length);
-    assert.ok(after.tenants[0].privacy_settings?.metadata_retention_days === 90);
+    assert.ok(after.tenants[0].privacy_settings?.metadata_retention_days === 365);
   });
 
   it('persists migrated catalog to disk on load without dropping demo records', () => {
@@ -167,6 +167,7 @@ describe('dev store migration', () => {
       notificationEvents: [],
       metrics: null,
       readiness: {},
+      stateRollups: {},
       auditLog: [],
       checkCatalog: CHECK_CATALOG.map((c) => ({ ...c })),
     });
@@ -175,7 +176,7 @@ describe('dev store migration', () => {
     const tenants = getStore().tenants;
     assert.equal(tenants.find((t) => t.id === 'ten_low').privacy_settings.metadata_retention_days, 1);
     assert.equal(tenants.find((t) => t.id === 'ten_high').privacy_settings.metadata_retention_days, 3650);
-    assert.equal(tenants.find((t) => t.id === 'ten_bad').privacy_settings.metadata_retention_days, 90);
+    assert.equal(tenants.find((t) => t.id === 'ten_bad').privacy_settings.metadata_retention_days, 365);
   });
 
   it('migrateDevStore is idempotent on an already-current store', () => {
@@ -187,7 +188,9 @@ describe('dev store migration', () => {
         name: 'Demo',
         privacy_settings: {
           store_packet_payloads: false,
-          metadata_retention_days: 90,
+          metadata_retention_days: 365,
+          evidence_retention_days: 1825,
+          audit_retention_days: 2555,
           redact_headers_by_default: true,
           evidence_retention: {
             audit_log_days: 2555,
@@ -206,6 +209,11 @@ describe('dev store migration', () => {
       agents: [],
       agentJobs: [],
       ownershipVerifications: [],
+      dnsChallenges: [],
+      targetVerifications: [],
+      loaSignatures: [],
+      findingRemediations: [],
+      signupQueueEvents: [],
       probeJobs: [],
       testRuns: [],
       events: [],
@@ -225,6 +233,7 @@ describe('dev store migration', () => {
       notificationEvents: [],
       metrics: null,
       readiness: {},
+      stateRollups: {},
       auditLog: [],
       checkCatalog: full,
       encryptedSecrets: [],
@@ -243,6 +252,7 @@ describe('dev store migration', () => {
       wafDriftEvents: [],
       wafDriftScanResults: [],
       wafCoverageDailyRollups: [],
+      wafCoverageSummaries: {},
       externalAssetCandidates: [],
       wafConnectors: [],
       wafConnectorSnapshots: [],
@@ -265,6 +275,7 @@ describe('dev store migration', () => {
       testPolicies: [],
       wafOffensiveRequests: [],
       wafOffensiveReports: [],
+      evidenceBundles: [],
     };
     resetStoreForTests(data);
     assert.equal(migrateDevStore(getStore()), false);
@@ -330,6 +341,7 @@ describe('dev store migration', () => {
       notificationEvents: [],
       metrics: null,
       readiness: {},
+      stateRollups: {},
       auditLog: [],
       checkCatalog: legacyCatalog,
     });

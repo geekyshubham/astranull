@@ -64,8 +64,34 @@ export function upsertFindingFromVerdict(ctx, verdict, run, target) {
   return finding;
 }
 
-export function listFindings(ctx) {
-  return getStore().findings.filter((f) => f.tenant_id === ctx.tenantId);
+export function listFindings(ctx, options = {}) {
+  let rows = getStore().findings.filter((f) => f.tenant_id === ctx.tenantId);
+  if (options.target_group_id) {
+    rows = rows.filter((f) => f.target_group_id === options.target_group_id);
+  }
+  if (options.target_id) {
+    rows = rows.filter((f) => f.target_id === options.target_id);
+  }
+  const limit = Number(options.limit);
+  if (Number.isFinite(limit) && limit > 0) rows = rows.slice(0, limit);
+  return rows;
+}
+
+export function listFindingsEnvelope(ctx, options = {}) {
+  const items = listFindings(ctx, options);
+  return {
+    items,
+    count: items.length,
+    meta: {
+      empty_reason: items.length
+        ? null
+        : options.target_group_id
+          ? 'No findings match this target group filter.'
+          : options.target_id
+            ? 'No findings match this target filter.'
+            : 'No findings have been published for this tenant yet.',
+    },
+  };
 }
 
 export function getFinding(ctx, id) {
@@ -90,4 +116,81 @@ export function patchFinding(ctx, id, body) {
   });
   persistStore();
   return f;
+}
+
+/**
+ * Evidence bundle hydrator stub (portal revamp §4.2).
+ *
+ * @param {import('../context.mjs').TenantScope} ctx
+ * @param {string} findingId
+ */
+export function getEvidenceBundle(ctx, findingId) {
+  const finding = getFinding(ctx, findingId);
+  if (!finding) {
+    return {
+      finding: null,
+      bundle: null,
+      artifacts: [],
+      custody_chain: [],
+      verify_url: '/v1/custody/verify',
+      meta: { empty_reason: 'finding_not_found', finding_id: findingId },
+    };
+  }
+
+  const vault = (getStore().evidenceVault ?? []).filter(
+    (row) => row.tenant_id === ctx.tenantId && row.test_run_id === finding.test_run_id,
+  );
+  const bundles = (getStore().evidenceBundles ?? []).filter(
+    (row) => row.tenant_id === ctx.tenantId && (row.finding_id === findingId || row.test_run_id === finding.test_run_id),
+  );
+  const bundle = bundles[0] ?? null;
+
+  if (!bundle && vault.length === 0) {
+    return {
+      finding: { id: finding.id, title: finding.title ?? null, run_id: finding.test_run_id ?? null },
+      bundle: null,
+      artifacts: [],
+      custody_chain: [],
+      verify_url: '/v1/custody/verify',
+      meta: { empty_reason: 'no_evidence_bundle_sealed_for_finding', finding_id: findingId },
+    };
+  }
+
+  const artifacts = vault.map((row) => ({
+    id: row.id,
+    kind: row.label ?? row.kind ?? 'metadata_evidence',
+    run_id: row.test_run_id ?? finding.test_run_id ?? null,
+    sha256: row.sha256 ?? row.content_sha256 ?? row.metadata?.sha256 ?? null,
+    sealed_at: row.sealed_at ?? row.created_at ?? null,
+    size_bytes: row.size_bytes ?? row.metadata?.size_bytes ?? null,
+  }));
+
+  const custody_chain = artifacts
+    .filter((art) => art.sha256)
+    .map((art, index) => ({
+      step: index + 1,
+      kind: `${art.kind}_sealed`,
+      sha256: art.sha256,
+      at: art.sealed_at,
+    }));
+
+  const response = {
+    finding: { id: finding.id, title: finding.title ?? null, run_id: finding.test_run_id ?? null },
+    bundle: bundle
+      ? {
+          id: bundle.id,
+          sha256: bundle.sha256,
+          sealed_at: bundle.sealed_at,
+          size_bytes: bundle.size_bytes,
+          custody_schema_version: bundle.custody_schema_version ?? 'astranull.custody.v1',
+        }
+      : null,
+    artifacts,
+    custody_chain,
+    verify_url: '/v1/custody/verify',
+  };
+  if (!bundle && artifacts.length === 0) {
+    response.meta = { empty_reason: 'no_evidence_bundle_sealed_for_finding', finding_id: findingId };
+  }
+  return response;
 }

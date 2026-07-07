@@ -23,6 +23,12 @@ import {
   createPostgresDnsOwnershipServices,
   createPostgresOwnershipVerificationServices,
 } from './ownershipVerificationServiceAdapters.mjs';
+import { createPortalRevampRepository } from './portalRevampRepository.mjs';
+import {
+  createPostgresPortalRevampServices,
+  mergePortalDnsOwnershipServices,
+  mergePortalOwnershipVerificationServices,
+} from './portalRevampServiceAdapters.mjs';
 import { createHighScaleRepository } from './highScaleRepository.mjs';
 import { createProductionReleaseEvidenceRepository } from './productionReleaseEvidenceRepository.mjs';
 import { createRetentionRepository } from './retentionRepository.mjs';
@@ -80,6 +86,7 @@ export const POSTGRES_RUNTIME_REPOSITORY_KEYS = Object.freeze([
   'wafPosture',
   'wafOrchestrator',
   'internalManagement',
+  'portalRevamp',
 ]);
 
 /**
@@ -108,6 +115,7 @@ const DEFAULT_REPOSITORY_FACTORIES = {
   wafPosture: createWafPostureRepository,
   wafOrchestrator: createWafOrchestratorRepository,
   internalManagement: createInternalManagementRepository,
+  portalRevamp: createPortalRevampRepository,
 };
 
 /**
@@ -218,20 +226,31 @@ export async function createPostgresRuntime(env = process.env, options = {}) {
     });
     const externalDiscoveryServices = createPostgresExternalDiscoveryServices(repositories, { pool });
     const supplyChainRiskServices = createPostgresSupplyChainRiskServices(pool);
-    const actionItemServices = createPostgresActionItemServices(pool);
+    const actionItemServices = createPostgresActionItemServices(pool, {
+      portalRevamp: repositories.portalRevamp,
+    });
     const wafDriftServices = createPostgresWafDriftServices(repositories);
     const wafCoverageRollupServices = createPostgresWafCoverageRollupServices(repositories);
     const internalManagementServices = createPostgresInternalManagementServices(repositories);
-    const ownershipVerification = createPostgresOwnershipVerificationServices({
+    const ownershipVerificationBase = createPostgresOwnershipVerificationServices({
       repositories,
       agentControl: repositories.agentControl,
       probeJobs: repositories.probeJobs,
       audit: repositories.audit,
     });
-    const dnsOwnership = createPostgresDnsOwnershipServices({
+    const dnsOwnershipBase = createPostgresDnsOwnershipServices({
       repositories,
       audit: repositories.audit,
     });
+    const portalRevampServices = createPostgresPortalRevampServices({ repositories });
+    const ownershipVerification = mergePortalOwnershipVerificationServices(
+      ownershipVerificationBase,
+      portalRevampServices.portalOwnership,
+    );
+    const dnsOwnership = mergePortalDnsOwnershipServices(
+      dnsOwnershipBase,
+      portalRevampServices.portalDns,
+    );
     const services = {
       ...catalogServices,
       ...authServices,
@@ -247,7 +266,15 @@ export async function createPostgresRuntime(env = process.env, options = {}) {
       highScale: highScaleServices,
       productionReleaseEvidence: productionReleaseEvidenceServices,
       retention: retentionServices,
-      wafPosture: wafPostureServices,
+      wafPosture: {
+        ...wafPostureServices,
+        getCoverageSummary: portalRevampServices.portalWaf.getCoverageSummary.bind(
+          portalRevampServices.portalWaf,
+        ),
+        getConnectorInventory: portalRevampServices.portalWaf.getConnectorInventory.bind(
+          portalRevampServices.portalWaf,
+        ),
+      },
       wafDrift: wafDriftServices,
       wafCoverageRollup: wafCoverageRollupServices,
       wafOrchestrator: wafOrchestratorServices,
@@ -256,9 +283,32 @@ export async function createPostgresRuntime(env = process.env, options = {}) {
       supplyChainRisk: supplyChainRiskServices,
       actionItems: actionItemServices,
       internalManagement: internalManagementServices,
-      signupIntake: internalManagementServices,
+      signupIntake: {
+        ...internalManagementServices,
+        listEvents: portalRevampServices.portalSignup.listEvents.bind(
+          portalRevampServices.portalSignup,
+        ),
+      },
       ownershipVerification,
       dnsOwnership,
+      loa: portalRevampServices.loa,
+      targetDetail: portalRevampServices.targetDetail,
+      remediation: portalRevampServices.remediation,
+      findings: {
+        ...validationServices.findings,
+        getEvidenceBundle: portalRevampServices.portalFindings.getEvidenceBundle.bind(
+          portalRevampServices.portalFindings,
+        ),
+      },
+      targetGroups: {
+        ...catalogServices.targetGroups,
+        restoreArchived: portalRevampServices.portalTargetGroups.restoreArchived.bind(
+          portalRevampServices.portalTargetGroups,
+        ),
+        bulkImportTargets: portalRevampServices.portalTargetGroups.bulkImportTargets.bind(
+          portalRevampServices.portalTargetGroups,
+        ),
+      },
       audit: repositories.audit,
     };
 

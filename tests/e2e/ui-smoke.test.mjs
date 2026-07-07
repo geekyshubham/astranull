@@ -11,12 +11,19 @@ let server;
 const REQUIRED_NAV_LABELS = [
   'Dashboard',
   'Environments',
-  'Evidence Vault',
+  'Target groups',
+  'Agents',
+  'Test runs',
+  'Findings',
   'Reports',
-  'Release Evidence',
+  'Billing',
   'Settings',
   'Notifications',
-  'Vector coverage matrix',
+];
+
+const REMOVED_NAV_LABELS = [
+  'Evidence Vault',
+  'Release Evidence',
   'WAF Posture',
 ];
 
@@ -74,6 +81,9 @@ describe('ui and api smoke', () => {
     for (const label of REQUIRED_NAV_LABELS) {
       assert.ok(reactAppJs.text.includes(label), `missing nav label: ${label}`);
     }
+    for (const label of REMOVED_NAV_LABELS) {
+      assert.equal(reactAppJs.text.includes(label), false, `pruned nav label should be absent: ${label}`);
+    }
     assert.ok(reactAppJs.text.includes('/v1/bootstrap-tokens'), 'React settings page creates and manages bootstrap tokens');
     assert.ok(reactAppJs.text.includes('/v1/service-accounts'), 'React settings page creates and manages service accounts');
     assert.ok(reactAppJs.text.includes('/v1/tenants/current'), 'React settings page loads and patches tenant settings');
@@ -82,10 +92,10 @@ describe('ui and api smoke', () => {
     assert.ok(reactAppJs.text.includes('/v1/test-policies'), 'React test policies page creates safe policy records');
     assert.ok(reactAppJs.text.includes('/internal/soc/high-scale/'), 'React SOC console calls governed SOC execution routes');
     assert.ok(reactAppJs.text.includes('/internal/admin/signup-requests/'), 'React staff console approves signup requests');
-    assert.ok(reactAppJs.text.includes('Create target group'), 'React onboarding page creates declared scope through APIs');
     assert.ok(reactAppJs.text.includes('Start safe run'), 'React runs page exposes safe validation start controls');
-    assert.ok(reactAppJs.text.includes('/v1/waf/assets'), 'React WAF posture page creates assets through backend API');
-    assert.ok(reactAppJs.text.includes('/v1/high-scale-requests'), 'React high-scale page creates governed request records');
+    assert.ok(reactAppJs.text.includes('/v1/waf/coverage/summary'), 'React dashboard loads WAF coverage summary');
+    assert.ok(reactAppJs.text.includes('/v1/high-scale-requests'), 'React portal references governed high-scale requests');
+    assert.ok(reactAppJs.text.includes('Vector coverage matrix'), 'Dashboard risk trends retains vector coverage panel');
     assert.equal(reactAppJs.text.includes('Workspace tabs'), false, 'React app must not render prototype SurfaceTabsPanel copy');
     assert.equal(reactAppJs.text.includes('React surfaces'), false, 'Public landing must not show fixed prototype surface counts');
 
@@ -94,6 +104,7 @@ describe('ui and api smoke', () => {
     assert.ok(reactCss.text.length > 50);
     assert.ok(reactCss.text.includes('.verdict-explanation'));
     assert.ok(reactCss.text.includes('.public-hero'));
+    assert.ok(reactCss.text.includes('--void-black'), 'Revamp tokens ship in portal CSS bundle');
 
     const navigationSource = readFileSync(new URL('../../apps/web/react/src/lib/navigation.ts', import.meta.url), 'utf8');
     assert.ok(navigationSource.includes('routeIdFromHash'), 'React router resolves detail routes with hash query params');

@@ -1,5 +1,9 @@
 # Product Pages and Tabs
 
+> **Superseded in part by the 2026-07 portal revamp.**  
+> The authoritative page map, sidebar structure, per-page composition, and interaction contracts for the next React port live in [`14-portal-revamp-2026-07.md`](14-portal-revamp-2026-07.md). CRUD gaps in [`15-crud-operations-backlog.md`](15-crud-operations-backlog.md). Visual reference in [`reference-2026-07/`](reference-2026-07/).  
+> Where this file and the revamp spec disagree on IA (sidebar groups, deleted routes, renamed labels), the revamp spec wins. Sections below that describe checks, target groups, agents, and findings **tab depth** remain useful — the revamp keeps those tabs.
+
 This is the master page map for AstraNull.
 
 ## Global navigation

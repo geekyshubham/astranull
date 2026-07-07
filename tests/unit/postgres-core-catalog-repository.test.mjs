@@ -91,7 +91,7 @@ describe('postgres core catalog repository', () => {
       created_at: new Date(FIXED_NOW),
     });
     assert.equal(tenant.id, 'ten_demo');
-    assert.equal(tenant.privacy_settings.metadata_retention_days, 90);
+    assert.equal(tenant.privacy_settings.metadata_retention_days, 365);
 
     const env = mapEnvironmentRow({
       id: 'env_1',
@@ -603,7 +603,7 @@ describe('postgres core catalog repository', () => {
       { id: 'tgt_new', now: FIXED_NOW },
     );
     assert.equal(target.id, 'tgt_new');
-    assert.equal(target.expected_behavior, 'must_block_before_origin');
+    assert.equal(target.expected_behavior, undefined);
     assertTenantWrapped(pool.client, CTX.tenantId);
   });
 

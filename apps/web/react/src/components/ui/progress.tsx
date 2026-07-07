@@ -8,10 +8,12 @@ type ProgressProps = {
   className?: string;
   tone?: ProgressTone;
   size?: ProgressSize;
+  label?: string;
 };
 
-export function Progress({ value, className, tone = 'accent', size = 'default' }: ProgressProps) {
+export function Progress({ value, className, tone = 'accent', size = 'default', label }: ProgressProps) {
   const clamped = clamp(value);
+  const accessibleName = label ? `${label}: ${clamped} percent` : `Progress ${clamped} percent`;
 
   return (
     <div
@@ -22,6 +24,7 @@ export function Progress({ value, className, tone = 'accent', size = 'default' }
         className
       )}
       role="progressbar"
+      aria-label={accessibleName}
       aria-valuenow={clamped}
       aria-valuemin={0}
       aria-valuemax={100}

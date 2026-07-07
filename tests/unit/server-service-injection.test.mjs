@@ -146,6 +146,8 @@ describe('createServer service injection — tenant and target-group routes', ()
     const listRes = await request(baseUrl, 'GET', '/v1/target-groups', { headers: readHeaders });
     assert.equal(listRes.status, 200);
     assert.deepEqual(listRes.json.items, [{ id: 'tg_fake', name: 'Fake TG' }]);
+    assert.equal(listRes.json.count, 1);
+    assert.ok(tgCalls.some((c) => c.fn === 'listTargetGroups'));
 
     const writeHeaders = demoHeaders('admin');
     const createRes = await request(baseUrl, 'POST', '/v1/target-groups', {

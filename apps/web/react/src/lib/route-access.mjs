@@ -1,16 +1,15 @@
 import { roleHasPermission } from '../../../../../src/contracts/roles.mjs';
 
-const STAFF_SOC_ROLES = new Set(['soc_analyst', 'soc_lead']);
+const STAFF_SOC_ROLES = new Set(['soc_analyst', 'soc_lead', 'admin']);
 
 /** Customer portal routes gated by backend RBAC keys in `src/contracts/roles.mjs`. */
 const ROUTE_PERMISSION = Object.freeze({
   notifications: 'notification:read',
   audit: 'audit:read',
-  'release-evidence': 'release_evidence:read',
 });
 
 const STAFF_ONLY_ROUTES = new Set(['admin', 'tenant-detail']);
-const STAFF_SOC_ROUTES = new Set(['internal-soc']);
+const STAFF_SOC_ROUTES = new Set(['internal-soc', 'queue-detail']);
 
 /**
  * @param {string | undefined} role
@@ -28,10 +27,6 @@ export function canAccessRoute(role, routeId, context = {}) {
 
   if (STAFF_SOC_ROUTES.has(routeId)) {
     return principal === 'staff' && STAFF_SOC_ROLES.has(staffRole);
-  }
-
-  if ((routeId === 'soc' || routeId === 'soc-request-detail') && principal === 'staff') {
-    return false;
   }
 
   const permission = ROUTE_PERMISSION[routeId];

@@ -8,6 +8,7 @@ import {
   publicPlacementDiagnosticsPayload,
   summarizePlacementDiagnostics,
 } from '../../lib/placementDiagnostics.mjs';
+import { buildGetStatePayload } from '../../lib/statePayload.mjs';
 
 /** Evidence older than this window earns no freshness credit. */
 const RECENT_EVIDENCE_WINDOW_DAYS = 30;
@@ -603,6 +604,41 @@ export function createPostgresStateServices(repositories, options = {}) {
       const tenantId = ctx.tenantId;
       const nowMs = nowFn().getTime();
 
+      let rollup = null;
+      if (typeof coreCatalog.getCurrentTenant === 'function') {
+        const tenant = await coreCatalog.getCurrentTenant(ctx);
+        rollup = tenant?.dashboard_rollup && typeof tenant.dashboard_rollup === 'object'
+          ? tenant.dashboard_rollup
+          : null;
+      }
+      const highScaleWired = typeof highScale.listHighScaleRequests === 'function';
+
+      if (rollup?.readiness && typeof rollup.readiness === 'object') {
+        const [killSwitchRecord, rollupHighScaleRequests] = await Promise.all([
+          killSwitch.getKillSwitchRecord(ctx),
+          highScaleWired ? highScale.listHighScaleRequests(ctx) : [],
+        ]);
+        const tenantHighScaleRequests = Array.isArray(rollupHighScaleRequests)
+          ? rollupHighScaleRequests.filter((row) => row.tenant_id === tenantId)
+          : [];
+        return buildGetStatePayload({
+          tenantId,
+          rollup,
+          computed: {
+            readiness: rollup.readiness,
+            target_groups: Number(rollup.target_groups ?? 0),
+            agents_online: Number(rollup.agents_online ?? 0),
+            recent_runs: Array.isArray(rollup.recent_runs) ? rollup.recent_runs : [],
+            open_findings: Number(rollup.open_findings ?? 0),
+            high_scale_requests: tenantHighScaleRequests.length
+              || Number(rollup.high_scale_requests ?? 0),
+          },
+          killSwitch: sanitizeKillSwitchRecord(killSwitchRecord, tenantId),
+          highScaleWired,
+          highScaleRequests: tenantHighScaleRequests,
+        });
+      }
+
       const [
         groups,
         agents,
@@ -661,17 +697,25 @@ export function createPostgresStateServices(repositories, options = {}) {
         nowMs,
       });
 
-      return {
-        tenant_id: tenantId,
-        readiness,
-        target_groups: groups.length,
-        agents_online: tenantAgents.filter((a) => a.status === 'online').length,
-        recent_runs: sortedRuns.slice(0, RECENT_RUNS_LIMIT),
-        open_findings: findings.filter((f) => f.status === 'open').length,
-        high_scale_requests: highScaleRequests.length,
-        high_scale_status: 'available',
-        kill_switch: sanitizeKillSwitchRecord(killSwitchRecord, tenantId),
-      };
+      const tenantHighScaleRequests = Array.isArray(highScaleRequests)
+        ? highScaleRequests.filter((row) => row.tenant_id === tenantId)
+        : [];
+
+      return buildGetStatePayload({
+        tenantId,
+        rollup: null,
+        computed: {
+          readiness,
+          target_groups: groups.length,
+          agents_online: tenantAgents.filter((a) => a.status === 'online').length,
+          recent_runs: sortedRuns.slice(0, RECENT_RUNS_LIMIT),
+          open_findings: findings.filter((f) => f.status === 'open').length,
+          high_scale_requests: tenantHighScaleRequests.length,
+        },
+        killSwitch: sanitizeKillSwitchRecord(killSwitchRecord, tenantId),
+        highScaleWired,
+        highScaleRequests: tenantHighScaleRequests,
+      });
     },
   };
 }

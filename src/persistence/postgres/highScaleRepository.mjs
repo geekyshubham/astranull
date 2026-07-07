@@ -344,14 +344,22 @@ export function createHighScaleRepository(pool) {
       });
     },
 
-    async listHighScaleRequests(ctx) {
+    async listHighScaleRequests(ctx, options = {}) {
       return withTenantContext(pool, ctx.tenantId, async (client) => {
+        const params = [ctx.tenantId];
+        let where = 'tenant_id = $1';
+        let orderBy = 'created_at DESC';
+        if (options.scope === 'my-tenant') {
+          params.push(['submitted', 'soc_review', 'scheduled', 'under_review']);
+          where += ` AND state = ANY($${params.length}::text[])`;
+          orderBy = 'state ASC, created_at DESC';
+        }
         const { rows } = await client.query(
           `SELECT ${HS_COLUMNS}
            FROM high_scale_requests
-           WHERE tenant_id = $1
-           ORDER BY created_at DESC`,
-          [ctx.tenantId],
+           WHERE ${where}
+           ORDER BY ${orderBy}`,
+          params,
         );
         return mapRequestRowsWithAuthoritativeArtifacts(client, ctx, rows);
       });

@@ -242,8 +242,21 @@ export function createHighScaleRequest(ctx, body) {
   return record;
 }
 
-export function listHighScaleRequests(ctx) {
-  return getStore().highScaleRequests.filter((h) => h.tenant_id === ctx.tenantId);
+const INLINE_QUEUE_STATES = new Set(['submitted', 'soc_review', 'scheduled', 'under_review']);
+
+export function listHighScaleRequests(ctx, options = {}) {
+  let items = getStore().highScaleRequests.filter((h) => h.tenant_id === ctx.tenantId);
+  if (options.scope === 'my-tenant') {
+    items = items
+      .filter((row) => INLINE_QUEUE_STATES.has(String(row.state ?? '').toLowerCase()))
+      .sort((a, b) => {
+        const stateCmp = String(a.state).localeCompare(String(b.state));
+        if (stateCmp !== 0) return stateCmp;
+        return String(b.created_at).localeCompare(String(a.created_at));
+      });
+    return items;
+  }
+  return items.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
 }
 
 export function getHighScaleRequest(tenantId, id) {
@@ -570,6 +583,16 @@ export function transitionHighScale(ctx, id, action, metadata = {}) {
   }
 
   if (action === 'start') {
+    const activeLoa = (getStore().loaSignatures ?? []).find(
+      (row) =>
+        row.tenant_id === ctx.tenantId
+        && row.target_group_id === req.target_group_id
+        && row.state === 'signed',
+    );
+    if (!activeLoa) {
+      auditStartGateDenied(ctx, req, 'loa_missing');
+      return { error: 'loa_missing', status: 409 };
+    }
     if (distinctSocApprovalCount(req) < 2) {
       auditStartGateDenied(ctx, req, 'insufficient_soc_approvals');
       return { error: 'insufficient_soc_approvals', status: 409 };

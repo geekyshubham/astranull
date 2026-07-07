@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { getStore, persistStore } from '../store.mjs';
 import { HttpBodyError } from './http.mjs';
 import { newId } from './ids.mjs';
 import { redactString } from './redact.mjs';
@@ -243,4 +244,74 @@ async function readBodyText(req, maxBytes) {
 /** Deterministic SHA-256 for test fixtures and client-side digest hints. */
 export function sha256Hex(value) {
   return createHash('sha256').update(String(value)).digest('hex');
+}
+
+export function buildLoaCustodyDigest(fields) {
+  return sha256Hex(stableStringify({
+    target_group_id: fields.target_group_id,
+    signer_name: fields.signer_name,
+    signer_email: fields.signer_email,
+    signed_at: fields.signed_at,
+    scope_snapshot: fields.scope_snapshot,
+    tenant_id: fields.tenant_id,
+  }));
+}
+
+function stableStringify(value) {
+  if (value === undefined) return 'null';
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) {
+    return `[${value.map((v) => (v === undefined ? 'null' : stableStringify(v))).join(',')}]`;
+  }
+  const keys = Object.keys(value).sort().filter((k) => value[k] !== undefined);
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(',')}}`;
+}
+
+/**
+ * Records an LOA signature custody entry (portal revamp §3.3).
+ *
+ * @param {import('../context.mjs').TenantScope} ctx
+ * @param {string} targetGroupId
+ * @param {Record<string, unknown>} payload
+ * @param {Record<string, unknown>} loaRecord
+ */
+export function recordSignature(ctx, targetGroupId, payload, loaRecord) {
+  const ledger = ensureAuthorizationArtifactLedger(getStore());
+  const custody_digest_sha256 = buildLoaCustodyDigest({
+    tenant_id: ctx.tenantId,
+    target_group_id: targetGroupId,
+    signer_name: payload.signer_name,
+    signer_email: payload.signer_email,
+    signed_at: loaRecord.signed_at,
+    scope_snapshot: loaRecord.scope_snapshot,
+  });
+  const artifactId = loaRecord.custody_artifact_id ?? newId('art');
+  const entry = {
+    id: artifactId,
+    custody_id: newId('cust'),
+    tenant_id: ctx.tenantId,
+    high_scale_request_id: null,
+    artifact_type: 'loa_signature',
+    content_sha256: custody_digest_sha256,
+    custody_uri: `custody://${artifactId}`,
+    content_type: 'application/json',
+    filename_redacted: 'loa_signature_metadata',
+    upload_envelope: 'json',
+    reference_uri_redacted: `metadata://target-groups/${targetGroupId}/loa`,
+    status: 'sealed',
+    created_at: loaRecord.signed_at ?? new Date().toISOString(),
+    created_by: ctx.userId,
+    metadata: {
+      target_group_id: targetGroupId,
+      loa_id: loaRecord.id,
+      signer_name: payload.signer_name,
+    },
+  };
+  ledger.push(entry);
+  persistStore();
+  return {
+    custody_artifact_id: artifactId,
+    custody_digest_sha256,
+    entry,
+  };
 }

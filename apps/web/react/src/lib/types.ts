@@ -1,13 +1,13 @@
 import type { LucideIcon } from 'lucide-react';
 
-export type SurfaceKind = 'overview' | 'scope' | 'validation' | 'posture' | 'governance' | 'staff';
+export type SurfaceKind = 'overview' | 'scope' | 'validation' | 'governance' | 'staff';
 
 export type RouteId =
   | 'dashboard'
-  | 'onboarding'
   | 'environments'
   | 'target-groups'
   | 'target-group-detail'
+  | 'target-detail'
   | 'agents'
   | 'agent-detail'
   | 'checks'
@@ -16,33 +16,18 @@ export type RouteId =
   | 'run-detail'
   | 'findings'
   | 'finding-detail'
-  | 'evidence'
-  | 'evidence-detail'
-  | 'waf-posture'
-  | 'waf-asset-detail'
-  | 'cve-pipeline'
-  | 'cve-detail'
-  | 'supply-chain'
-  | 'supply-chain-detail'
-  | 'remediation'
-  | 'discovery'
-  | 'discovery-entity'
-  | 'high-scale'
-  | 'high-scale-detail'
-  | 'soc'
-  | 'soc-request-detail'
   | 'reports'
   | 'report-detail'
   | 'integrations'
   | 'notifications'
   | 'audit'
-  | 'release-evidence'
   | 'settings'
   | 'support'
   | 'subscription'
   | 'admin'
   | 'tenant-detail'
-  | 'internal-soc';
+  | 'internal-soc'
+  | 'queue-detail';
 
 export type NavItem = {
   id: RouteId;
@@ -84,18 +69,34 @@ export type ReadinessFactor = {
   detail?: string;
 };
 
+export type ReadinessPostureSegment = {
+  key: 'pass' | 'review' | 'gap';
+  label: string;
+  count: number;
+  pct: number;
+};
+
 export type StatePayload = {
   tenant_id?: string;
   readiness?: {
     score?: number;
     factors?: ReadinessFactor[];
     summary?: string;
+    delta?: number;
+    posture?: {
+      pass?: number;
+      review?: number;
+      gap?: number;
+      total?: number;
+    };
   };
   target_groups?: number;
   agents_online?: number;
+  agents_total?: number;
   recent_runs?: DataItem[];
   open_findings?: number;
   high_scale_requests?: number;
+  last_validation_at?: string;
   kill_switch?: {
     active?: boolean;
     enabled?: boolean;
@@ -110,6 +111,7 @@ export type PortalData = {
   state: StatePayload | null;
   tenant: DataItem | null;
   targetGroups: DataItem[];
+  targetGroupsMeta: DataItem | null;
   agents: DataItem[];
   checks: DataItem[];
   testPolicies: DataItem[];
@@ -129,6 +131,7 @@ export type PortalData = {
   serviceAccounts: DataItem[];
   wafAssets: DataItem[];
   wafCoverage: DataItem | null;
+  wafCoverageSummary: DataItem | null;
   wafRiskRoadmap: DataItem | null;
   wafValidations: DataItem[];
   wafDriftEvents: DataItem[];

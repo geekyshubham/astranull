@@ -1,0 +1,8 @@
+{
+  "LoadBalancers": [
+    { "LoadBalancerArn": "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/checkout", "DNSName": "checkout-123.us-east-1.elb.amazonaws.com", "LoadBalancerName": "checkout" }
+  ],
+  "PublicIps": [
+    { "PublicIp": "203.0.113.10", "AllocationId": "eipalloc-1" }
+  ]
+}

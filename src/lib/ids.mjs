@@ -23,6 +23,10 @@ const PREFIX = {
   signup: 'sgn',
   internalAudit: 'iaud',
   approval: 'appr',
+  dns: 'dns',
+  tv: 'tv',
+  loa: 'loa',
+  art: 'art',
 };
 
 export function newId(kind) {

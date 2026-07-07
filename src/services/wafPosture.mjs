@@ -35,6 +35,9 @@ import {
   shouldAttemptOutboundConnectorPoll,
 } from '../lib/connectorProviders/pollWorker.mjs';
 import { supportsOutboundProviderPoll } from '../lib/connectorProviders/index.mjs';
+import { paginateItems } from '../lib/cursorPagination.mjs';
+import { computeWafCoverageSummaryRow, mapWafCoverageSummaryRow } from '../lib/wafCoverageSummary.mjs';
+import { markFindingRemediationDelivered } from './remediation.mjs';
 import { newId } from '../lib/ids.mjs';
 import { loadSecretEncryptionKey } from '../lib/secrets.mjs';
 import {
@@ -1756,6 +1759,19 @@ export function listConnectors(ctx) {
     .map((c) => formatConnector(c));
 }
 
+export function listConnectorsEnvelope(ctx) {
+  const items = listConnectors(ctx);
+  return {
+    items,
+    count: items.length,
+    meta: {
+      empty_reason: items.length
+        ? null
+        : 'No connectors are configured for this tenant.',
+    },
+  };
+}
+
 export function createConnector(ctx, body = {}) {
   ensureStoreShape();
   try {
@@ -2411,6 +2427,18 @@ export async function deliverActionItem(ctx, actionItemId, channel, options = {}
     destination: options.destination,
   });
 
+  const findingId = record.finding_ids?.[0] ?? null;
+  let remediationRecord = null;
+  if (findingId) {
+    remediationRecord = markFindingRemediationDelivered(ctx, {
+      findingId,
+      actionItemId: record.action_item_id,
+      channel: normalizedChannel,
+      targetRef: options.body?.target_ref ?? options.targetRef ?? null,
+      dryRun,
+    });
+  }
+
   audit({
     tenant_id: ctx.tenantId,
     actor_user_id: ctx.userId,
@@ -2423,11 +2451,24 @@ export async function deliverActionItem(ctx, actionItemId, channel, options = {}
       connector: connectorType,
       status: delivery.status,
       dry_run: delivery.dry_run,
+      ...(findingId ? { finding_id: findingId } : {}),
+      ...(remediationRecord ? { remediation_id: remediationRecord.id } : {}),
       ...(delivery.destination_preview ? { destination_preview: delivery.destination_preview } : {}),
     },
   });
   persistStore();
   return {
+    action_item: formatActionItem(record),
+    delivery_receipt: {
+      action_item_id: record.action_item_id,
+      ...delivery,
+      ...(remediationRecord
+        ? {
+            remediation_id: remediationRecord.id,
+            remediation_state: remediationRecord.state,
+          }
+        : {}),
+    },
     delivery: {
       action_item_id: record.action_item_id,
       ...delivery,
@@ -2945,4 +2986,113 @@ export function disableConnector(ctx, id, body = {}) {
   });
   persistStore();
   return { connector: formatConnector(connector) };
+}
+
+const EMPTY_COVERAGE_SUMMARY = Object.freeze({
+  assets_total: 0,
+  protected: 0,
+  underprotected: 0,
+  unknown: 0,
+  coverage_pct: 0,
+  by_vendor: {},
+  connectors_active: 0,
+  connectors_degraded: 0,
+  connectors_disabled: 0,
+  refreshed_at: null,
+});
+
+function indexCurrentSnapshotsForSummary(snapshots = []) {
+  const byAsset = new Map();
+  for (const snapshot of snapshots) {
+    if (!snapshot?.waf_asset_id) continue;
+    if (snapshot.is_current === true) {
+      byAsset.set(snapshot.waf_asset_id, snapshot);
+      continue;
+    }
+    const existing = byAsset.get(snapshot.waf_asset_id);
+    if (!existing || String(snapshot.created_at).localeCompare(String(existing.created_at)) > 0) {
+      byAsset.set(snapshot.waf_asset_id, snapshot);
+    }
+  }
+  return byAsset;
+}
+
+function readCoverageSummaryForTenant(tenantId) {
+  const store = getStore();
+  const cached = store.wafCoverageSummaries?.[tenantId];
+  if (cached) return mapWafCoverageSummaryRow(cached);
+
+  const assets = (store.wafAssets ?? []).filter((asset) => asset.tenant_id === tenantId);
+  const snapshots = (store.wafPostureSnapshots ?? []).filter((snap) => snap.tenant_id === tenantId);
+  const connectors = (store.wafConnectors ?? []).filter((row) => row.tenant_id === tenantId);
+  if (assets.length === 0 && connectors.length === 0) return null;
+
+  const summary = computeWafCoverageSummaryRow({
+    assets,
+    currentSnapshotsByAsset: indexCurrentSnapshotsForSummary(snapshots),
+    connectors,
+  });
+  if (!store.wafCoverageSummaries || typeof store.wafCoverageSummaries !== 'object') {
+    store.wafCoverageSummaries = {};
+  }
+  store.wafCoverageSummaries[tenantId] = summary;
+  return mapWafCoverageSummaryRow(summary);
+}
+
+/**
+ * WAF coverage summary from materialized view (portal revamp §4.3).
+ *
+ * @param {import('../context.mjs').TenantScope} ctx
+ */
+export function getCoverageSummary(ctx) {
+  const row = readCoverageSummaryForTenant(ctx.tenantId);
+  if (row) return row;
+  return {
+    ...EMPTY_COVERAGE_SUMMARY,
+    meta: { empty_reason: 'coverage_summary_not_populated', tenant_id: ctx.tenantId },
+  };
+}
+
+/**
+ * Connector inventory picker stub (portal revamp §3.5).
+ *
+ * @param {import('../context.mjs').TenantScope} ctx
+ * @param {string} connectorId
+ * @param {{ cursor?: string, limit?: number }} [_query]
+ */
+export function getConnectorInventory(ctx, connectorId, query = {}) {
+  const connector = findConnector(ctx, connectorId);
+  if (!connector) {
+    return { error: 'connector_not_found', status: 404 };
+  }
+  if (connector.status === 'disabled') {
+    return { error: 'connector_disabled', status: 409 };
+  }
+
+  const inventory = Array.isArray(connector.inventory_items)
+    ? connector.inventory_items
+    : (connector.inventory_cache?.items ?? []);
+
+  const limit = Number(query.limit) || 50;
+  const paged = paginateItems(inventory, {
+    limit,
+    cursor: query.cursor,
+    cursorField: 'value',
+  });
+
+  return {
+    provider: connector.provider ?? null,
+    account: connector.account_id ?? connector.account ?? connector.config_json?.account ?? null,
+    scope: connector.scope ?? connector.config_json?.scope ?? 'read_only',
+    discovered_at: connector.inventory_cache?.discovered_at
+      ?? connector.last_success_at
+      ?? connector.last_polled_at
+      ?? null,
+    items: paged.items,
+    count: paged.items.length,
+    next_cursor: paged.next_cursor ?? undefined,
+    meta: paged.items.length
+      ? undefined
+      : { empty_reason: 'connector_inventory_not_populated', connector_id: connectorId },
+  };
 }

@@ -1,0 +1,6 @@
+{
+  "addresses": [
+    { "name": "checkout-ip", "value": "203.0.113.20", "kind": "ip", "selfLink": "projects/demo/regions/us-central1/addresses/checkout-ip" },
+    { "name": "checkout-lb", "value": "checkout.gcp.example", "kind": "fqdn", "selfLink": "projects/demo/global/addresses/checkout-lb" }
+  ]
+}

@@ -230,3 +230,183 @@ export function listOwnershipVerifications(ctx) {
 export function getOwnershipVerification(ctx, id) {
   return findVerification(ctx, id);
 }
+
+const LADDER_STEP_IDS = Object.freeze([
+  'declared',
+  'dns_verified',
+  'agent_verified',
+  'user_confirmed',
+]);
+
+const LADDER_LABELS = Object.freeze({
+  declared: 'Declared',
+  dns_verified: 'DNS verified',
+  agent_verified: 'Agent verified',
+  user_confirmed: 'User confirmed',
+});
+
+const VERIFY_PREREQ_STATES = new Set(['agent_verified', 'user_confirmed']);
+
+const VERIFICATION_RANK = Object.freeze({
+  unverified: 0,
+  pending: 1,
+  dns_verified: 2,
+  agent_verified: 3,
+  user_confirmed: 4,
+});
+
+function latestVerificationByTarget(ctx, targetIds) {
+  const verifications = (getStore().targetVerifications ?? []).filter(
+    (v) => v.tenant_id === ctx.tenantId && targetIds.includes(v.target_id),
+  );
+  const latestByTarget = new Map();
+  for (const row of verifications) {
+    const prev = latestByTarget.get(row.target_id);
+    if (!prev) {
+      latestByTarget.set(row.target_id, row);
+      continue;
+    }
+    const prevAt = String(prev.transitioned_at);
+    const rowAt = String(row.transitioned_at);
+    if (rowAt > prevAt) {
+      latestByTarget.set(row.target_id, row);
+      continue;
+    }
+    if (rowAt === prevAt && (VERIFICATION_RANK[row.state] ?? 0) > (VERIFICATION_RANK[prev.state] ?? 0)) {
+      latestByTarget.set(row.target_id, row);
+    }
+  }
+  return latestByTarget;
+}
+
+function getActiveLoa(ctx, groupId) {
+  return (getStore().loaSignatures ?? []).find(
+    (row) =>
+      row.tenant_id === ctx.tenantId
+      && row.target_group_id === groupId
+      && row.state === 'signed',
+  ) ?? null;
+}
+
+/**
+ * Server-computed verification ladder (portal revamp §3.4).
+ *
+ * @param {import('../context.mjs').TenantScope} ctx
+ * @param {string} groupId
+ */
+export function getLadder(ctx, groupId) {
+  const group = findTargetGroup(ctx, groupId);
+  if (!group) return { error: 'target_group_not_found', status: 404 };
+
+  const targets = getStore().targets.filter(
+    (t) => t.tenant_id === ctx.tenantId && t.target_group_id === groupId,
+  );
+  const latestByTarget = latestVerificationByTarget(
+    ctx,
+    targets.map((t) => t.id),
+  );
+
+  const total = targets.length;
+  const steps = LADDER_STEP_IDS.map((id) => {
+    let count = 0;
+    if (id === 'declared') {
+      count = total;
+    } else {
+      for (const state of latestByTarget.values()) {
+        if (state.state === id) count += 1;
+      }
+    }
+    return {
+      id,
+      label: LADDER_LABELS[id] ?? id,
+      done: total > 0 && count >= total,
+      count,
+      total,
+    };
+  });
+
+  return {
+    steps,
+    meta: total === 0
+      ? { empty_reason: 'No targets declared for this group; the verification ladder cannot be computed yet.' }
+      : undefined,
+  };
+}
+
+/**
+ * Elevates a target to user_confirmed (portal revamp §3.4).
+ *
+ * @param {import('../context.mjs').TenantScope} ctx
+ * @param {string} groupId
+ * @param {string} targetId
+ * @param {{ signer?: string, note?: string }} _signer
+ */
+export function confirmTarget(ctx, groupId, targetId, signer = {}) {
+  const group = findTargetGroup(ctx, groupId);
+  if (!group) return { error: 'target_group_not_found', status: 404 };
+
+  const target = getStore().targets.find(
+    (t) =>
+      t.id === targetId
+      && t.tenant_id === ctx.tenantId
+      && t.target_group_id === groupId,
+  );
+  if (!target) return { error: 'target_not_found', status: 404 };
+
+  const activeLoa = getActiveLoa(ctx, groupId);
+  if (!activeLoa) return { error: 'loa_missing', status: 409 };
+
+  const latestByTarget = latestVerificationByTarget(ctx, [targetId]);
+  const current = latestByTarget.get(targetId);
+  const currentState = current?.state ?? 'pending';
+  if (!VERIFY_PREREQ_STATES.has(currentState) && currentState !== 'agent_verified') {
+    if (currentState === 'pending' || currentState === 'unverified' || currentState === 'dns_verified') {
+      return { error: 'verify_prereq_not_met', status: 409 };
+    }
+  }
+  if (!VERIFY_PREREQ_STATES.has(currentState)) {
+    return { error: 'verify_prereq_not_met', status: 409 };
+  }
+
+  const now = new Date().toISOString();
+  const verification = {
+    id: newId('tv'),
+    tenant_id: ctx.tenantId,
+    target_id: targetId,
+    state: 'user_confirmed',
+    source_kind: 'user_attestation',
+    source_ref: {
+      signer: signer.signer ?? ctx.userId,
+      note: signer.note ?? null,
+      loa_id: activeLoa.id,
+    },
+    transitioned_at: now,
+    transitioned_by: ctx.userId ?? 'system',
+    audit_entry_id: null,
+  };
+  const auditEntry = audit({
+    tenant_id: ctx.tenantId,
+    actor_user_id: ctx.userId,
+    actor_role: ctx.role,
+    action: 'target_verification.user_confirmed',
+    resource_type: 'target',
+    resource_id: targetId,
+    metadata: { target_group_id: groupId, loa_id: activeLoa.id },
+  });
+  verification.audit_entry_id = auditEntry.id;
+  if (!getStore().targetVerifications) getStore().targetVerifications = [];
+  getStore().targetVerifications.push(verification);
+  target.verify_state = 'user_confirmed';
+  persistStore();
+
+  return {
+    target,
+    verification: {
+      state: verification.state,
+      source_kind: verification.source_kind,
+      source_ref: verification.source_ref,
+      transitioned_at: verification.transitioned_at,
+    },
+    audit_entry_id: auditEntry.id,
+  };
+}

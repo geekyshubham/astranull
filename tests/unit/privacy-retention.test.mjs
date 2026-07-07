@@ -139,7 +139,7 @@ describe('metadata privacy retention', () => {
   it('normalizes invalid retention days', () => {
     assert.equal(normalizePrivacySettings({ metadata_retention_days: 0 }).metadata_retention_days, 1);
     assert.equal(normalizePrivacySettings({ metadata_retention_days: 99999 }).metadata_retention_days, 3650);
-    assert.equal(normalizePrivacySettings({ metadata_retention_days: 'bad' }).metadata_retention_days, 90);
+    assert.equal(normalizePrivacySettings({ metadata_retention_days: 'bad' }).metadata_retention_days, 365);
   });
 
   it('defaults and clamps evidence_retention on normalize', () => {

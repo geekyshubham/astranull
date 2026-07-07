@@ -60,7 +60,7 @@ export function AppShell({ route, session, data, onRouteChange, onRoleChange, on
   const visibleNavItems = useMemo(() => {
     const role = session.role ?? 'admin';
     return NAV_ITEMS.filter((item) => {
-      if (item.id.endsWith('-detail') || item.id === 'discovery-entity') {
+      if (item.id.endsWith('-detail')) {
         return false;
       }
       return canAccessRoute(role, item.id, {

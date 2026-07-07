@@ -1,0 +1,1951 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AstraNull Check Library</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --surface: #1a2332;
+      --text: #e7ecf3;
+      --muted: #9aa8bc;
+      --accent: #5b9fd4;
+      --safe: #3d8f6e;
+      --soc: #c47a3a;
+      --border: #2a3548;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.55;
+    }
+    header.page {
+      padding: 2rem 1.5rem 1rem;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+    }
+    header.page h1 { margin: 0 0 0.5rem; font-size: 1.75rem; }
+    header.page p { margin: 0; color: var(--muted); max-width: 72ch; }
+    nav.toc {
+      padding: 1rem 1.5rem;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem 1rem;
+      font-size: 0.9rem;
+    }
+    nav.toc a { color: var(--accent); text-decoration: none; }
+    nav.toc a:hover { text-decoration: underline; }
+    main { padding: 1.5rem; max-width: 1100px; margin: 0 auto; }
+    section { margin-bottom: 2.5rem; }
+    h2 { font-size: 1.35rem; border-bottom: 1px solid var(--border); padding-bottom: 0.35rem; }
+    h3 { margin: 0; font-size: 1.1rem; }
+    .glossary, .probe-table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+    .glossary th, .glossary td, .probe-table th, .probe-table td {
+      border: 1px solid var(--border);
+      padding: 0.5rem 0.65rem;
+      text-align: left;
+      vertical-align: top;
+    }
+    .glossary th, .probe-table th { background: var(--surface); }
+    .flow {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem 1.25rem;
+      font-size: 0.95rem;
+    }
+    .flow ol { margin: 0.5rem 0 0; padding-left: 1.25rem; }
+    .checks { display: grid; gap: 1rem; }
+    .check {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem 1.25rem;
+    }
+    .check header { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.75rem; margin-bottom: 0.5rem; }
+    .check-id { font-size: 0.8rem; color: var(--muted); }
+    .badge {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      padding: 0.15rem 0.45rem;
+      border-radius: 4px;
+      font-weight: 600;
+    }
+    .badge.safe { background: rgba(61,143,110,0.25); color: #8fd4b3; }
+    .badge.soc_gated { background: rgba(196,122,58,0.25); color: #f0b07a; }
+    .desc { color: var(--muted); margin: 0 0 0.75rem; }
+    dl { margin: 0; display: grid; grid-template-columns: 9rem 1fr; gap: 0.35rem 0.75rem; font-size: 0.9rem; }
+    dt { color: var(--muted); font-weight: 500; }
+    dd { margin: 0; }
+    details { margin-top: 0.75rem; font-size: 0.88rem; }
+    details summary { cursor: pointer; color: var(--accent); }
+    details ul { margin: 0.35rem 0 0; padding-left: 1.25rem; color: var(--muted); }
+    footer { padding: 2rem 1.5rem; color: var(--muted); font-size: 0.85rem; border-top: 1px solid var(--border); }
+    code { font-size: 0.85em; background: rgba(0,0,0,0.25); padding: 0.1em 0.35em; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <header class="page">
+    <h1>AstraNull Check Library</h1>
+    <p>Reference for every check in <code>CHECK_CATALOG</code> (65 entries).
+    Safe checks are customer-runnable with bounded probes. SOC-gated checks require authorization and SOC execution.
+    Generated from the repo catalog — re-run <code>node scripts/generate-check-library-html.mjs</code> after catalog changes.</p>
+  </header>
+  <nav class="toc">
+    <a href="#how-it-works">How it works</a>
+    <a href="#glossary">Glossary</a>
+    <a href="#probe-kinds">Probe kinds</a>
+    <a href="#family-origin">Origin &amp; bypass</a><a href="#family-l3_l4">L3/L4 network</a><a href="#family-path">Protected path / canary</a><a href="#family-dns">DNS</a><a href="#family-waf">WAF posture</a><a href="#family-l7">L7 / API / HTTP</a><a href="#family-tls">TLS &amp; connections</a><a href="#family-protocol">Modern protocols</a><a href="#family-operations">Operations readiness</a>
+    <a href="#soc-gated">SOC-gated</a>
+  </nav>
+  <main>
+    <section id="how-it-works">
+      <h2>How a check runs</h2>
+      <div class="flow">
+        <ol>
+          <li><strong>Declare</strong> target group + target (FQDN/IP/URL) and optional expected behavior.</li>
+          <li><strong>Start test run</strong> — planner picks check, creates signed probe job(s).</li>
+          <li><strong>Probe worker</strong> executes bounded probe (<code>probe_profile</code>) against declared target only.</li>
+          <li><strong>Agent</strong> (if deployed &amp; required) uploads metadata observation when local signal matches.</li>
+          <li><strong>Correlation</strong> compares <code>external_result</code> + observation vs <code>expected_behavior</code> → verdict + finding.</li>
+        </ol>
+      </div>
+    </section>
+    <section id="glossary">
+      <h2>Glossary</h2>
+      <table class="glossary">
+        <thead><tr><th>Term</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Probe worker</strong></td><td>AstraNull-signed outside process that runs bounded network probes against customer-declared targets (not in your app process).</td></tr><tr><td><strong>Agent</strong></td><td>Customer-deployed outbound observer (heartbeat, packet, mirror, log-tail, or canary). Correlates inside traffic with outside probes — not required for every check.</td></tr><tr><td><strong>expected_behavior</strong></td><td>What you declare should happen when probed (e.g. block before origin). Verdict compares probe result to this.</td></tr><tr><td><strong>probe_profile.kind</strong></td><td>The bounded probe technique used (HTTP HEAD, TCP connect, DNS lookup, etc.).</td></tr><tr><td><strong>external_result</strong></td><td>Probe outcome: blocked, timeout, connected, or allowed.</td></tr><tr><td><strong>agent_observation</strong></td><td>Metadata that the agent saw matching probe traffic at the observation point.</td></tr><tr><td><strong>metadata_marker</strong></td><td>Catalog-only simulation in dev/CI; production signed-worker may still dispatch a minimal stub unless a live probe kind is set.</td></tr><tr><td><strong>soc_gated</strong></td><td>Not runnable from customer UI — requires SOC approval, authorization pack, and governed execution.</td></tr><tr><td><strong>nonce_hash</strong></td><td>Correlation token linking probe job to agent observation without sending raw payloads.</td></tr><tr><td><strong>direct_origin_ip</strong></td><td>Customer-declared origin IP used for Host/SNI bypass probes (no automatic origin hunting).</td></tr>
+        </tbody>
+      </table>
+      <h3 style="margin-top:1.5rem">Expected behavior values</h3>
+      <table class="glossary">
+        <tbody>
+          <tr><td><code>must_block_before_origin</code></td><td>Attack-ish probe should be stopped at edge/WAF — must not reach your app.</td></tr>
+          <tr><td><code>must_reach_canary</code></td><td>Traffic should reach your opt-in canary on the protected path (positive test).</td></tr>
+          <tr><td><code>must_allow_baseline_health</code></td><td>Legitimate health probe should succeed (declared; correlation partial).</td></tr>
+          <tr><td><code>must_challenge_or_rate_limit</code></td><td>Suspicious probe should get challenge or 429 (declared; correlation partial).</td></tr>
+          <tr><td><code>must_not_expose_direct_ip</code></td><td>Origin IP should not answer when only CDN hostname is public (declared; correlation partial).</td></tr>
+        </tbody>
+      </table>
+    </section>
+    <section id="probe-kinds">
+      <h2>Probe kinds (how detection works)</h2>
+      <table class="probe-table">
+        <thead><tr><th>Kind</th><th>What it does</th></tr></thead>
+        <tbody>
+          <tr><td><code>http_head</code></td><td>Single bounded HTTP HEAD with optional harmless marker header.</td></tr><tr><td><code>tcp_connect</code></td><td>One TCP connect attempt to declared host:port.</td></tr><tr><td><code>dns_resolve</code></td><td>Single DNS lookup for declared name.</td></tr><tr><td><code>metadata_marker</code></td><td>No live network I/O — records declared intent only (deferred checks).</td></tr><tr><td><code>udp_probe</code></td><td>One labeled UDP datagram (no amplification).</td></tr><tr><td><code>quic_reachability</code></td><td>HTTPS Alt-Svc read plus one UDP/443 datagram.</td></tr><tr><td><code>alert_webhook_ping</code></td><td>One POST to declared alert webhook; expects HTTP 2xx.</td></tr><tr><td><code>ops_readiness</code></td><td>Validates runbook/kill-switch evidence metadata (no traffic to customer edge).</td></tr><tr><td><code>ownership_challenge</code></td><td>Bounded HEAD with challenge nonce for ownership verification.</td></tr><tr><td><code>tls_session</code></td><td>One TLS handshake; collects protocol/cipher/cert metadata.</td></tr><tr><td><code>http2_settings</code></td><td>Reads HTTP/2 SETTINGS frame limits (no reset flood).</td></tr><tr><td><code>origin_leak_scan</code></td><td>Bounded prefix DNS scan on declared apex (fixed label list, not internet-wide).</td></tr><tr><td><code>host_sni_bypass</code></td><td>HEAD to declared direct IP using protected hostname as Host/SNI.</td></tr><tr><td><code>port_scan_bounded</code></td><td>TCP connect to capped port list on declared host.</td></tr><tr><td><code>rate_limit_sequence</code></td><td>Up to 5 spaced HEAD requests to observe 429/challenge.</td></tr><tr><td><code>waf_enforcement_probe</code></td><td>Harmless marker request; blocked/challenged = WAF enforcing.</td></tr><tr><td><code>dnssec_posture</code></td><td>DNSKEY/DS lookups for DNSSEC signals.</td></tr><tr><td><code>dns_open_recursion</code></td><td>Single recursion test via declared resolver.</td></tr><tr><td><code>dns_failover_posture</code></td><td>NS count and secondary NS reachability.</td></tr><tr><td><code>dns_axfr_leak</code></td><td>One TCP-53 AXFR attempt; leak if zone transfers when unauthorized.</td></tr><tr><td><code>tls_audit</code></td><td>Full TLS handshake audit (version, cipher, cert expiry).</td></tr><tr><td><code>cache_abuse_probe</code></td><td>Bounded cache-bust HEAD sequence.</td></tr><tr><td><code>api_surface_scan</code></td><td>HEAD on declared/common API doc paths.</td></tr><tr><td><code>cors_posture_probe</code></td><td>OPTIONS with foreign Origin; weak ACAO = finding.</td></tr><tr><td><code>bot_challenge_probe</code></td><td>Cookie-less client; expects bot challenge or block.</td></tr><tr><td><code>graphql_posture_probe</code></td><td>Bounded GraphQL endpoint posture (no deep queries).</td></tr><tr><td><code>websocket_upgrade_posture</code></td><td>Single WebSocket upgrade request; classifies 101/403/426.</td></tr><tr><td><code>outside_in_waf_scan</code></td><td>Up to 10 bounded probes: WAF fingerprint, benign markers, evasion variants, origin bypass.</td></tr>
+        </tbody>
+      </table>
+    </section>
+    
+    <section id="family-origin">
+      <h2>Origin &amp; bypass <span style="color:var(--muted);font-weight:400">(4)</span></h2>
+      <div class="checks">
+    <article class="check" id="origin.direct_reachability.safe">
+      <header>
+        <h3>Direct Origin Reachability (Safe)</h3>
+        <code class="check-id">origin.direct_reachability.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Bounded direct-origin reachability validation without flood traffic; signed-worker mode uses one direct-IP Host/SNI HEAD probe.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Correlate one bounded direct-origin Host/SNI probe with agent observation; live FQDN targets require declared direct-origin IP metadata.</dd>
+        <dt>How we detect</dt>
+        <dd>HEAD to declared direct IP using protected hostname as Host/SNI. Max 1 request(s), timeout ≤ 5000ms. Correlates outside probe with agent observation when agent-assisted.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>host_sni_bypass</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>fqdn, ip, url</dd>
+        <dt>Agent modes</dt>
+        <dd>canary, packet, heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result, agent_observation</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>declared_origin_target</li><li>direct_origin_ip_for_fqdn_targets</li><li>agent_on_origin_path</li></ul></details>
+    </article>
+    <article class="check" id="origin.direct_bypass.safe">
+      <header>
+        <h3>Direct-Origin Bypass (Safe)</h3>
+        <code class="check-id">origin.direct_bypass.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Bounded direct-origin probe validates whether a declared direct path would reach an observation point; simulation mode remains metadata-only.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Correlate one bounded direct-origin Host/SNI probe with agent path observation against expected_behavior; live FQDN targets require declared direct-origin IP metadata.</dd>
+        <dt>How we detect</dt>
+        <dd>HEAD to declared direct IP using protected hostname as Host/SNI. Max 1 request(s), timeout ≤ 5000ms. Correlates outside probe with agent observation when agent-assisted.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>host_sni_bypass</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>fqdn, ip, url</dd>
+        <dt>Agent modes</dt>
+        <dd>canary, packet, heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result, agent_observation</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>declared_origin_target</li><li>direct_origin_ip_for_fqdn_targets</li><li>agent_on_origin_path</li></ul></details>
+    </article>
+    <article class="check" id="origin.host_sni_bypass.safe">
+      <header>
+        <h3>Host/SNI Bypass (Safe)</h3>
+        <code class="check-id">origin.host_sni_bypass.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Bounded direct-IP HEAD probe using the declared protected host as HTTP Host and TLS SNI to detect origin bypass routing.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>One bounded direct-IP HEAD probe with declared Host/SNI must not reach origin when protection is effective.</dd>
+        <dt>How we detect</dt>
+        <dd>HEAD to declared direct IP using protected hostname as Host/SNI. Max 1 request(s), timeout ≤ 5000ms. Correlates outside probe with agent observation when agent-assisted.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>host_sni_bypass</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>fqdn, url</dd>
+        <dt>Agent modes</dt>
+        <dd>canary, heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result, agent_observation</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>declared_host_sni_target</li><li>direct_origin_ip_for_fqdn_targets</li></ul></details>
+    </article>
+    <article class="check" id="origin.leak_scan.safe">
+      <header>
+        <h3>Origin Leak Scan (Safe)</h3>
+        <code class="check-id">origin.leak_scan.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Bounded DNS/subdomain/IPv6 origin leak discovery on declared apex domain.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Leaked origin IPs, stale subdomains, IPv6-only DNS paths that bypass CDN.</dd>
+        <dt>How we detect</dt>
+        <dd>Bounded prefix DNS scan on declared apex (fixed label list, not internet-wide). Max 15 request(s), timeout ≤ 5000ms. Correlates outside probe with agent observation when agent-assisted.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>origin_leak_scan</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>fqdn, url</dd>
+        <dt>Agent modes</dt>
+        <dd>canary, packet, heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result, agent_observation</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>declared_apex_domain</li></ul></details>
+    </article></div>
+    </section>
+    <section id="family-l3_l4">
+      <h2>L3/L4 network <span style="color:var(--muted);font-weight:400">(5)</span></h2>
+      <div class="checks">
+    <article class="check" id="l3.firewall_exposure_scan.safe">
+      <header>
+        <h3>Firewall Exposure Scan (Safe)</h3>
+        <code class="check-id">l3.firewall_exposure_scan.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Bounded risky-port scan (one connect per port) on declared host.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Open admin/service ports without expected protection create exposure findings.</dd>
+        <dt>How we detect</dt>
+        <dd>TCP connect to capped port list on declared host. Max 15 request(s), timeout ≤ 3000ms. Verdict primarily from outside probe metadata.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>port_scan_bounded</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>fqdn, ip</dd>
+        <dt>Agent modes</dt>
+        <dd>packet, heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>declared_scan_host</li></ul></details>
+    </article>
+    <article class="check" id="l3.forbidden_tcp_port.safe">
+      <header>
+        <h3>Forbidden TCP Port (Safe)</h3>
+        <code class="check-id">l3.forbidden_tcp_port.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Low-rate reachability metadata check for a forbidden TCP port (simulated).</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Single TCP connect attempt must be blocked when deny rules are effective.</dd>
+        <dt>How we detect</dt>
+        <dd>One TCP connect attempt to declared host:port. Max 1 request(s), timeout ≤ 5000ms. Correlates outside probe with agent observation when agent-assisted.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>tcp_connect</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>ip, fqdn</dd>
+        <dt>Agent modes</dt>
+        <dd>packet, mirror, heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result, agent_observation</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>declared_forbidden_tcp_port</li><li>expected_block_behavior</li></ul></details>
+    </article>
+    <article class="check" id="l3.forbidden_udp_port.safe">
+      <header>
+        <h3>Forbidden UDP Port (Safe)</h3>
+        <code class="check-id">l3.forbidden_udp_port.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Single bounded UDP datagram to a declared forbidden port (no amplification).</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>One labeled UDP datagram must be blocked or filtered when deny rules are effective.</dd>
+        <dt>How we detect</dt>
+        <dd>One labeled UDP datagram (no amplification). Max 1 request(s), timeout ≤ 5000ms. Correlates outside probe with agent observation when agent-assisted.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>udp_probe</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>ip, fqdn</dd>
+        <dt>Agent modes</dt>
+        <dd>packet, mirror, heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result, agent_observation</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>declared_forbidden_udp_port</li><li>agent_packet_or_mirror_mode</li></ul></details>
+    </article>
+    <article class="check" id="l3.basic_deny_rule.safe">
+      <header>
+        <h3>Basic Deny-Rule Validation (Safe)</h3>
+        <code class="check-id">l3.basic_deny_rule.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Simulated deny-rule probe metadata correlated with block/penetrate verdict.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>One bounded TCP connect plus agent observation confirms deny rule enforcement.</dd>
+        <dt>How we detect</dt>
+        <dd>One TCP connect attempt to declared host:port. Max 1 request(s), timeout ≤ 5000ms. Correlates outside probe with agent observation when agent-assisted.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>tcp_connect</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>ip, fqdn</dd>
+        <dt>Agent modes</dt>
+        <dd>packet, heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result, agent_observation</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>declared_deny_rule_target</li></ul></details>
+    </article>
+    <article class="check" id="l3.ipv6_reachability.safe">
+      <header>
+        <h3>IPv6 Declared Reachability (Safe)</h3>
+        <code class="check-id">l3.ipv6_reachability.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Low-rate reachability metadata for customer-declared IPv6 targets only (no volumetric traffic).</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Single bounded TCP connect or metadata marker confirms IPv6 path policy without connection exhaustion.</dd>
+        <dt>How we detect</dt>
+        <dd>One TCP connect attempt to declared host:port. Max 1 request(s), timeout ≤ 5000ms. Correlates outside probe with agent observation when agent-assisted.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>tcp_connect</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>ip, fqdn</dd>
+        <dt>Agent modes</dt>
+        <dd>packet, heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result, agent_observation</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>declared_ipv6_target</li><li>expected_ipv6_protection_behavior</li></ul></details>
+    </article></div>
+    </section>
+    <section id="family-path">
+      <h2>Protected path / canary <span style="color:var(--muted);font-weight:400">(1)</span></h2>
+      <div class="checks">
+    <article class="check" id="path.protected_canary.safe">
+      <header>
+        <h3>Protected-Path Canary (Safe)</h3>
+        <code class="check-id">path.protected_canary.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Harmless labeled canary request through protected path (simulated probe metadata).</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Canary marker HEAD probe must use the declared full URL and should reach canary only when protected path routes correctly.</dd>
+        <dt>How we detect</dt>
+        <dd>Single bounded HTTP HEAD with optional harmless marker header. Max 1 request(s), timeout ≤ 5000ms. Correlates outside probe with agent observation when agent-assisted.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>http_head</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_reach_canary</code></dd>
+        <dt>Targets</dt>
+        <dd>url</dd>
+        <dt>Agent modes</dt>
+        <dd>canary</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result, agent_observation</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>full_canary_url_behind_protected_path</li></ul></details>
+    </article></div>
+    </section>
+    <section id="family-dns">
+      <h2>DNS <span style="color:var(--muted);font-weight:400">(7)</span></h2>
+      <div class="checks">
+    <article class="check" id="dns.authoritative_response.safe">
+      <header>
+        <h3>DNS Authoritative Response (Safe)</h3>
+        <code class="check-id">dns.authoritative_response.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Authoritative DNS response metadata validation (no live recursion abuse).</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Single DNS lookup must return healthy authoritative response metadata for declared name.</dd>
+        <dt>How we detect</dt>
+        <dd>Single DNS lookup for declared name. Max 1 request(s), timeout ≤ 5000ms. Verdict primarily from outside probe metadata.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>dns_resolve</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>fqdn, dns</dd>
+        <dt>Agent modes</dt>
+        <dd>heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>declared_authoritative_zone</li></ul></details>
+    </article>
+    <article class="check" id="dns.random_prefix_nxdomain.safe">
+      <header>
+        <h3>DNS Random-Prefix / NXDOMAIN (Safe)</h3>
+        <code class="check-id">dns.random_prefix_nxdomain.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">NXDOMAIN/random-prefix signal metadata for resolver hygiene.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>One labeled random-prefix lookup observes NXDOMAIN or mitigation behavior without high QPS.</dd>
+        <dt>How we detect</dt>
+        <dd>Single DNS lookup for declared name. Max 1 request(s), timeout ≤ 5000ms. Verdict primarily from outside probe metadata.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>dns_resolve</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>fqdn, dns</dd>
+        <dt>Agent modes</dt>
+        <dd>heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>declared_zone_for_random_prefix</li></ul></details>
+    </article>
+    <article class="check" id="dns.open_recursion_behavior.safe">
+      <header>
+        <h3>Open Recursion Behavior (Safe)</h3>
+        <code class="check-id">dns.open_recursion_behavior.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Live open-recursion check — single external lookup via declared resolver.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Resolver must not answer recursion for external names when closed.</dd>
+        <dt>How we detect</dt>
+        <dd>Single recursion test via declared resolver. Max 1 request(s), timeout ≤ 5000ms. Verdict primarily from outside probe metadata.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>dns_open_recursion</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>fqdn, dns, ip</dd>
+        <dt>Agent modes</dt>
+        <dd>heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>declared_resolver_target</li></ul></details>
+    </article>
+    <article class="check" id="dns.amplification_exposure.safe">
+      <header>
+        <h3>DNS Amplification Exposure (Safe Metadata)</h3>
+        <code class="check-id">dns.amplification_exposure.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Validates reflector/amplification exposure via config and response-class metadata only — no reflection traffic.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Bounded DNS resolve collects response-size/class metadata; verdict when target is not usable as an unintended amplifier.</dd>
+        <dt>How we detect</dt>
+        <dd>Single DNS lookup for declared name. Max 1 request(s), timeout ≤ 5000ms. Verdict primarily from outside probe metadata.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>dns_resolve</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>fqdn, dns, ip</dd>
+        <dt>Agent modes</dt>
+        <dd>heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result, health_signal</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>declared_authoritative_or_resolver_target</li><li>customer_amplification_policy_intent</li></ul></details>
+    </article>
+    <article class="check" id="dns.dnssec_expensive_query.safe">
+      <header>
+        <h3>DNSSEC / Expensive Query Readiness (Safe)</h3>
+        <code class="check-id">dns.dnssec_expensive_query.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Low-rate declared DNS query type readiness without high QPS or resolver abuse.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>DNSKEY/DS lookup observes DNSSEC posture without sustained load.</dd>
+        <dt>How we detect</dt>
+        <dd>DNSKEY/DS lookups for DNSSEC signals. Max 2 request(s), timeout ≤ 5000ms. Verdict primarily from outside probe metadata.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>dnssec_posture</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>fqdn, dns</dd>
+        <dt>Agent modes</dt>
+        <dd>heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>declared_dns_query_type</li><li>authoritative_or_resolver_target</li></ul></details>
+    </article>
+    <article class="check" id="dns.secondary_failover.safe">
+      <header>
+        <h3>Secondary DNS Failover (Safe)</h3>
+        <code class="check-id">dns.secondary_failover.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Customer-declared secondary DNS and failover path metadata validation (no failover stress).</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>NS count and declared secondary nameserver reachability signal weak failover posture.</dd>
+        <dt>How we detect</dt>
+        <dd>NS count and secondary NS reachability. Max 3 request(s), timeout ≤ 5000ms. Verdict primarily from outside probe metadata.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>dns_failover_posture</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>fqdn, dns</dd>
+        <dt>Agent modes</dt>
+        <dd>heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result, health_signal</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>declared_secondary_dns_targets</li><li>failover_policy_declaration</li></ul></details>
+    </article>
+    <article class="check" id="dns.zone_transfer_exposure.safe">
+      <header>
+        <h3>Zone Transfer Exposure (Safe)</h3>
+        <code class="check-id">dns.zone_transfer_exposure.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Safe AXFR exposure metadata where customer authorizes a single bounded lookup (no zone scraping).</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Unauthorized AXFR (full zone download) on declared zone.</dd>
+        <dt>How we detect</dt>
+        <dd>One TCP-53 AXFR attempt; leak if zone transfers when unauthorized. Max 1 request(s), timeout ≤ 5000ms. Verdict primarily from outside probe metadata.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>dns_axfr_leak</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>fqdn, dns</dd>
+        <dt>Agent modes</dt>
+        <dd>heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>declared_zone_for_axfr_check</li><li>customer_authorizes_axfr_probe</li></ul></details>
+    </article></div>
+    </section>
+    <section id="family-waf">
+      <h2>WAF posture <span style="color:var(--muted);font-weight:400">(5)</span></h2>
+      <div class="checks">
+    <article class="check" id="waf.fingerprint.safe">
+      <header>
+        <h3>Outside-In WAF Scanner (Safe)</h3>
+        <code class="check-id">waf.fingerprint.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Bounded outside-in scan: WAF fingerprint, benign SQLi/XSS/path-traversal marker checks, optional origin bypass, posture report.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>WAF vendor fingerprint, benign SQLi/XSS/path markers blocked or not, evasion bypass, posture label.</dd>
+        <dt>How we detect</dt>
+        <dd>Up to 10 bounded probes: WAF fingerprint, benign markers, evasion variants, origin bypass. Max 10 request(s), timeout ≤ 5000ms. Verdict primarily from outside probe metadata.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>outside_in_waf_scan</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>url, fqdn, ip</dd>
+        <dt>Agent modes</dt>
+        <dd>heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>declared_waf_asset</li><li>customer_approves_waf_fingerprint_probe</li></ul></details>
+    </article>
+    <article class="check" id="waf.marker_rule.safe">
+      <header>
+        <h3>WAF Marker Rule Posture (Safe)</h3>
+        <code class="check-id">waf.marker_rule.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">WAF posture alias for customer-configured harmless marker rules (signed worker profile).</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>HEAD probe with declared harmless marker should be blocked or challenged when WAF rule is active.</dd>
+        <dt>How we detect</dt>
+        <dd>Harmless marker request; blocked/challenged = WAF enforcing. Max 1 request(s), timeout ≤ 5000ms. Correlates outside probe with agent observation when agent-assisted.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>waf_enforcement_probe</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>url, fqdn</dd>
+        <dt>Agent modes</dt>
+        <dd>canary, heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result, agent_observation</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>declared_waf_asset</li><li>customer_waf_marker_rule</li></ul></details>
+    </article>
+    <article class="check" id="waf.origin_bypass.safe">
+      <header>
+        <h3>WAF Origin Bypass (Safe)</h3>
+        <code class="check-id">waf.origin_bypass.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Customer-approved direct-origin path metadata with agent observation — no volumetric traffic.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Single bounded HEAD on approved direct path must not reach origin when edge WAF is effective.</dd>
+        <dt>How we detect</dt>
+        <dd>HEAD to declared direct IP using protected hostname as Host/SNI. Max 1 request(s), timeout ≤ 5000ms. Correlates outside probe with agent observation when agent-assisted.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>host_sni_bypass</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>fqdn, ip, url</dd>
+        <dt>Agent modes</dt>
+        <dd>canary, packet, heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result, agent_observation</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>declared_waf_asset</li><li>declared_direct_origin_target</li><li>direct_origin_ip_for_fqdn_targets</li><li>agent_on_origin_path</li></ul></details>
+    </article>
+    <article class="check" id="waf.low_rate_limit.safe">
+      <header>
+        <h3>WAF Low-Rate Limit Readiness (Safe)</h3>
+        <code class="check-id">waf.low_rate_limit.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Spaced low-rate HEAD sequence on declared endpoint to observe WAF rate-limit signals.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Up to five spaced HEAD probes observe rate-limit or challenge signals without load generation.</dd>
+        <dt>How we detect</dt>
+        <dd>Up to 5 spaced HEAD requests to observe 429/challenge. Max 5 request(s), timeout ≤ 5000ms. Correlates outside probe with agent observation when agent-assisted.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>rate_limit_sequence</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>url, fqdn</dd>
+        <dt>Agent modes</dt>
+        <dd>canary, heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result, agent_observation</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>declared_waf_asset</li><li>customer_rate_limit_threshold</li></ul></details>
+    </article>
+    <article class="check" id="waf.enforcement.safe">
+      <header>
+        <h3>WAF Enforcement Probe (Safe)</h3>
+        <code class="check-id">waf.enforcement.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Harmless marker probe to detect WAF monitor-only (non-blocking) posture.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Marker request reaching origin with HTTP 200 indicates monitor-only WAF leak.</dd>
+        <dt>How we detect</dt>
+        <dd>Harmless marker request; blocked/challenged = WAF enforcing. Max 1 request(s), timeout ≤ 5000ms. Correlates outside probe with agent observation when agent-assisted.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>waf_enforcement_probe</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>url, fqdn</dd>
+        <dt>Agent modes</dt>
+        <dd>canary, heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result, agent_observation</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>declared_waf_asset</li><li>customer_waf_marker_rule</li></ul></details>
+    </article></div>
+    </section>
+    <section id="family-l7">
+      <h2>L7 / API / HTTP <span style="color:var(--muted);font-weight:400">(13)</span></h2>
+      <div class="checks">
+    <article class="check" id="l7.waf_marker_rule.safe">
+      <header>
+        <h3>WAF Marker Rule (Safe)</h3>
+        <code class="check-id">l7.waf_marker_rule.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Customer-defined WAF marker rule validation via harmless metadata probe.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>HEAD probe with harmless marker should be blocked or challenged when WAF rule is active.</dd>
+        <dt>How we detect</dt>
+        <dd>Harmless marker request; blocked/challenged = WAF enforcing. Max 1 request(s), timeout ≤ 5000ms. Correlates outside probe with agent observation when agent-assisted.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>waf_enforcement_probe</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>url, fqdn</dd>
+        <dt>Agent modes</dt>
+        <dd>canary, heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result, agent_observation</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>declared_waf_asset</li><li>customer_waf_marker_rule</li></ul></details>
+    </article>
+    <article class="check" id="l7.http_method_restriction.safe">
+      <header>
+        <h3>HTTP Method Restriction (Safe)</h3>
+        <code class="check-id">l7.http_method_restriction.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Unusual HTTP method restriction metadata check (TRACE/unsafe methods).</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Safe HEAD-only probe metadata; method policy validated via edge response codes (no unsafe methods sent).</dd>
+        <dt>How we detect</dt>
+        <dd>Single bounded HTTP HEAD with optional harmless marker header. Max 1 request(s), timeout ≤ 5000ms. Verdict primarily from outside probe metadata.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>http_head</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>url, fqdn</dd>
+        <dt>Agent modes</dt>
+        <dd>canary, heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>url_target_with_method_policy</li></ul></details>
+    </article>
+    <article class="check" id="l7.header_size_boundary.safe">
+      <header>
+        <h3>Header/Size Boundary (Safe)</h3>
+        <code class="check-id">l7.header_size_boundary.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Header/size boundary metadata validation without oversized payloads.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Minimal HEAD probe confirms edge handles boundary policy without oversized request bodies.</dd>
+        <dt>How we detect</dt>
+        <dd>Single bounded HTTP HEAD with optional harmless marker header. Max 1 request(s), timeout ≤ 5000ms. Verdict primarily from outside probe metadata.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>http_head</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>url, fqdn</dd>
+        <dt>Agent modes</dt>
+        <dd>canary, heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>url_target</li></ul></details>
+    </article>
+    <article class="check" id="l7.low_rate_rate_limit.safe">
+      <header>
+        <h3>Low-Rate Rate-Limit Check (Safe)</h3>
+        <code class="check-id">l7.low_rate_rate_limit.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Controlled low-rate metadata sequence to observe rate-limit signals (bounded).</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Up to five spaced HEAD probes observe rate-limit signals without load generation.</dd>
+        <dt>How we detect</dt>
+        <dd>Up to 5 spaced HEAD requests to observe 429/challenge. Max 5 request(s), timeout ≤ 5000ms. Correlates outside probe with agent observation when agent-assisted.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>rate_limit_sequence</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>url, fqdn</dd>
+        <dt>Agent modes</dt>
+        <dd>canary, heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result, agent_observation</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>customer_rate_limit_threshold</li></ul></details>
+    </article>
+    <article class="check" id="l7.cache_busting.safe">
+      <header>
+        <h3>Cache Busting Readiness (Safe)</h3>
+        <code class="check-id">l7.cache_busting.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Small set of cache-busting markers via bounded HEAD probes (no origin-pressure scenario).</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Cache abuse probe observes deception, sensitive caching, and cache-key weakness signals.</dd>
+        <dt>How we detect</dt>
+        <dd>Bounded cache-bust HEAD sequence. Max 3 request(s), timeout ≤ 5000ms. Correlates outside probe with agent observation when agent-assisted.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>cache_abuse_probe</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>url, fqdn</dd>
+        <dt>Agent modes</dt>
+        <dd>canary, heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result, agent_observation</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>declared_cache_bust_path</li><li>cache_policy_expectation</li></ul></details>
+    </article>
+    <article class="check" id="l7.expensive_endpoint.safe">
+      <header>
+        <h3>Expensive Endpoint (Safe)</h3>
+        <code class="check-id">l7.expensive_endpoint.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Low-rate probe of customer-declared expensive endpoint (no endpoint guessing).</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Single HEAD to declared URL observes latency/status for quota or challenge signals.</dd>
+        <dt>How we detect</dt>
+        <dd>Single bounded HTTP HEAD with optional harmless marker header. Max 1 request(s), timeout ≤ 5000ms. Correlates outside probe with agent observation when agent-assisted.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>http_head</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>url, fqdn</dd>
+        <dt>Agent modes</dt>
+        <dd>canary, heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result, agent_observation</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>declared_expensive_endpoint_url</li><li>expected_rate_or_challenge_behavior</li></ul></details>
+    </article>
+    <article class="check" id="l7.login_abuse_flow.safe">
+      <header>
+        <h3>Login / OTP / Signup Abuse-Sensitive Flow (Safe)</h3>
+        <code class="check-id">l7.login_abuse_flow.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Benign marker flow on customer-declared auth endpoints with isolated synthetic identity intent.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Rapid HEAD sequence correlates rate-limit or challenge headers without credential stuffing.</dd>
+        <dt>How we detect</dt>
+        <dd>Up to 5 spaced HEAD requests to observe 429/challenge. Max 5 request(s), timeout ≤ 5000ms. Correlates outside probe with agent observation when agent-assisted.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>rate_limit_sequence</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>url, fqdn</dd>
+        <dt>Agent modes</dt>
+        <dd>canary, heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result, agent_observation</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>declared_auth_endpoint</li><li>isolated_synthetic_test_identity</li><li>customer_approves_auth_probe</li></ul></details>
+    </article>
+    <article class="check" id="l7.password_reset.safe">
+      <header>
+        <h3>Password Reset Abuse-Sensitive Flow (Safe)</h3>
+        <code class="check-id">l7.password_reset.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Benign metadata validation on customer-declared password-reset path (no account enumeration flood).</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Single safe probe observes throttle/challenge behavior on declared reset URL.</dd>
+        <dt>How we detect</dt>
+        <dd>Single bounded HTTP HEAD with optional harmless marker header. Max 1 request(s), timeout ≤ 5000ms. Verdict primarily from outside probe metadata.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>http_head</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>url, fqdn</dd>
+        <dt>Agent modes</dt>
+        <dd>canary, heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>declared_password_reset_endpoint</li><li>isolated_synthetic_test_identity</li></ul></details>
+    </article>
+    <article class="check" id="l7.api_quota_exhaustion.safe">
+      <header>
+        <h3>API Quota Exhaustion Readiness (Safe)</h3>
+        <code class="check-id">l7.api_quota_exhaustion.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Safe token/user quota visibility check — not a quota burn-down attack.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Up to five spaced HEAD probes read quota/rate-limit headers without exhausting customer quotas.</dd>
+        <dt>How we detect</dt>
+        <dd>Up to 5 spaced HEAD requests to observe 429/challenge. Max 5 request(s), timeout ≤ 5000ms. Correlates outside probe with agent observation when agent-assisted.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>rate_limit_sequence</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>url, fqdn</dd>
+        <dt>Agent modes</dt>
+        <dd>canary, heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result, agent_observation</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>declared_api_endpoint</li><li>test_api_identity_or_key_scope</li></ul></details>
+    </article>
+    <article class="check" id="l7.graphql_complexity.safe">
+      <header>
+        <h3>GraphQL Complexity Readiness (Safe)</h3>
+        <code class="check-id">l7.graphql_complexity.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Low-complexity customer-provided GraphQL path metadata (no deep nested query execution).</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Bounded GraphQL endpoint probe documents exposure and complexity-limit headers.</dd>
+        <dt>How we detect</dt>
+        <dd>Bounded GraphQL endpoint posture (no deep queries). Max 1 request(s), timeout ≤ 5000ms. Verdict primarily from outside probe metadata.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>graphql_posture_probe</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>url, fqdn</dd>
+        <dt>Agent modes</dt>
+        <dd>canary, heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>declared_graphql_endpoint</li><li>customer_provided_safe_query_descriptor</li></ul></details>
+    </article>
+    <article class="check" id="l7.bot_challenge_marker.safe">
+      <header>
+        <h3>Bot / Challenge Marker (Safe)</h3>
+        <code class="check-id">l7.bot_challenge_marker.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Harmless labeled probe to observe bot management or challenge behavior.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Cookie-less scripted client should trigger challenge or block when bot controls are active.</dd>
+        <dt>How we detect</dt>
+        <dd>Cookie-less client; expects bot challenge or block. Max 1 request(s), timeout ≤ 5000ms. Correlates outside probe with agent observation when agent-assisted.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>bot_challenge_probe</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>url, fqdn</dd>
+        <dt>Agent modes</dt>
+        <dd>canary, heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result, agent_observation</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>declared_protected_url</li><li>bot_management_expectation</li></ul></details>
+    </article>
+    <article class="check" id="l7.api_surface_scan.safe">
+      <header>
+        <h3>API Surface Scan (Safe)</h3>
+        <code class="check-id">l7.api_surface_scan.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Bounded discovery of Swagger/OpenAPI/GraphQL and common unauthenticated API paths.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>HEAD probes on declared doc/API paths surface unintended exposure.</dd>
+        <dt>How we detect</dt>
+        <dd>HEAD on declared/common API doc paths. Max 8 request(s), timeout ≤ 5000ms. Verdict primarily from outside probe metadata.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>api_surface_scan</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>url, fqdn</dd>
+        <dt>Agent modes</dt>
+        <dd>canary, heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>declared_api_base_url</li></ul></details>
+    </article>
+    <article class="check" id="l7.cors_posture.safe">
+      <header>
+        <h3>CORS Posture (Safe)</h3>
+        <code class="check-id">l7.cors_posture.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">OPTIONS preflight with foreign Origin to detect weak CORS policy.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Overly permissive CORS (wildcard ACAO on preflight).</dd>
+        <dt>How we detect</dt>
+        <dd>OPTIONS with foreign Origin; weak ACAO = finding. Max 1 request(s), timeout ≤ 5000ms. Verdict primarily from outside probe metadata.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>cors_posture_probe</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>url, fqdn</dd>
+        <dt>Agent modes</dt>
+        <dd>canary, heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>declared_api_base_url</li></ul></details>
+    </article></div>
+    </section>
+    <section id="family-tls">
+      <h2>TLS &amp; connections <span style="color:var(--muted);font-weight:400">(4)</span></h2>
+      <div class="checks">
+    <article class="check" id="tls.profile_exposure.safe">
+      <header>
+        <h3>TLS Profile Exposure (Safe)</h3>
+        <code class="check-id">tls.profile_exposure.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">TLS handshake/profile exposure metadata at safe scale.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Single bounded TLS handshake documents protocol, cipher, and certificate posture.</dd>
+        <dt>How we detect</dt>
+        <dd>Full TLS handshake audit (version, cipher, cert expiry). Max 1 request(s), timeout ≤ 5000ms. Verdict primarily from outside probe metadata.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>tls_audit</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>fqdn, url</dd>
+        <dt>Agent modes</dt>
+        <dd>heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>tls_terminated_endpoint</li></ul></details>
+    </article>
+    <article class="check" id="tls.slow_header_body_timeout.safe">
+      <header>
+        <h3>Slow Header/Body Timeout Readiness (Safe)</h3>
+        <code class="check-id">tls.slow_header_body_timeout.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Tiny bounded timeout metadata for slow-client readiness — not a slowloris attack.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Single HEAD within strict timeout collects edge timeout behavior metadata only.</dd>
+        <dt>How we detect</dt>
+        <dd>Single bounded HTTP HEAD with optional harmless marker header. Max 1 request(s), timeout ≤ 5000ms. Verdict primarily from outside probe metadata.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>http_head</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>url, fqdn</dd>
+        <dt>Agent modes</dt>
+        <dd>heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>tls_terminated_endpoint</li><li>declared_idle_or_slow_client_policy</li></ul></details>
+    </article>
+    <article class="check" id="tls.idle_connection_timeout.safe">
+      <header>
+        <h3>Idle Connection Timeout Readiness (Safe)</h3>
+        <code class="check-id">tls.idle_connection_timeout.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Metadata for idle connection cleanup readiness (no connection hoarding).</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Metadata marker documents idle timeout intent; correlate with single connect/HEAD lifecycle.</dd>
+        <dt>How we detect</dt>
+        <dd>One TLS handshake; collects protocol/cipher/cert metadata. Max 1 request(s), timeout ≤ 5000ms. Verdict primarily from outside probe metadata.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>tls_session</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>url, fqdn</dd>
+        <dt>Agent modes</dt>
+        <dd>heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result, health_signal</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>tls_terminated_endpoint</li><li>connection_idle_policy_declaration</li></ul></details>
+    </article>
+    <article class="check" id="tls.full_audit.safe">
+      <header>
+        <h3>TLS Full Audit (Safe)</h3>
+        <code class="check-id">tls.full_audit.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Bounded TLS audit: protocol version, cipher, cert expiry, and chain authorization.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Single TLS handshake collects weak-protocol and certificate posture signals.</dd>
+        <dt>How we detect</dt>
+        <dd>Full TLS handshake audit (version, cipher, cert expiry). Max 1 request(s), timeout ≤ 5000ms. Verdict primarily from outside probe metadata.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>tls_audit</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>fqdn, url</dd>
+        <dt>Agent modes</dt>
+        <dd>heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>tls_terminated_endpoint</li></ul></details>
+    </article></div>
+    </section>
+    <section id="family-protocol">
+      <h2>Modern protocols <span style="color:var(--muted);font-weight:400">(6)</span></h2>
+      <div class="checks">
+    <article class="check" id="protocol.http2_readiness.safe">
+      <header>
+        <h3>HTTP/2 Readiness Metadata (Safe)</h3>
+        <code class="check-id">protocol.http2_readiness.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">HTTP/2 readiness and protection metadata (no load generation).</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Bounded HTTP/2 SETTINGS read collects protocol readiness metadata only.</dd>
+        <dt>How we detect</dt>
+        <dd>Reads HTTP/2 SETTINGS frame limits (no reset flood). Max 1 request(s), timeout ≤ 5000ms. Verdict primarily from outside probe metadata.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>http2_settings</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>url, fqdn</dd>
+        <dt>Agent modes</dt>
+        <dd>heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>http2_enabled_endpoint</li></ul></details>
+    </article>
+    <article class="check" id="protocol.http3_quic_exposure.safe">
+      <header>
+        <h3>HTTP/3 QUIC Exposure (Safe)</h3>
+        <code class="check-id">protocol.http3_quic_exposure.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Bounded QUIC reachability via Alt-Svc discovery and a single UDP-443 datagram.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>HTTPS Alt-Svc hint plus one UDP datagram documents QUIC exposure without a QUIC flood.</dd>
+        <dt>How we detect</dt>
+        <dd>HTTPS Alt-Svc read plus one UDP/443 datagram. Max 2 request(s), timeout ≤ 5000ms. Verdict primarily from outside probe metadata.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>quic_reachability</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>fqdn, url</dd>
+        <dt>Agent modes</dt>
+        <dd>heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result, health_signal</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>declared_quic_exposure_intent</li></ul></details>
+    </article>
+    <article class="check" id="protocol.http2_rapid_reset_readiness.safe">
+      <header>
+        <h3>HTTP/2 Rapid Reset Readiness (Safe)</h3>
+        <code class="check-id">protocol.http2_rapid_reset_readiness.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">HTTP/2 rapid-reset class readiness via config/metadata only (no reset flood).</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Bounded HTTP/2 SETTINGS read collects rapid-reset readiness signals without generating reset storms.</dd>
+        <dt>How we detect</dt>
+        <dd>Reads HTTP/2 SETTINGS frame limits (no reset flood). Max 1 request(s), timeout ≤ 5000ms. Verdict primarily from outside probe metadata.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>http2_settings</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>url, fqdn</dd>
+        <dt>Agent modes</dt>
+        <dd>heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result, health_signal</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>http2_enabled_endpoint</li><li>rapid_reset_mitigation_declaration</li></ul></details>
+    </article>
+    <article class="check" id="protocol.http2_stream_concurrency.safe">
+      <header>
+        <h3>HTTP/2 Stream Concurrency (Safe)</h3>
+        <code class="check-id">protocol.http2_stream_concurrency.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Low-rate HTTP/2 settings/stream limit metadata (no stream exhaustion).</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Metadata marker plus single HEAD documents advertised stream/concurrency controls.</dd>
+        <dt>How we detect</dt>
+        <dd>Reads HTTP/2 SETTINGS frame limits (no reset flood). Max 1 request(s), timeout ≤ 5000ms. Verdict primarily from outside probe metadata.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>http2_settings</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>url, fqdn</dd>
+        <dt>Agent modes</dt>
+        <dd>heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>http2_enabled_endpoint</li><li>stream_limit_policy_declaration</li></ul></details>
+    </article>
+    <article class="check" id="protocol.grpc_reflection_stream.safe">
+      <header>
+        <h3>gRPC Reflection / Stream Readiness (Safe)</h3>
+        <code class="check-id">protocol.grpc_reflection_stream.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Safe gRPC reflection and stream control metadata (no stream pressure).</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Declared gRPC reflection policy only (live probe deferred).</dd>
+        <dt>How we detect</dt>
+        <dd>No live network I/O — records declared intent only (deferred checks). Verdict primarily from outside probe metadata.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>metadata_marker</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>url, fqdn</dd>
+        <dt>Agent modes</dt>
+        <dd>heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result, health_signal</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>declared_grpc_endpoint</li><li>grpc_reflection_policy_intent</li></ul></details>
+    </article>
+    <article class="check" id="protocol.websocket_connection_controls.safe">
+      <header>
+        <h3>WebSocket Connection Controls (Safe)</h3>
+        <code class="check-id">protocol.websocket_connection_controls.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">WebSocket upgrade and connection-limit readiness metadata (no connection hoarding).</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Single bounded WebSocket upgrade request documents upgrade acceptance or denial without sustained open connections.</dd>
+        <dt>How we detect</dt>
+        <dd>Single WebSocket upgrade request; classifies 101/403/426. Max 1 request(s), timeout ≤ 5000ms. Correlates outside probe with agent observation when agent-assisted.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>websocket_upgrade_posture</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>url, fqdn</dd>
+        <dt>Agent modes</dt>
+        <dd>canary, heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result, agent_observation</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>declared_websocket_endpoint</li><li>connection_limit_expectation</li></ul></details>
+    </article></div>
+    </section>
+    <section id="family-operations">
+      <h2>Operations readiness <span style="color:var(--muted);font-weight:400">(3)</span></h2>
+      <div class="checks">
+    <article class="check" id="ops.alert_workflow_marker.safe">
+      <header>
+        <h3>Alert Workflow Webhook Ping (Safe)</h3>
+        <code class="check-id">ops.alert_workflow_marker.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Posts a harmless webhook ping to validate alert pipeline delivery.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Single POST to the declared alert webhook must return HTTP 2xx.</dd>
+        <dt>How we detect</dt>
+        <dd>One POST to declared alert webhook; expects HTTP 2xx. Max 1 request(s), timeout ≤ 5000ms. Verdict primarily from outside probe metadata.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>alert_webhook_ping</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>canary, fqdn</dd>
+        <dt>Agent modes</dt>
+        <dd>heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>alert_webhook_or_siem_hook</li></ul></details>
+    </article>
+    <article class="check" id="ops.runbook_contact_validation.safe">
+      <header>
+        <h3>Runbook / Emergency Contact Validation (Safe)</h3>
+        <code class="check-id">ops.runbook_contact_validation.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Validates accepted support_readiness evidence for runbook owners and emergency contacts.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Accepted support_readiness evidence must pass metadata validation for on-call and escalation contacts.</dd>
+        <dt>How we detect</dt>
+        <dd>Validates runbook/kill-switch evidence metadata (no traffic to customer edge). Verdict primarily from outside probe metadata.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>ops_readiness</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>canary, fqdn</dd>
+        <dt>Agent modes</dt>
+        <dd>heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result, runbook_version_audit, contact_ack_evidence</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>current_runbook_artifact</li><li>emergency_contact_roster</li></ul></details>
+    </article>
+    <article class="check" id="ops.kill_switch_drill.safe">
+      <header>
+        <h3>Kill Switch Drill Readiness (Safe)</h3>
+        <code class="check-id">ops.kill_switch_drill.safe</code>
+        <span class="badge safe">safe</span>
+      </header>
+      <p class="desc">Read-only kill-switch readiness dry-run — verifies state/audit/drill evidence without activation.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>Tenant must have kill-switch state, audit trail, or accepted drill evidence; kill switch is never activated.</dd>
+        <dt>How we detect</dt>
+        <dd>Validates runbook/kill-switch evidence metadata (no traffic to customer edge). Verdict primarily from outside probe metadata.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>ops_readiness</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd>canary, fqdn</dd>
+        <dt>Agent modes</dt>
+        <dd>heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>probe_result, stop_event_audit</dd>
+        <dt>Stop conditions</dt>
+        <dd>max_events_reached, max_duration_elapsed, customer_cancel, tenant_kill_switch</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>kill_switch_runbook</li><li>declared_drill_scope</li></ul></details>
+    </article></div>
+    </section>
+    <section id="soc-gated">
+      <h2>SOC-gated &amp; high-scale <span style="color:var(--muted);font-weight:400">(17)</span></h2>
+      <p style="color:var(--muted)">Not runnable from customer test-runs API. Customer may <em>request</em>; SOC approves, schedules, and executes via governed adapter. No unmanaged attack traffic in-repo.</p>
+      <div class="checks">
+    <article class="check" id="l3.connection_table_exhaustion.request_only">
+      <header>
+        <h3>Connection Table Exhaustion (SOC Request Only)</h3>
+        <code class="check-id">l3.connection_table_exhaustion.request_only</code>
+        <span class="badge soc_gated">soc_gated</span>
+      </header>
+      <p class="desc">SOC-gated controlled connection-state scenario — not customer-runnable; governed dry-run adapter only.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>SOC-gated controlled connection-state scenario — not customer-runnable; governed dry-run adapter only.</dd>
+        <dt>How we detect</dt>
+        <dd>Probe kind: none Max 1 request(s), timeout ≤ 5000ms. Verdict primarily from outside probe metadata.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>none</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>soc_approval_required</code></dd>
+        <dt>Targets</dt>
+        <dd></dd>
+        <dt>Agent modes</dt>
+        <dd>heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>approval_artifact, provider_telemetry, soc_runbook_ack</dd>
+        <dt>Stop conditions</dt>
+        <dd>soc_kill_switch, abort_criteria_met, provider_stop_signal, max_approved_duration</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>soc_authorization_pack</li><li>declared_target_group_scope</li><li>connection_limit_abort_criteria</li></ul></details>
+    </article>
+    <article class="check" id="high_scale.dns_high_query.request_only">
+      <header>
+        <h3>DNS High-Query Simulation (SOC Request Only)</h3>
+        <code class="check-id">high_scale.dns_high_query.request_only</code>
+        <span class="badge soc_gated">soc_gated</span>
+      </header>
+      <p class="desc">SOC-gated authoritative DNS QPS simulation request marker — no customer probe execution.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>SOC-gated authoritative DNS QPS simulation request marker — no customer probe execution.</dd>
+        <dt>How we detect</dt>
+        <dd>Probe kind: none Max 1 request(s), timeout ≤ 5000ms. Verdict primarily from outside probe metadata.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>none</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>soc_approval_required</code></dd>
+        <dt>Targets</dt>
+        <dd></dd>
+        <dt>Agent modes</dt>
+        <dd>heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>approval_artifact, provider_telemetry, soc_runbook_ack</dd>
+        <dt>Stop conditions</dt>
+        <dd>soc_kill_switch, abort_criteria_met, provider_stop_signal, max_approved_duration</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>soc_authorization_pack</li><li>declared_dns_zone_scope</li><li>provider_approval_artifact</li></ul></details>
+    </article>
+    <article class="check" id="ops.runbook_contact_validation.request_only">
+      <header>
+        <h3>Runbook / Emergency Contact Validation (SOC Request Only)</h3>
+        <code class="check-id">ops.runbook_contact_validation.request_only</code>
+        <span class="badge soc_gated">soc_gated</span>
+      </header>
+      <p class="desc">SOC workflow marker to validate runbook version, owners, and emergency contact reachability.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>SOC workflow marker to validate runbook version, owners, and emergency contact reachability.</dd>
+        <dt>How we detect</dt>
+        <dd>Probe kind: none Max 1 request(s), timeout ≤ 5000ms. Verdict primarily from outside probe metadata.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>none</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>soc_approval_required</code></dd>
+        <dt>Targets</dt>
+        <dd></dd>
+        <dt>Agent modes</dt>
+        <dd>heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>approval_artifact, runbook_version_audit, contact_ack_evidence</dd>
+        <dt>Stop conditions</dt>
+        <dd>soc_kill_switch, validation_complete, max_approved_duration</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>current_runbook_artifact</li><li>emergency_contact_roster</li><li>soc_authorization_pack</li></ul></details>
+    </article>
+    <article class="check" id="ops.kill_switch_drill.request_only">
+      <header>
+        <h3>Kill Switch Drill (SOC Request Only)</h3>
+        <code class="check-id">ops.kill_switch_drill.request_only</code>
+        <span class="badge soc_gated">soc_gated</span>
+      </header>
+      <p class="desc">SOC-gated kill-switch drill request marker with dry-run or live stop per authorization pack.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>SOC-gated kill-switch drill request marker with dry-run or live stop per authorization pack.</dd>
+        <dt>How we detect</dt>
+        <dd>Probe kind: none Max 1 request(s), timeout ≤ 5000ms. Verdict primarily from outside probe metadata.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>none</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>soc_approval_required</code></dd>
+        <dt>Targets</dt>
+        <dd></dd>
+        <dt>Agent modes</dt>
+        <dd>heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>approval_artifact, stop_event_audit, adapter_confirmation</dd>
+        <dt>Stop conditions</dt>
+        <dd>soc_kill_switch, drill_complete, abort_criteria_met</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>soc_authorization_pack</li><li>kill_switch_runbook</li><li>declared_drill_scope</li></ul></details>
+    </article>
+    <article class="check" id="ops.provider_telemetry.request_only">
+      <header>
+        <h3>Provider Telemetry Validation (SOC Request Only)</h3>
+        <code class="check-id">ops.provider_telemetry.request_only</code>
+        <span class="badge soc_gated">soc_gated</span>
+      </header>
+      <p class="desc">SOC request marker to validate provider/scrubber telemetry hooks during governed scenarios.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>SOC request marker to validate provider/scrubber telemetry hooks during governed scenarios.</dd>
+        <dt>How we detect</dt>
+        <dd>Probe kind: none Max 1 request(s), timeout ≤ 5000ms. Verdict primarily from outside probe metadata.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>none</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>soc_approval_required</code></dd>
+        <dt>Targets</dt>
+        <dd></dd>
+        <dt>Agent modes</dt>
+        <dd>heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>provider_telemetry, approval_artifact, soc_runbook_ack</dd>
+        <dt>Stop conditions</dt>
+        <dd>soc_kill_switch, telemetry_validated, max_approved_duration</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>provider_approval_artifact</li><li>telemetry_endpoint_declaration</li><li>soc_authorization_pack</li></ul></details>
+    </article>
+    <article class="check" id="high_scale.multi_vector.request_only">
+      <header>
+        <h3>Multi-Vector Simulation (SOC Request Only)</h3>
+        <code class="check-id">high_scale.multi_vector.request_only</code>
+        <span class="badge soc_gated">soc_gated</span>
+      </header>
+      <p class="desc">SOC-gated multi-vector coordination request marker — runbook and provider coordination required.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>SOC-gated multi-vector coordination request marker — runbook and provider coordination required.</dd>
+        <dt>How we detect</dt>
+        <dd>Probe kind: none Max 1 request(s), timeout ≤ 5000ms. Verdict primarily from outside probe metadata.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>none</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>soc_approval_required</code></dd>
+        <dt>Targets</dt>
+        <dd></dd>
+        <dt>Agent modes</dt>
+        <dd>heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>approval_artifact, provider_telemetry, soc_runbook_ack, coordination_audit</dd>
+        <dt>Stop conditions</dt>
+        <dd>soc_kill_switch, abort_criteria_met, provider_stop_signal, max_approved_duration</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>soc_authorization_pack</li><li>multi_vector_scope_declaration</li><li>provider_approval_artifact</li></ul></details>
+    </article>
+    <article class="check" id="high_scale.degradation_recovery.request_only">
+      <header>
+        <h3>Degradation / Recovery Drill (SOC Request Only)</h3>
+        <code class="check-id">high_scale.degradation_recovery.request_only</code>
+        <span class="badge soc_gated">soc_gated</span>
+      </header>
+      <p class="desc">SOC-gated degradation and recovery drill request marker with explicit stop and reporting criteria.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>SOC-gated degradation and recovery drill request marker with explicit stop and reporting criteria.</dd>
+        <dt>How we detect</dt>
+        <dd>Probe kind: none Max 1 request(s), timeout ≤ 5000ms. Verdict primarily from outside probe metadata.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>none</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>soc_approval_required</code></dd>
+        <dt>Targets</dt>
+        <dd></dd>
+        <dt>Agent modes</dt>
+        <dd>heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>approval_artifact, health_signal, post_test_report, soc_runbook_ack</dd>
+        <dt>Stop conditions</dt>
+        <dd>soc_kill_switch, recovery_confirmed, abort_criteria_met, max_approved_duration</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>soc_authorization_pack</li><li>recovery_runbook</li><li>declared_degradation_objectives</li></ul></details>
+    </article>
+    <article class="check" id="high_scale.volumetric.request_only">
+      <header>
+        <h3>Volumetric L3/L4 (SOC Request Only)</h3>
+        <code class="check-id">high_scale.volumetric.request_only</code>
+        <span class="badge soc_gated">soc_gated</span>
+      </header>
+      <p class="desc">High-scale volumetric validation — customer may request; SOC must approve and execute via governed dry-run adapter only.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>High-scale volumetric validation — customer may request; SOC must approve and execute via governed dry-run adapter only.</dd>
+        <dt>How we detect</dt>
+        <dd>Probe kind: none Max 1 request(s), timeout ≤ 5000ms. Verdict primarily from outside probe metadata.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>none</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>soc_approval_required</code></dd>
+        <dt>Targets</dt>
+        <dd></dd>
+        <dt>Agent modes</dt>
+        <dd>heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>approval_artifact, provider_telemetry, soc_runbook_ack</dd>
+        <dt>Stop conditions</dt>
+        <dd>soc_kill_switch, abort_criteria_met, provider_stop_signal, max_approved_duration</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>soc_authorization_pack</li><li>declared_target_group_scope</li><li>provider_approval_artifact</li></ul></details>
+    </article>
+    <article class="check" id="waf.offensive_sqli.soc">
+      <header>
+        <h3>WAF SQLi Offensive Suite (SOC Only)</h3>
+        <code class="check-id">waf.offensive_sqli.soc</code>
+        <span class="badge soc_gated">soc_gated</span>
+      </header>
+      <p class="desc">SOC-gated SQL injection offensive probe suite against declared WAF assets — not customer self-service.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>SOC-gated SQL injection offensive probe suite against declared WAF assets — not customer self-service.</dd>
+        <dt>How we detect</dt>
+        <dd>Probe kind: none Max 1 request(s), timeout ≤ 5000ms. Correlates outside probe with agent observation when agent-assisted.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>none</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd></dd>
+        <dt>Agent modes</dt>
+        <dd>canary, heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>approval_artifact, agent_observation, soc_runbook_ack</dd>
+        <dt>Stop conditions</dt>
+        <dd>soc_kill_switch, abort_criteria_met, max_approved_requests</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>waf_offensive_authorization_pack</li><li>declared_waf_asset</li><li>staging_isolation</li></ul></details>
+    </article>
+    <article class="check" id="waf.offensive_xss.soc">
+      <header>
+        <h3>WAF XSS Offensive Suite (SOC Only)</h3>
+        <code class="check-id">waf.offensive_xss.soc</code>
+        <span class="badge soc_gated">soc_gated</span>
+      </header>
+      <p class="desc">SOC-gated XSS offensive probe suite — customer request only; SOC executes.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>SOC-gated XSS offensive probe suite — customer request only; SOC executes.</dd>
+        <dt>How we detect</dt>
+        <dd>Probe kind: none Max 1 request(s), timeout ≤ 5000ms. Correlates outside probe with agent observation when agent-assisted.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>none</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd></dd>
+        <dt>Agent modes</dt>
+        <dd>canary, heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>approval_artifact, agent_observation, soc_runbook_ack</dd>
+        <dt>Stop conditions</dt>
+        <dd>soc_kill_switch, abort_criteria_met, max_approved_requests</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>waf_offensive_authorization_pack</li><li>declared_waf_asset</li><li>staging_isolation</li></ul></details>
+    </article>
+    <article class="check" id="waf.offensive_rce.soc">
+      <header>
+        <h3>WAF RCE Offensive Suite (SOC Only)</h3>
+        <code class="check-id">waf.offensive_rce.soc</code>
+        <span class="badge soc_gated">soc_gated</span>
+      </header>
+      <p class="desc">SOC-gated RCE/command-execution offensive probe suite.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>SOC-gated RCE/command-execution offensive probe suite.</dd>
+        <dt>How we detect</dt>
+        <dd>Probe kind: none Max 1 request(s), timeout ≤ 5000ms. Correlates outside probe with agent observation when agent-assisted.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>none</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd></dd>
+        <dt>Agent modes</dt>
+        <dd>canary, heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>approval_artifact, agent_observation, soc_runbook_ack</dd>
+        <dt>Stop conditions</dt>
+        <dd>soc_kill_switch, abort_criteria_met, max_approved_requests</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>waf_offensive_authorization_pack</li><li>declared_waf_asset</li><li>staging_isolation</li></ul></details>
+    </article>
+    <article class="check" id="waf.offensive_path_traversal.soc">
+      <header>
+        <h3>WAF Path Traversal Offensive Suite (SOC Only)</h3>
+        <code class="check-id">waf.offensive_path_traversal.soc</code>
+        <span class="badge soc_gated">soc_gated</span>
+      </header>
+      <p class="desc">SOC-gated path traversal offensive probe suite.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>SOC-gated path traversal offensive probe suite.</dd>
+        <dt>How we detect</dt>
+        <dd>Probe kind: none Max 1 request(s), timeout ≤ 5000ms. Correlates outside probe with agent observation when agent-assisted.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>none</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd></dd>
+        <dt>Agent modes</dt>
+        <dd>canary, heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>approval_artifact, agent_observation, soc_runbook_ack</dd>
+        <dt>Stop conditions</dt>
+        <dd>soc_kill_switch, abort_criteria_met, max_approved_requests</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>waf_offensive_authorization_pack</li><li>declared_waf_asset</li><li>staging_isolation</li></ul></details>
+    </article>
+    <article class="check" id="waf.offensive_command_injection.soc">
+      <header>
+        <h3>WAF Command Injection Offensive Suite (SOC Only)</h3>
+        <code class="check-id">waf.offensive_command_injection.soc</code>
+        <span class="badge soc_gated">soc_gated</span>
+      </header>
+      <p class="desc">SOC-gated OS command injection offensive probe suite.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>SOC-gated OS command injection offensive probe suite.</dd>
+        <dt>How we detect</dt>
+        <dd>Probe kind: none Max 1 request(s), timeout ≤ 5000ms. Correlates outside probe with agent observation when agent-assisted.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>none</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd></dd>
+        <dt>Agent modes</dt>
+        <dd>canary, heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>approval_artifact, agent_observation, soc_runbook_ack</dd>
+        <dt>Stop conditions</dt>
+        <dd>soc_kill_switch, abort_criteria_met, max_approved_requests</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>waf_offensive_authorization_pack</li><li>declared_waf_asset</li><li>staging_isolation</li></ul></details>
+    </article>
+    <article class="check" id="waf.offensive_ldap_injection.soc">
+      <header>
+        <h3>WAF LDAP Injection Offensive Suite (SOC Only)</h3>
+        <code class="check-id">waf.offensive_ldap_injection.soc</code>
+        <span class="badge soc_gated">soc_gated</span>
+      </header>
+      <p class="desc">SOC-gated LDAP injection offensive probe suite.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>SOC-gated LDAP injection offensive probe suite.</dd>
+        <dt>How we detect</dt>
+        <dd>Probe kind: none Max 1 request(s), timeout ≤ 5000ms. Correlates outside probe with agent observation when agent-assisted.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>none</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd></dd>
+        <dt>Agent modes</dt>
+        <dd>canary, heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>approval_artifact, agent_observation, soc_runbook_ack</dd>
+        <dt>Stop conditions</dt>
+        <dd>soc_kill_switch, abort_criteria_met, max_approved_requests</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>waf_offensive_authorization_pack</li><li>declared_waf_asset</li><li>staging_isolation</li></ul></details>
+    </article>
+    <article class="check" id="waf.offensive_ssti.soc">
+      <header>
+        <h3>WAF SSTI Offensive Suite (SOC Only)</h3>
+        <code class="check-id">waf.offensive_ssti.soc</code>
+        <span class="badge soc_gated">soc_gated</span>
+      </header>
+      <p class="desc">SOC-gated server-side template injection offensive probe suite.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>SOC-gated server-side template injection offensive probe suite.</dd>
+        <dt>How we detect</dt>
+        <dd>Probe kind: none Max 1 request(s), timeout ≤ 5000ms. Correlates outside probe with agent observation when agent-assisted.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>none</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd></dd>
+        <dt>Agent modes</dt>
+        <dd>canary, heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>approval_artifact, agent_observation, soc_runbook_ack</dd>
+        <dt>Stop conditions</dt>
+        <dd>soc_kill_switch, abort_criteria_met, max_approved_requests</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>waf_offensive_authorization_pack</li><li>declared_waf_asset</li><li>staging_isolation</li></ul></details>
+    </article>
+    <article class="check" id="waf.offensive_combined.soc">
+      <header>
+        <h3>WAF Combined Offensive Bundle (SOC Only)</h3>
+        <code class="check-id">waf.offensive_combined.soc</code>
+        <span class="badge soc_gated">soc_gated</span>
+      </header>
+      <p class="desc">SOC-gated multi-vector offensive bundle for approved staging windows.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>SOC-gated multi-vector offensive bundle for approved staging windows.</dd>
+        <dt>How we detect</dt>
+        <dd>Probe kind: none Max 1 request(s), timeout ≤ 5000ms. Correlates outside probe with agent observation when agent-assisted.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>none</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>must_block_before_origin</code></dd>
+        <dt>Targets</dt>
+        <dd></dd>
+        <dt>Agent modes</dt>
+        <dd>canary, heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>approval_artifact, agent_observation, soc_runbook_ack</dd>
+        <dt>Stop conditions</dt>
+        <dd>soc_kill_switch, abort_criteria_met, max_approved_requests</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>waf_offensive_authorization_pack</li><li>declared_waf_asset</li><li>staging_isolation</li></ul></details>
+    </article>
+    <article class="check" id="high_scale.application.request_only">
+      <header>
+        <h3>Application-Layer High-Scale (SOC Request Only)</h3>
+        <code class="check-id">high_scale.application.request_only</code>
+        <span class="badge soc_gated">soc_gated</span>
+      </header>
+      <p class="desc">SOC-gated application-layer high-scale validation request marker only.</p>
+      <dl>
+        <dt>What we detect</dt>
+        <dd>SOC-gated application-layer high-scale validation request marker only.</dd>
+        <dt>How we detect</dt>
+        <dd>Probe kind: none Max 1 request(s), timeout ≤ 5000ms. Verdict primarily from outside probe metadata.</dd>
+        <dt>Probe kind</dt>
+        <dd><code>none</code></dd>
+        <dt>Default expected behavior</dt>
+        <dd><code>soc_approval_required</code></dd>
+        <dt>Targets</dt>
+        <dd></dd>
+        <dt>Agent modes</dt>
+        <dd>heartbeat</dd>
+        <dt>Evidence required</dt>
+        <dd>approval_artifact, provider_telemetry, soc_runbook_ack</dd>
+        <dt>Stop conditions</dt>
+        <dd>soc_kill_switch, abort_criteria_met, provider_stop_signal, max_approved_duration</dd>
+      </dl>
+      <details><summary>Customer setup required</summary><ul><li>soc_authorization_pack</li><li>declared_l7_scope</li><li>provider_approval_artifact</li></ul></details>
+    </article></div>
+    </section>
+  </main>
+  <footer>
+    AstraNull · Check catalog v1.0.0 · 48 safe + 17 SOC-gated · 2026-07-07
+  </footer>
+</body>
+</html>

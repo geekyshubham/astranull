@@ -1,0 +1,55 @@
+name: Portal revamp
+
+on:
+  pull_request:
+    paths:
+      - 'apps/web/react/**'
+      - 'src/services/**'
+      - 'src/persistence/**'
+      - 'db/migrations/**'
+      - 'tests/**'
+      - 'scripts/lint-portal-no-hardcoded.mjs'
+      - 'scripts/assert-portal-matrix.mjs'
+      - '.github/workflows/portal-revamp.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'apps/web/react/**'
+      - 'src/services/**'
+      - 'src/persistence/**'
+      - 'db/migrations/**'
+      - 'tests/**'
+      - 'scripts/lint-portal-no-hardcoded.mjs'
+      - 'scripts/assert-portal-matrix.mjs'
+
+jobs:
+  portal:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [unit, contract, integration, e2e, portal-scale, lint, a11y, db-migrate]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install Playwright browsers
+        if: matrix.suite == 'e2e' || matrix.suite == 'a11y'
+        run: npx playwright install --with-deps chromium
+
+      - name: Run portal suite (${{ matrix.suite }})
+        env:
+          ASTRANULL_PORTAL_SCALE: ${{ matrix.suite == 'portal-scale' && '1' || '' }}
+          ASTRANULL_PORTAL_PERF_ITERATIONS: ${{ matrix.suite == 'portal-scale' && '12' || '' }}
+          ASTRANULL_PORTAL_SCALE_FAST: ''
+        run: |
+          npm run db:migrate:test
+          npm run test:${{ matrix.suite }}

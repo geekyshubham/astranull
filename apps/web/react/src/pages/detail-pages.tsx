@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import { Activity, Bot, ClipboardList, FileCheck2, FileText, Network, ShieldCheck, ShieldHalf, Siren, Target, TriangleAlert, UserCog, Users } from 'lucide-react';
+import { Activity, Bot, ClipboardList, FileCheck2, FileText, Network, ShieldCheck, Siren, Target, TriangleAlert, UserCog, Users } from 'lucide-react';
 import { FindingExplanationPanel } from '../components/findings/finding-explanation-panel';
 import { Badge, type BadgeProps } from '../components/ui/badge';
 import { AnchorButton, Button } from '../components/ui/button';
@@ -13,8 +13,12 @@ import { buildApiHeaders, isStaffSocRole, requestJson, requestSocJson } from '..
 import { ROUTE_BY_ID } from '../lib/navigation';
 import { buildDetailHref, getRouteEntityId } from '../lib/route-params';
 import type { DataItem, PortalConfig, PortalData, RouteId, Session } from '../lib/types';
-import { formatDate, formatExpectedBehavior, scoreTone } from '../lib/utils';
+import { formatDate, scoreTone } from '../lib/utils';
+import { AgentHeartbeatPanel } from '../components/agents/agent-heartbeat-panel';
+import { AgentPlacementPanel } from '../components/agents/agent-placement-panel';
 import { CapabilityProbeResultsPanel } from '../components/runs/capability-probe-panel';
+import { ConfirmModal, formatMutationSuccessMessage } from '../lib/crud-ui';
+import { ONBOARDING_PLACEMENT_TEST_CHECK_ID } from '../lib/onboarding';
 import { RunTimelineViz, TruthTablePanel, VerdictExplanationPanel } from '../components/runs/run-proof-panels';
 import {
   agentHeartbeatFreshness,
@@ -40,6 +44,9 @@ import {
 import { routeTabs } from '../lib/prototype-manifest';
 import { ReadinessGauge } from '../components/charts/readiness-gauge';
 import { MetricCard, PageContextSummary } from './page-components';
+import { TargetGroupDetailView as TargetGroupDetailViewRevamp } from './target-group-detail-view';
+import { TargetDetailView } from './target-detail-view';
+import { FindingDetailView as FindingDetailViewRevamp } from './finding-detail-view';
 
 
 function getString(item: DataItem | null | undefined, keys: string[], fallback = '—') {
@@ -181,13 +188,6 @@ const STAFF_ENTITLEMENT_LABELS: Record<string, string> = {
   high_scale_program: 'High-scale program'
 };
 
-const TARGET_GROUP_EXPECTED_BEHAVIOR_OPTIONS = [
-  { value: 'must_block_before_origin', label: 'Must be blocked before origin' },
-  { value: 'must_allow_baseline_health', label: 'Must allow baseline health' },
-  { value: 'must_challenge_or_rate_limit', label: 'Must challenge or rate-limit' },
-  { value: 'must_not_expose_direct_ip', label: 'Must not expose direct IP' }
-] as const;
-
 const SUPPLY_CHAIN_EXPOSURE_TYPES = [
   { id: 'dangling_cname', label: 'Dangling CNAME' },
   { id: 'subdomain_takeover', label: 'Subdomain takeover risk' },
@@ -256,69 +256,6 @@ function buildEvidenceBackedFactors(
     return factors;
   }
 
-  if (route === 'waf-asset-detail') {
-    const riskFactors = getNestedArray(entity, ['current_posture', 'risk_factors']);
-    if (riskFactors.length > 0) {
-      return riskFactors.map((factor) => ({
-        label: formatFactorLabel(getString(factor, ['factor'], 'risk factor')),
-        body: getString(factor, ['value'], 'Recorded posture risk signal.'),
-        value: Math.min(100, Math.max(0, getNestedNumber(factor, ['contribution'], 0)))
-      }));
-    }
-    const passRate = getNestedNumber(entity, ['effectiveness', 'scenario_pass_rate'], NaN);
-    if (Number.isFinite(passRate) && passRate > 0) {
-      return [{
-        label: 'Scenario pass rate',
-        body: 'Latest effectiveness summary for this WAF asset.',
-        value: Math.round(passRate)
-      }];
-    }
-    return [];
-  }
-
-  if (route === 'cve-detail') {
-    const triage = getNestedItem(entity, ['triage_result']);
-    const factors: FactorEntry[] = [];
-    if (triage && typeof triage.score === 'number' && Number.isFinite(triage.score)) {
-      factors.push({
-        label: 'Triage score',
-        body: getString(triage, ['summary'], 'Exposure triage from the CVE pipeline.'),
-        value: Math.min(100, Math.max(0, Math.round(triage.score)))
-      });
-    }
-    const triageFactors = triage?.factors;
-    if (triageFactors && typeof triageFactors === 'object' && !Array.isArray(triageFactors)) {
-      for (const [key, active] of Object.entries(triageFactors)) {
-        if (active === true) {
-          factors.push({
-            label: formatFactorLabel(key),
-            body: 'Active triage factor from the CVE pipeline.',
-            value: 100
-          });
-        }
-      }
-    }
-    if (extras.cveMatches.length > 0) {
-      factors.push({
-        label: 'Declared asset matches',
-        body: `${extras.cveMatches.length} metadata-only declared asset matches.`,
-        value: Math.min(100, extras.cveMatches.length * 20)
-      });
-    }
-    return factors;
-  }
-
-  if (route === 'supply-chain-detail') {
-    const confidence = getNestedNumber(entity, ['confidence'], NaN);
-    if (Number.isFinite(confidence)) {
-      return [{
-        label: 'Exposure confidence',
-        body: `${getString(entity, ['exposure_type'])} on ${getString(entity, ['hostname'])}.`,
-        value: Math.round(confidence * 100)
-      }];
-    }
-  }
-
   return [];
 }
 
@@ -349,7 +286,7 @@ function FactorPanel({
             <span>{factor.body}</span>
           </div>
           <Badge tone={scoreTone(factor.value)}>{factor.value}%</Badge>
-          <Progress value={factor.value} tone={scoreTone(factor.value)} />
+          <Progress value={factor.value} tone={scoreTone(factor.value)} label={factor.label ?? 'Readiness factor'} />
         </div>
       ))}
     </div>
@@ -558,32 +495,22 @@ const DETAIL_LIST_LINKS: Partial<Record<RouteId, { label: string; href: string }
   'run-detail': { label: 'Test runs', href: '#runs' },
   'agent-detail': { label: 'Agents', href: '#agents' },
   'target-group-detail': { label: 'Target groups', href: '#target-groups' },
-  'waf-asset-detail': { label: 'WAF posture', href: '#waf-posture' },
-  'cve-detail': { label: 'CVE pipeline', href: '#cve-pipeline' },
-  'supply-chain-detail': { label: 'Supply chain', href: '#supply-chain' },
-  'discovery-entity': { label: 'Discovery', href: '#discovery' },
+  'target-detail': { label: 'Target groups', href: '#target-groups' },
   'report-detail': { label: 'Reports', href: '#reports' },
   'tenant-detail': { label: 'Admin console', href: '#admin' },
   'finding-detail': { label: 'Findings', href: '#findings' },
-  'evidence-detail': { label: 'Evidence vault', href: '#evidence' },
-  'high-scale-detail': { label: 'High-scale requests', href: '#high-scale' },
-  'soc-request-detail': { label: 'SOC console', href: '#soc' }
+  'queue-detail': { label: 'SOC console', href: '#internal-soc' }
 };
 
 const DETAIL_LINK_ROUTES: RouteId[] = [
   'run-detail',
   'agent-detail',
   'target-group-detail',
-  'waf-asset-detail',
-  'cve-detail',
-  'supply-chain-detail',
-  'discovery-entity',
+  'target-detail',
   'tenant-detail',
   'report-detail',
   'finding-detail',
-  'evidence-detail',
-  'high-scale-detail',
-  'soc-request-detail'
+  'queue-detail'
 ];
 
 function detailEntityTitle(route: RouteId, entity: DataItem, entityId: string, context?: { checks?: DataItem[] }) {
@@ -591,17 +518,13 @@ function detailEntityTitle(route: RouteId, entity: DataItem, entityId: string, c
     const checkId = getString(entity, ['check_id'], '');
     return checkId && context?.checks ? checkDisplayName(context.checks, checkId) : getString(entity, ['check_id'], entityId);
   }
-  if (route === 'finding-detail') return getString(entity, ['title', 'id'], entityId);
-  if (route === 'evidence-detail') return getString(entity, ['label', 'kind', 'id'], entityId);
-  if (route === 'high-scale-detail' || route === 'soc-request-detail') {
+  if (route === 'finding-detail') return getString(entity, ['title', 'label', 'kind', 'id'], entityId);
+  if (route === 'queue-detail') {
     return getString(entity, ['objective', 'reason', 'id'], entityId);
   }
+  if (route === 'target-detail') return getString(entity, ['value', 'id'], entityId);
   if (route === 'agent-detail') return getString(entity, ['hostname', 'name'], entityId);
   if (route === 'target-group-detail') return getString(entity, ['name'], entityId);
-  if (route === 'waf-asset-detail') return getString(entity, ['hostname', 'canonical_url', 'name'], entityId);
-  if (route === 'cve-detail') return getString(entity, ['cve_id'], entityId);
-  if (route === 'supply-chain-detail') return getString(entity, ['hostname', 'organization_name'], entityId);
-  if (route === 'discovery-entity') return getString(entity, ['canonical_url', 'hostname', 'label', 'name'], entityId);
   if (route === 'report-detail') return getString(entity, ['title'], entityId);
   if (route === 'tenant-detail') {
     const tenant = getNestedItem(entity, ['tenant']) ?? entity;
@@ -613,9 +536,7 @@ function detailEntityTitle(route: RouteId, entity: DataItem, entityId: string, c
 function DetailBreadcrumb({ route, title, entityId }: { route: RouteId; title: string; entityId?: string }) {
   const routeMeta = ROUTE_BY_ID.get(route);
   const listLink = DETAIL_LIST_LINKS[route];
-  const listHref = route === 'discovery-entity' && entityId
-    ? `#discovery?id=${encodeURIComponent(entityId)}`
-    : listLink?.href;
+  const listHref = listLink?.href;
   const groupLabel = routeMeta?.group ? (DETAIL_GROUP_LABELS[routeMeta.group] ?? routeMeta.group) : 'Detail';
   const listLabel = listLink?.label ?? routeMeta?.label ?? 'List';
   return (
@@ -1051,7 +972,7 @@ function RunDetailView({
                     <div key={evidenceId}>
                       <span>{evidenceLabel}</span>
                       <strong>
-                        <DetailEntityLink route="evidence-detail" id={evidenceId} label={evidenceLabel} />
+                        <DetailEntityLink route="finding-detail" id={evidenceId} label={evidenceLabel} />
                       </strong>
                     </div>
                   );
@@ -1480,9 +1401,6 @@ function TargetGroupDetailView({
   const [busy, setBusy] = useState('');
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
-  const [expectedBehaviorDefault, setExpectedBehaviorDefault] = useState(
-    () => getString(entity, ['expected_behavior_default'], 'must_block_before_origin')
-  );
   const [dnsChallenge, setDnsChallenge] = useState<DataItem | null>(null);
   const [dnsVerifyResult, setDnsVerifyResult] = useState<DataItem | null>(null);
   const [ownershipVerifications, setOwnershipVerifications] = useState<DataItem[]>([]);
@@ -1490,10 +1408,6 @@ function TargetGroupDetailView({
 
   const validationMode = getString(entity, ['validation_mode'], 'agent_assisted');
   const ownershipStatus = getString(entity, ['ownership_status'], 'unverified');
-
-  useEffect(() => {
-    setExpectedBehaviorDefault(getString(entity, ['expected_behavior_default'], 'must_block_before_origin'));
-  }, [entityId, entity]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1526,7 +1440,6 @@ function TargetGroupDetailView({
   const targetColumns: TableColumn<DataItem>[] = [
     { key: 'kind', label: 'Type', render: (item) => <Badge tone="info">{getString(item, ['kind'])}</Badge> },
     { key: 'value', label: 'Target', render: (item) => getString(item, ['value']) },
-    { key: 'expected', label: 'Expected behavior', render: (item) => formatExpectedBehavior(getString(item, ['expected_behavior'], '')) },
     { key: 'created', label: 'Created', render: (item) => formatDate(item.created_at) }
   ];
 
@@ -1621,7 +1534,6 @@ function TargetGroupDetailView({
       body: {
         name: String(form.get('name') ?? getString(entity, ['name'])).trim(),
         description: String(form.get('description') ?? '').trim(),
-        expected_behavior_default: expectedBehaviorDefault,
         timezone: String(form.get('timezone') ?? 'UTC').trim() || 'UTC'
       }
     }), 'Target group settings saved.');
@@ -1718,7 +1630,7 @@ function TargetGroupDetailView({
             eyebrow="Declared business service"
           />
           <p className="muted">
-            {targets.length} declared targets · {getString(entity, ['environment_id'], 'tenant scope')} · expected {formatExpectedBehavior(getString(entity, ['expected_behavior_default'], 'must_block_before_origin'))}
+            {targets.length} declared targets · {getString(entity, ['environment_id'], 'tenant scope')}
           </p>
         </div>
         <div className="row-actions">
@@ -1765,7 +1677,6 @@ function TargetGroupDetailView({
             </CardHeader>
             <CardContent className="kv-list">
               <div><span>Name</span><strong>{getString(entity, ['name'])}</strong></div>
-              <div><span>Default expected behavior</span><strong>{formatExpectedBehavior(getString(entity, ['expected_behavior_default'], 'must_block_before_origin'))}</strong></div>
               <div><span>Environment</span><strong>{getString(entity, ['environment_id'])}</strong></div>
               <div><span>Timezone</span><strong>{getString(entity, ['timezone'], 'UTC')}</strong></div>
               <div><span>Created</span><strong>{formatDate(entity.created_at)}</strong></div>
@@ -1776,48 +1687,25 @@ function TargetGroupDetailView({
         </div>
       ) : null}
       {tab === 'scope' ? (
-        <div className="split">
-          <Card>
-            <CardHeader>
-              <div>
-                <CardTitle>Declared targets</CardTitle>
-                <CardDescription>Manual declarations loaded from the target-group detail API.</CardDescription>
-              </div>
-              <Badge tone="success">{targets.length} targets</Badge>
-            </CardHeader>
-            <CardContent>
-              <DataTable
-                columns={targetColumns}
-                items={targets}
-                empty={<EmptyState icon={Target} title="No targets declared." body="Add targets from the Target Groups page." actionLabel="Open Target Groups" actionHref="#target-groups" />}
-              />
-              <div className="form-actions">
-                <AnchorButton size="sm" variant="secondary" href="#target-groups">Manage targets</AnchorButton>
-              </div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader>
-              <CardTitle>Expected behavior</CardTitle>
-              <CardDescription>Customer-declared protection expectations for this group.</CardDescription>
-            </CardHeader>
-            <CardContent className="stack-tight">
-              <div className="kv-list">
-                <div><span>Group default</span><strong>{formatExpectedBehavior(getString(entity, ['expected_behavior_default'], 'must_block_before_origin'))}</strong></div>
-                <div><span>Safety policy</span><strong>{getNestedString(entity, ['safety_policy', 'max_concurrent_runs'], '1')} concurrent runs · {getNestedString(entity, ['safety_policy', 'min_seconds_between_runs'], '300')}s cooldown</strong></div>
-                <div><span>Per-target overrides</span><strong>{targets.filter((target) => getString(target, ['expected_behavior']) !== getString(entity, ['expected_behavior_default'], 'must_block_before_origin')).length}</strong></div>
-              </div>
-              <DataTable
-                columns={[
-                  { key: 'value', label: 'Target', render: (item) => getString(item, ['value']) },
-                  { key: 'expected', label: 'Expected behavior', render: (item) => formatExpectedBehavior(getString(item, ['expected_behavior'], getString(entity, ['expected_behavior_default'], 'must_block_before_origin'))) }
-                ]}
-                items={targets}
-                empty={<EmptyState icon={ShieldHalf} title="No target-level behavior yet." body="Add declared targets to attach expected behavior." />}
-              />
-            </CardContent>
-          </Card>
-        </div>
+        <Card>
+          <CardHeader>
+            <div>
+              <CardTitle>Declared targets</CardTitle>
+              <CardDescription>Manual declarations loaded from the target-group detail API.</CardDescription>
+            </div>
+            <Badge tone="success">{targets.length} targets</Badge>
+          </CardHeader>
+          <CardContent>
+            <DataTable
+              columns={targetColumns}
+              items={targets}
+              empty={<EmptyState icon={Target} title="No targets declared." body="Add targets from the Target Groups page." actionLabel="Open Target Groups" actionHref="#target-groups" />}
+            />
+            <div className="form-actions">
+              <AnchorButton size="sm" variant="secondary" href="#target-groups">Manage targets</AnchorButton>
+            </div>
+          </CardContent>
+        </Card>
       ) : null}
       {tab === 'agents' ? (
         <Card>
@@ -2024,14 +1912,6 @@ function TargetGroupDetailView({
                   <span>Description</span>
                   <textarea name="description" rows={3} defaultValue={getString(entity, ['description'], '')} />
                 </label>
-                <Select
-                  className="full"
-                  label="Default expected behavior"
-                  value={expectedBehaviorDefault}
-                  options={TARGET_GROUP_EXPECTED_BEHAVIOR_OPTIONS.map((option) => ({ value: option.value, label: option.label }))}
-                  onChange={setExpectedBehaviorDefault}
-                  disabled={busy !== ''}
-                />
                 <div className="form-actions full">
                   <Button type="submit" loading={busy === `patch-target-group-${entityId}`} disabled={busy !== ''}>Save settings</Button>
                   <AnchorButton size="sm" variant="secondary" href="#target-groups">Manage targets</AnchorButton>
@@ -2071,6 +1951,7 @@ function AgentDetailView({
   const [busy, setBusy] = useState('');
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const [revokeConfirmOpen, setRevokeConfirmOpen] = useState(false);
   const [placementReviews, setPlacementReviews] = useState<DataItem | null>(null);
   const [auxLoading, setAuxLoading] = useState(false);
   const tabOptions = routeTabs('agent-detail').map((item) => ({ id: item.id, label: item.label }));
@@ -2106,16 +1987,50 @@ function AgentDetailView({
 
   async function revokeAgent() {
     if (!entityId || getString(entity, ['status']) === 'revoked') return;
-    if (!window.confirm("Revoke this agent's credentials? It stops reporting until re-registered.")) return;
     setBusy(`revoke-${entityId}`);
     setError('');
     setMessage('');
     try {
-      await requestJson(config, session, `/v1/agents/${encodeURIComponent(entityId)}/revoke`, { method: 'POST' });
-      setMessage('Agent revoked.');
+      const result = await requestJson(config, session, `/v1/agents/${encodeURIComponent(entityId)}/revoke`, { method: 'POST' });
+      setMessage(formatMutationSuccessMessage('Agent revoked.', result));
+      setRevokeConfirmOpen(false);
       await onRefresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Agent revoke failed.');
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function runPlacementTest() {
+    if (!targetGroupId) {
+      setError('Bind this agent to a target group before running a placement test.');
+      return;
+    }
+    setBusy(`placement-${entityId}`);
+    setError('');
+    setMessage('');
+    try {
+      const detail = await requestJson(config, session, `/v1/target-groups/${encodeURIComponent(targetGroupId)}`) as DataItem;
+      const targets = Array.isArray(detail.targets) ? detail.targets as DataItem[] : [];
+      const targetId = getString(targets[0] ?? {}, ['id'], '');
+      if (!targetId) {
+        setError('Add at least one target to the bound group before running placement test.');
+        return;
+      }
+      const result = await requestJson(config, session, '/v1/test-runs', {
+        method: 'POST',
+        body: {
+          target_group_id: targetGroupId,
+          target_id: targetId,
+          check_id: ONBOARDING_PLACEMENT_TEST_CHECK_ID
+        }
+      });
+      setMessage(formatMutationSuccessMessage('Placement test started.', result));
+      await onRefresh();
+    } catch (err) {
+      const payload = (err as Error & { payload?: unknown }).payload as { error?: string; message?: string } | undefined;
+      setError(payload?.message ?? payload?.error ?? (err instanceof Error ? err.message : 'Placement test failed.'));
     } finally {
       setBusy('');
     }
@@ -2154,6 +2069,24 @@ function AgentDetailView({
       </div>
       <Tabs value={tab} options={tabOptions} onChange={setTab} className="tabs-wrap" />
       {tab === 'overview' ? (
+        <>
+        <AgentHeartbeatPanel
+          agent={entity}
+          agentId={entityId}
+          audit={data.audit}
+          onRefresh={() => void onRefresh()}
+          refreshing={busy !== ''}
+        />
+        <AgentPlacementPanel
+          agent={entity}
+          agentId={entityId}
+          targetGroupId={targetGroupId}
+          runs={data.runs}
+          placementReview={placementReview ?? null}
+          onRunPlacement={() => void runPlacementTest()}
+          running={busy === `placement-${entityId}`}
+          busy={busy !== ''}
+        />
         <div className="split">
           <Card>
             <CardHeader>
@@ -2199,7 +2132,7 @@ function AgentDetailView({
             </CardHeader>
             <CardContent className="row-actions">
               {getString(entity, ['status']) !== 'revoked' ? (
-                <Button size="sm" variant="danger" loading={busy === `revoke-${entityId}`} disabled={busy !== ''} onClick={() => void revokeAgent()}>Revoke agent</Button>
+                <Button size="sm" variant="danger" loading={busy === `revoke-${entityId}`} disabled={busy !== ''} onClick={() => setRevokeConfirmOpen(true)}>Revoke agent</Button>
               ) : (
                 <p className="muted">This agent is revoked. Issue a new bootstrap token on <AnchorButton size="sm" variant="ghost" href="#agents">Agents</AnchorButton> to re-register.</p>
               )}
@@ -2207,6 +2140,16 @@ function AgentDetailView({
             </CardContent>
           </Card>
         </div>
+        <ConfirmModal
+          open={revokeConfirmOpen}
+          title={`Revoke agent ${entityId}`}
+          description={<p>Are you sure? Revoked agents stop reporting until re-registered with a new bootstrap token.</p>}
+          confirmLabel="Revoke agent"
+          busy={busy === `revoke-${entityId}`}
+          onCancel={() => setRevokeConfirmOpen(false)}
+          onConfirm={() => void revokeAgent()}
+        />
+        </>
       ) : null}
       {tab === 'health' ? (
         <Card>
@@ -2544,7 +2487,7 @@ function EvidenceDetailView({
   ];
   const testRunId = getString(entity, ['test_run_id'], '');
   const relatedFindings = data.findings.filter((finding) => getString(finding, ['test_run_id'], '') === testRunId);
-  const title = detailEntityTitle('evidence-detail', entity, entityId);
+  const title = detailEntityTitle('finding-detail', entity, entityId);
   const digest = getString(entity, ['content_sha256', 'custody_digest'], '—');
 
   async function exportThisRecord() {
@@ -2571,8 +2514,8 @@ function EvidenceDetailView({
   return (
     <div className="content">
       <div className="page-head">
-        <DetailPageIntro route="evidence-detail" eyebrow="Evidence vault record" />
-        <DetailEntityHeading route="evidence-detail" entityId={entityId} title={title} />
+        <DetailPageIntro route="finding-detail" eyebrow="Evidence vault record" />
+        <DetailEntityHeading route="finding-detail" entityId={entityId} title={title} />
       </div>
       {loading ? <DetailLoadingPlaceholder label="Loading evidence detail…" /> : null}
       {loadError ? <div className="form-banner error">{loadError}</div> : null}
@@ -2689,7 +2632,7 @@ function HighScaleDetailView({
   const providerChecklist = Array.isArray(entity.provider_approval_checklist) ? entity.provider_approval_checklist as DataItem[] : [];
   const lifecycleTrail = buildLifecycleTimeline(entity);
   const targetGroup = data.targetGroups.find((group) => getString(group, ['id'], '') === getString(entity, ['target_group_id'], ''));
-  const title = detailEntityTitle('high-scale-detail', entity, entityId);
+  const title = detailEntityTitle('queue-detail', entity, entityId);
   const requiredArtifactTypes = authorizationArtifactTypesForRequest(entity);
 
   function draftForType(type: string): AuthorizationArtifactDraft {
@@ -2749,7 +2692,7 @@ function HighScaleDetailView({
 
   return (
     <div className="content">
-      <DetailPageHeader route="high-scale-detail" eyebrow="SOC-gated validation" entityId={entityId} title={title} />
+      <DetailPageHeader route="queue-detail" eyebrow="SOC-gated validation" entityId={entityId} title={title} />
       {loading ? <DetailLoadingPlaceholder label="Loading high-scale request…" /> : null}
       {loadError ? <div className="form-banner error">{loadError}</div> : null}
       {(message || error) && !loadError ? (
@@ -2921,7 +2864,7 @@ function SocRequestDetailView({
   }
   const artifacts = Array.isArray(entity.artifacts) ? entity.artifacts as DataItem[] : [];
   const packStatus = getNestedItem(entity, ['authorization_pack_status']);
-  const title = detailEntityTitle('soc-request-detail', entity, entityId);
+  const title = detailEntityTitle('queue-detail', entity, entityId);
   const tabOptions = [
     { id: 'workspace', label: 'Workspace' },
     { id: 'artifacts', label: 'Artifacts' },
@@ -3005,7 +2948,7 @@ function SocRequestDetailView({
     const isStaffPrincipal = session.principal === 'staff';
     return (
       <div className="content">
-        <DetailPageIntro route="soc-request-detail" eyebrow="SOC execution workspace" />
+        <DetailPageIntro route="queue-detail" eyebrow="SOC execution workspace" />
         <EmptyState
           icon={ShieldCheck}
           title={isStaffPrincipal ? 'Staff SOC role required.' : 'SOC role required.'}
@@ -3013,7 +2956,7 @@ function SocRequestDetailView({
             ? 'Sign in with a staff SOC analyst or lead role to operate governed high-scale requests.'
             : 'Switch the workspace role to soc to operate governed high-scale requests.'}
           actionLabel={isStaffPrincipal ? 'Open staff login' : 'Open SOC console'}
-          actionHref={isStaffPrincipal ? '/internal/admin/login' : '#soc'}
+          actionHref={isStaffPrincipal ? '/internal/admin/login' : '#internal-soc'}
         />
       </div>
     );
@@ -3024,7 +2967,7 @@ function SocRequestDetailView({
 
   return (
     <div className="content">
-      <DetailPageHeader route="soc-request-detail" eyebrow="SOC execution workspace" entityId={entityId} title={title} />
+      <DetailPageHeader route="queue-detail" eyebrow="SOC execution workspace" entityId={entityId} title={title} />
       {(message || error) && <div className={error ? 'form-banner error' : 'form-banner'}>{error || message}</div>}
       <Tabs value={tab} options={tabOptions} onChange={setTab} className="tabs-wrap" />
       {tab === 'workspace' ? (
@@ -3039,7 +2982,7 @@ function SocRequestDetailView({
               {state === 'scheduled' ? <Button size="sm" variant="default" loading={busy === `start-${entityId}`} disabled={busy !== ''} onClick={() => void socAction('start')}>Start</Button> : null}
               {state === 'running' ? <Button size="sm" variant="danger" loading={busy === `stop-${entityId}`} disabled={busy !== ''} onClick={() => void socAction('stop')}>Stop</Button> : null}
               {state === 'stopped' ? <Button size="sm" variant="secondary" loading={busy === `close-${entityId}`} disabled={busy !== ''} onClick={() => void socAction('close')}>Close</Button> : null}
-              <AnchorButton size="sm" variant="ghost" href="#soc">Open SOC console</AnchorButton>
+              <AnchorButton size="sm" variant="ghost" href="#internal-soc">Open SOC console</AnchorButton>
             </div>
           </CardContent>
         </Card>
@@ -3124,37 +3067,17 @@ export function DetailRoutePage({
   session: Session;
   onRefresh: () => Promise<void>;
 }) {
-  const [tab, setTab] = useState('overview');
   const [busy, setBusy] = useState('');
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [runEvents, setRunEvents] = useState<DataItem[]>([]);
-  const [cveMatches, setCveMatches] = useState<DataItem[]>([]);
-  const [cvePlaybook, setCvePlaybook] = useState<DataItem | null>(null);
-  const [cveAuxError, setCveAuxError] = useState('');
-  const [cveAuxLoading, setCveAuxLoading] = useState(false);
-  const [cvePlaybookExpanded, setCvePlaybookExpanded] = useState(false);
-  const [wafExceptionOwner, setWafExceptionOwner] = useState('');
-  const [wafExceptionReason, setWafExceptionReason] = useState('');
-  const [supplyPhaseAttest, setSupplyPhaseAttest] = useState(false);
-  const [supplyTargetPhase, setSupplyTargetPhase] = useState('AP2_manual_custody');
-  const [discoveryApproveTg, setDiscoveryApproveTg] = useState('');
-  const [discoveryImportTg, setDiscoveryImportTg] = useState('');
   const entityId = useMemo(() => getRouteEntityId(''), [route]);
 
   const targetGroupFallback = data.targetGroups.find((item) => getString(item, ['id'], '') === entityId) ?? null;
   const agentFallback = data.agents.find((item) => getString(item, ['id'], '') === entityId) ?? null;
   const runFallback = data.runs.find((item) => getString(item, ['id'], '') === entityId) ?? null;
-  const wafFallback = data.wafAssets.find((item) => getString(item, ['id'], '') === entityId) ?? null;
-  const discoveryFallback =
-    data.discoveryEntities.find((item) => getString(item, ['id', 'entity_id'], '') === entityId)
-    ?? data.discoveryCandidates.find((item) => getString(item, ['id', 'entity_id'], '') === entityId)
-    ?? null;
   const tenantFallback = data.internalTenants.find((item) => getString(item, ['tenant_id', 'id'], '') === entityId) ?? null;
-  const cveFallback = data.cvePipeline.find((item) => getString(item, ['id'], '') === entityId) ?? null;
-  const supplyChainFallback = data.supplyChainRisks.find((item) => getString(item, ['id'], '') === entityId) ?? null;
   const findingFallback = data.findings.find((item) => getString(item, ['id'], '') === entityId) ?? null;
-  const evidenceFallback = data.evidence.find((item) => getString(item, ['id'], '') === entityId) ?? null;
   const highScaleFallback = data.highScale.find((item) => getString(item, ['id'], '') === entityId) ?? null;
 
   const targetGroupDetail = useEntityDetail(
@@ -3171,28 +3094,6 @@ export function DetailRoutePage({
     `/v1/test-runs/${encodeURIComponent(entityId)}`,
     runFallback
   );
-  const wafDetail = useEntityDetail(
-    route === 'waf-asset-detail' && Boolean(entityId),
-    config,
-    session,
-    `/v1/waf/assets/${encodeURIComponent(entityId)}`,
-    wafFallback
-  );
-  const supplyChainDetail = useEntityDetail(
-    route === 'supply-chain-detail' && Boolean(entityId),
-    config,
-    session,
-    `/v1/waf/supply-chain/risks/${encodeURIComponent(entityId)}`,
-    supplyChainFallback
-  );
-  const cveDetail = useListBackedDetail(
-    route === 'cve-detail' && Boolean(entityId),
-    config,
-    session,
-    '/v1/waf/cve-pipeline',
-    entityId,
-    cveFallback
-  );
   const tenantDetail = useEntityDetail(
     route === 'tenant-detail' && Boolean(entityId) && session.principal === 'staff',
     config,
@@ -3207,13 +3108,6 @@ export function DetailRoutePage({
     `/v1/findings/${encodeURIComponent(entityId)}`,
     findingFallback
   );
-  const evidenceDetailState = useEntityDetail(
-    route === 'evidence-detail' && Boolean(entityId),
-    config,
-    session,
-    `/v1/evidence/${encodeURIComponent(entityId)}`,
-    evidenceFallback
-  );
   const agentDetail = useListBackedDetail(
     route === 'agent-detail' && Boolean(entityId),
     config,
@@ -3223,95 +3117,23 @@ export function DetailRoutePage({
     agentFallback
   );
   const highScaleDetail = useListBackedDetail(
-    route === 'high-scale-detail' && Boolean(entityId),
+    route === 'queue-detail' && Boolean(entityId),
     config,
     session,
     '/v1/high-scale-requests',
     entityId,
     highScaleFallback
   );
-  const discoveryDetail = useListBackedDetail(
-    route === 'discovery-entity' && Boolean(entityId),
-    config,
-    session,
-    '/v1/discovery/candidates',
-    entityId,
-    discoveryFallback
-  );
-
   const detailState =
     route === 'target-group-detail' ? targetGroupDetail
       : route === 'run-detail' ? runDetail
-        : route === 'waf-asset-detail' ? wafDetail
-          : route === 'supply-chain-detail' ? supplyChainDetail
-            : route === 'cve-detail' ? cveDetail
-              : route === 'agent-detail' ? agentDetail
-                : route === 'discovery-entity' ? discoveryDetail
-                  : { detail: null as DataItem | null, error: '', loading: false };
+        : route === 'agent-detail' ? agentDetail
+          : { detail: null as DataItem | null, error: '', loading: false };
 
   const entity =
     route === 'tenant-detail' ? tenantFallback
-      : route === 'high-scale-detail' ? (highScaleDetail.detail ?? highScaleFallback)
+      : route === 'queue-detail' ? (highScaleDetail.detail ?? highScaleFallback)
         : detailState.detail;
-
-  const groupId = route === 'target-group-detail'
-    ? getString(entity, ['id'], '')
-    : getString(entity, ['target_group_id'], '');
-  const relatedRuns = data.runs.filter((run) => getString(run, ['target_group_id'], '') === groupId);
-  const relatedFindings = data.findings.filter((finding) => getString(finding, ['target_group_id'], '') === groupId);
-  const relatedAgents = data.agents.filter((agent) => getString(agent, ['target_group_id'], '') === groupId);
-  const relatedEvidence = data.evidence.filter((item) => getString(item, ['test_run_id'], '') === entityId || getString(item, ['target_group_id'], '') === groupId);
-  const targets = route === 'target-group-detail' ? getNestedArray(entity, ['targets']) : [];
-
-  useEffect(() => {
-    if (route !== 'cve-detail' || !entityId) {
-      setCveMatches([]);
-      setCvePlaybook(null);
-      setCveAuxError('');
-      setCveAuxLoading(false);
-      return;
-    }
-    let cancelled = false;
-    setCveAuxLoading(true);
-    setCveAuxError('');
-    setCveMatches([]);
-    requestJson(config, session, `/v1/waf/cve-pipeline/${encodeURIComponent(entityId)}/playbook`)
-      .then((playbookPayload) => {
-        if (cancelled) return;
-        setCvePlaybook(getNestedItem(playbookPayload as DataItem, ['playbook']) ?? (playbookPayload as DataItem));
-      })
-      .catch((err) => {
-        if (!cancelled) {
-          setCvePlaybook(null);
-          setCveAuxError(err instanceof Error ? err.message : 'CVE playbook fetch failed.');
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setCveAuxLoading(false);
-      });
-    return () => { cancelled = true; };
-  }, [route, entityId, config, session]);
-
-  async function runCveAssetMatch() {
-    if (!entityId) return;
-    setBusy(`cve-match-${entityId}`);
-    setCveAuxLoading(true);
-    setCveAuxError('');
-    try {
-      const matchPayload = await requestJson(config, session, `/v1/waf/cve-pipeline/${encodeURIComponent(entityId)}/match`, { method: 'POST', body: {} });
-      const matches = Array.isArray((matchPayload as { matches?: unknown }).matches)
-        ? (matchPayload as { matches: DataItem[] }).matches
-        : [];
-      setCveMatches(matches);
-      setMessage('Asset match completed.');
-    } catch (err) {
-      setCveMatches([]);
-      setCveAuxError(err instanceof Error ? err.message : 'CVE asset match failed.');
-    } finally {
-      setCveAuxLoading(false);
-      setBusy('');
-    }
-  }
 
   useEffect(() => {
     if (route !== 'run-detail' || !entityId) {
@@ -3361,74 +3183,6 @@ export function DetailRoutePage({
       setBusy('');
     }
   }
-
-  const factors = useMemo(() => {
-    if (!entity) return [];
-    return buildEvidenceBackedFactors(route, entity, { cveMatches });
-  }, [entity, route, cveMatches]);
-
-  const factorsTitle = factors.length > 0 ? 'Evidence-backed factors' : 'Derived summary';
-  const factorsDescription = factors.length > 0
-    ? 'Scores and signals from observed readiness and posture evidence.'
-    : 'No factor payload is available for this entity yet.';
-  const factorsEmptyTitle = factors.length > 0 ? 'No evidence factors yet.' : 'No factors yet.';
-  const factorsEmptyBody = factors.length > 0
-    ? 'Factors appear after the platform returns entity-specific readiness or posture signals.'
-    : 'Run triage, validation, or posture actions on this record to populate factor data.';
-
-  const timeline = useMemo(() => {
-    if (!entity) return [];
-    if (route === 'run-detail') {
-      return [
-        { label: 'Run created', at: entity.created_at },
-        { label: 'Run started', at: entity.started_at },
-        { label: 'Probe window', at: entity.probe_started_at ?? entity.updated_at },
-        { label: 'Verdict recorded', at: getNestedString(entity, ['verdict', 'finalized_at'], '') || entity.completed_at }
-      ].filter((item) => item.at);
-    }
-    if (route === 'waf-asset-detail') {
-      const validations = data.wafValidations.filter((item) => getString(item, ['waf_asset_id'], '') === entityId);
-      const driftEvents = data.wafDriftEvents.filter((item) => getString(item, ['waf_asset_id'], '') === entityId);
-      const items = [
-        { label: 'Asset declared', at: entity.created_at },
-        ...validations.map((validation) => ({
-          label: `Validation ${getString(validation, ['status'], 'recorded')}`,
-          at: validation.created_at ?? validation.updated_at
-        })),
-        ...driftEvents.map((drift) => ({
-          label: `Drift ${getString(drift, ['status'], 'detected')}`,
-          at: drift.detected_at ?? drift.updated_at
-        }))
-      ];
-      return items.filter((item) => item.at);
-    }
-    if (route === 'cve-detail') {
-      return [
-        { label: 'CVE ingested', at: entity.created_at },
-        { label: `Stage: ${getString(entity, ['stage'], 'ingest')}`, at: entity.updated_at },
-        getNestedString(entity, ['triage_result', 'triaged_at'], '') ? { label: 'Triage completed', at: getNestedString(entity, ['triage_result', 'triaged_at'], '') } : null,
-        getNestedString(entity, ['validation_result', 'validated_at'], '') ? { label: 'Exposure validated', at: getNestedString(entity, ['validation_result', 'validated_at'], '') } : null
-      ].filter((item): item is { label: string; at: unknown } => Boolean(item && item.at));
-    }
-    if (route === 'discovery-entity') {
-      return [
-        { label: `State: ${getString(entity, ['state'])}`, at: entity.updated_at ?? entity.created_at },
-        { label: 'First seen', at: entity.created_at },
-        getString(entity, ['approved_at'], '') ? { label: 'Approved', at: entity.approved_at } : null,
-        getString(entity, ['imported_at'], '') ? { label: 'Imported to scope', at: entity.imported_at } : null
-      ].filter((item): item is { label: string; at: unknown } => Boolean(item && item.at));
-    }
-    return [
-      { label: 'Record created', at: entity.created_at },
-      { label: 'Last updated', at: entity.updated_at }
-    ].filter((item) => item.at);
-  }, [entity, route, entityId, data.wafValidations, data.wafDriftEvents]);
-
-  const targetColumns: TableColumn<DataItem>[] = [
-    { key: 'kind', label: 'Type', render: (item) => <Badge tone="info">{getString(item, ['kind'])}</Badge> },
-    { key: 'value', label: 'Target', render: (item) => getString(item, ['value']) },
-    { key: 'expected', label: 'Expected behavior', render: (item) => getString(item, ['expected_behavior']) }
-  ];
 
   if (route === 'tenant-detail') {
     if (!entityId) {
@@ -3488,7 +3242,7 @@ export function DetailRoutePage({
       );
     }
     return (
-      <FindingDetailView
+      <FindingDetailViewRevamp
         entity={findingEntity}
         entityId={entityId}
         data={data}
@@ -3501,91 +3255,24 @@ export function DetailRoutePage({
     );
   }
 
-  if (route === 'evidence-detail') {
+  if (route === 'target-detail') {
     if (!entityId) {
       return (
         <div className="content">
-          <DetailPageIntro route={route} eyebrow="Evidence vault record" />
-          <EmptyState icon={FileCheck2} title="No evidence selected." body="Open a vault record from the list with ?id= or use the View link on #evidence." actionLabel="Open evidence vault" actionHref="#evidence" />
+          <DetailPageIntro route={route} eyebrow="Declared target" />
+          <EmptyState icon={Target} title="No target selected." body="Open a target from a target group detail table." actionLabel="Open target groups" actionHref="#target-groups" />
         </div>
       );
     }
-    const evidenceEntity = evidenceDetailState.detail ?? evidenceFallback;
-    if (!evidenceEntity && evidenceDetailState.loading) {
-      return (
-        <div className="content">
-          <DetailPageIntro route={route} eyebrow="Evidence vault record" />
-          <DetailLoadingPlaceholder label="Loading evidence detail…" />
-        </div>
-      );
-    }
-    if (!evidenceEntity) {
-      return (
-        <div className="content">
-          <DetailPageIntro route={route} eyebrow="Evidence vault record" />
-          <EmptyState icon={FileCheck2} title="Evidence not found." body={evidenceDetailState.error || 'The requested evidence record is missing or outside this tenant scope.'} actionLabel="Open evidence vault" actionHref="#evidence" />
-        </div>
-      );
-    }
-    return (
-      <EvidenceDetailView
-        entity={evidenceEntity}
-        entityId={entityId}
-        data={data}
-        config={config}
-        session={session}
-        loading={evidenceDetailState.loading}
-        loadError={evidenceDetailState.error}
-      />
-    );
+    return <TargetDetailView entityId={entityId} config={config} session={session} onRefresh={onRefresh} />;
   }
 
-  if (route === 'high-scale-detail') {
-    if (!entityId) {
-      return (
-        <div className="content">
-          <DetailPageIntro route={route} eyebrow="SOC-gated validation" />
-          <EmptyState icon={Siren} title="No high-scale request selected." body="Open a request from the list with ?id= or use the View link on #high-scale." actionLabel="Open high-scale requests" actionHref="#high-scale" />
-        </div>
-      );
-    }
-    const hsEntity = highScaleDetail.detail ?? highScaleFallback;
-    if (!hsEntity && highScaleDetail.loading) {
-      return (
-        <div className="content">
-          <DetailPageIntro route={route} eyebrow="SOC-gated validation" />
-          <DetailLoadingPlaceholder label="Loading high-scale request…" />
-        </div>
-      );
-    }
-    if (!hsEntity) {
-      return (
-        <div className="content">
-          <DetailPageIntro route={route} eyebrow="SOC-gated validation" />
-          <EmptyState icon={Siren} title="High-scale request not found." body={highScaleDetail.error || 'The requested governed request is missing or outside this tenant scope.'} actionLabel="Open high-scale requests" actionHref="#high-scale" />
-        </div>
-      );
-    }
-    return (
-      <HighScaleDetailView
-        entity={hsEntity}
-        entityId={entityId}
-        data={data}
-        config={config}
-        session={session}
-        onRefresh={onRefresh}
-        loading={highScaleDetail.loading}
-        loadError={highScaleDetail.error}
-      />
-    );
-  }
-
-  if (route === 'soc-request-detail') {
+  if (route === 'queue-detail') {
     if (!entityId) {
       return (
         <div className="content">
           <DetailPageIntro route={route} eyebrow="SOC execution workspace" />
-          <EmptyState icon={ShieldCheck} title="No SOC request selected." body="Open a queue item from the SOC console with ?id= or use the View link on #soc." actionLabel="Open SOC console" actionHref="#soc" />
+          <EmptyState icon={ShieldCheck} title="No SOC request selected." body="Open a queue item from Test runs or the SOC console with ?id=." actionLabel="Open SOC console" actionHref="#internal-soc" />
         </div>
       );
     }
@@ -3593,7 +3280,7 @@ export function DetailRoutePage({
       return (
         <div className="content">
           <DetailPageIntro route={route} eyebrow="SOC execution workspace" />
-          <EmptyState icon={ShieldCheck} title="SOC request not found." body="The requested high-scale item is missing or outside this tenant scope." actionLabel="Open SOC console" actionHref="#soc" />
+          <EmptyState icon={ShieldCheck} title="SOC request not found." body="The requested high-scale item is missing or outside this tenant scope." actionLabel="Open SOC console" actionHref="#internal-soc" />
         </div>
       );
     }
@@ -3646,7 +3333,7 @@ export function DetailRoutePage({
       );
     }
     return (
-      <TargetGroupDetailView
+      <TargetGroupDetailViewRevamp
         entity={entity}
         entityId={entityId}
         data={data}
@@ -3677,38 +3364,6 @@ export function DetailRoutePage({
         actionHref: '#agents',
         icon: Bot
       },
-      'waf-asset-detail': {
-        eyebrow: 'WAF asset posture',
-        title: 'No WAF asset selected.',
-        body: 'Open an asset from the list with ?id= or use the Detail link on #waf-posture.',
-        actionLabel: 'Open WAF posture',
-        actionHref: '#waf-posture',
-        icon: ShieldHalf
-      },
-      'cve-detail': {
-        eyebrow: 'CVE pipeline item',
-        title: 'No CVE item selected.',
-        body: 'Open a CVE from the pipeline with ?id= or use the Detail link on #cve-pipeline.',
-        actionLabel: 'Open CVE pipeline',
-        actionHref: '#cve-pipeline',
-        icon: TriangleAlert
-      },
-      'supply-chain-detail': {
-        eyebrow: 'Supply chain risk',
-        title: 'No supply-chain risk selected.',
-        body: 'Open a risk from the list with ?id= or use the Detail link on #supply-chain.',
-        actionLabel: 'Open supply chain',
-        actionHref: '#supply-chain',
-        icon: Network
-      },
-      'discovery-entity': {
-        eyebrow: 'Discovery candidate',
-        title: 'No discovery entity selected.',
-        body: 'Open a candidate from the inbox with ?id= or use the Detail link on #discovery.',
-        actionLabel: 'Open discovery',
-        actionHref: '#discovery',
-        icon: Network
-      },
       'finding-detail': {
         eyebrow: 'Evidence-backed finding',
         title: 'No finding selected.',
@@ -3717,29 +3372,21 @@ export function DetailRoutePage({
         actionHref: '#findings',
         icon: TriangleAlert
       },
-      'evidence-detail': {
-        eyebrow: 'Evidence vault record',
-        title: 'No evidence selected.',
-        body: 'Open a vault record from the list with ?id= or use the View link on #evidence.',
-        actionLabel: 'Open evidence vault',
-        actionHref: '#evidence',
-        icon: FileCheck2
-      },
-      'high-scale-detail': {
-        eyebrow: 'SOC-gated validation',
-        title: 'No high-scale request selected.',
-        body: 'Open a request from the list with ?id= or use the View link on #high-scale.',
-        actionLabel: 'Open high-scale requests',
-        actionHref: '#high-scale',
-        icon: Siren
-      },
-      'soc-request-detail': {
+      'queue-detail': {
         eyebrow: 'SOC execution workspace',
         title: 'No SOC request selected.',
-        body: 'Open a queue item from the SOC console with ?id= or use the View link on #soc.',
+        body: 'Open a queue item from Test runs or the SOC console with ?id=.',
         actionLabel: 'Open SOC console',
-        actionHref: '#soc',
+        actionHref: '#internal-soc',
         icon: ShieldCheck
+      },
+      'target-detail': {
+        eyebrow: 'Declared target',
+        title: 'No target selected.',
+        body: 'Open a target from a target group detail table.',
+        actionLabel: 'Open target groups',
+        actionHref: '#target-groups',
+        icon: Target
       }
     };
     const noSelection = noSelectionByRoute[route];
@@ -3770,10 +3417,6 @@ export function DetailRoutePage({
     const listHrefByRoute: Partial<Record<RouteId, { actionLabel: string; actionHref: string }>> = {
       'run-detail': { actionLabel: 'Open test runs', actionHref: '#runs' },
       'agent-detail': { actionLabel: 'Open agents', actionHref: '#agents' },
-      'waf-asset-detail': { actionLabel: 'Open WAF posture', actionHref: '#waf-posture' },
-      'cve-detail': { actionLabel: 'Open CVE pipeline', actionHref: '#cve-pipeline' },
-      'supply-chain-detail': { actionLabel: 'Open supply chain', actionHref: '#supply-chain' },
-      'discovery-entity': { actionLabel: 'Open discovery', actionHref: '#discovery' }
     };
     const listLink = listHrefByRoute[route];
     return (
@@ -3837,717 +3480,19 @@ export function DetailRoutePage({
     );
   }
 
-  const routeSpecificPostureTabs: RouteId[] = ['supply-chain-detail', 'discovery-entity'];
-  const genericPostureTabs = [
-    { id: 'overview', label: 'Overview' },
-    { id: 'timeline', label: 'Timeline' },
-    { id: 'related', label: 'Related evidence' },
-    { id: 'actions', label: 'Actions' }
-  ];
-  const tabOptions = routeSpecificPostureTabs.includes(route)
-    ? routeTabs(route).map((item) => ({ id: item.id, label: item.label }))
-    : genericPostureTabs;
-  const postureEntityLoading = detailState.loading;
-  const cveAuxBusy = route === 'cve-detail' && cveAuxLoading;
-  const wafUsingStaleFallback = route === 'waf-asset-detail' && Boolean(detailState.error) && entity === wafFallback;
-  const entityTitle = detailEntityTitle(route, entity, entityId);
-
-  const assetWafValidations = route === 'waf-asset-detail'
-    ? data.wafValidations.filter((item) => getString(item, ['waf_asset_id'], '') === entityId)
-    : [];
-  const assetDriftEvents = route === 'waf-asset-detail'
-    ? data.wafDriftEvents.filter((item) => getString(item, ['waf_asset_id'], '') === entityId)
-    : [];
-  const playbookSlices = getNestedArray(cvePlaybook, ['vendor_slices']);
-  const visiblePlaybookSlices = cvePlaybookExpanded ? playbookSlices : playbookSlices.slice(0, 4);
-  const playbookSliceColumns: TableColumn<DataItem>[] = [
-    { key: 'vendor', label: 'Vendor', render: (slice) => getString(slice, ['vendor'], '—') },
-    { key: 'status', label: 'Status', render: (slice) => <StatusBadge value={getString(slice, ['status'], 'draft')} tone={cveStageBadgeTone(getString(slice, ['status'], 'draft'))} fallback="draft" /> },
-    { key: 'action', label: 'Action', render: (slice) => <span className="muted">{getString(slice, ['recommended_action', 'action'], 'Review vendor guidance.')}</span> }
-  ];
-  const phaseAuthorizations = getNestedArray(entity ?? {}, ['phase_authorizations']);
-  const remediationSteps = getNestedArray(entity ?? {}, ['remediation_steps']).map((step) => (
-    typeof step === 'string' ? step : getString(step, ['step', 'description'])
-  )).filter(Boolean);
-
   return (
     <div className="content">
-      <div className="page-head">
-        <div>
-          <DetailEntityHeading route={route} entityId={entityId} title={entityTitle} />
-        </div>
-      </div>
-      {postureEntityLoading ? (
-        <DetailLoadingPlaceholder label={route === 'cve-detail' ? 'Loading CVE detail…' : 'Refreshing entity detail…'} />
-      ) : null}
-      {wafUsingStaleFallback ? (
-        <div className="form-banner error">
-          <strong>Showing cached asset snapshot.</strong> Live asset fetch failed — refresh the portal or retry to load the latest record.
-          <div className="row-actions">
-            <Button size="sm" variant="secondary" disabled={busy !== ''} onClick={() => void onRefresh()}>Retry refresh</Button>
-          </div>
-        </div>
-      ) : null}
-      {(message || error || detailState.error || cveAuxError) && !postureEntityLoading ? (
-        <div className={error || detailState.error || cveAuxError ? 'form-banner error' : 'form-banner'}>
-          {error || detailState.error || cveAuxError || message}
-        </div>
-      ) : null}
-      {!postureEntityLoading && detailState.error && !entity ? (
-        <EmptyState icon={Target} title="Could not load record." body={detailState.error} />
-      ) : null}
-      {!postureEntityLoading && entity ? (
-      <>
-      <Tabs value={tab} options={tabOptions} onChange={setTab} className="tabs-wrap" />
-      {tab === 'overview' ? (
-        <>
-          {route === 'waf-asset-detail' ? (
-            <div className="detail-layout">
-              <Card>
-                <CardHeader>
-                  <CardTitle>WAF effectiveness</CardTitle>
-                  <CardDescription>Edge control posture for this declared asset.</CardDescription>
-                </CardHeader>
-                <CardContent className="kv-list">
-                  <div><span>Control bypass</span><StatusBadge value={getNestedString(entity, ['effectiveness', 'control_bypass_status'], getString(entity, ['control_bypass_status'], 'unknown'))} tone={findingStatusBadgeTone(getNestedString(entity, ['effectiveness', 'control_bypass_status'], getString(entity, ['control_bypass_status'], 'unknown')))} fallback="unknown" /></div>
-                  <div>
-                    <span>Pass rate</span>
-                    <div className="stack-tight">
-                      <strong>{Math.round(getNestedNumber(entity, ['effectiveness', 'scenario_pass_rate'], getNestedNumber(entity, ['scenario_pass_rate'], 0)))}%</strong>
-                      <Progress value={Math.round(getNestedNumber(entity, ['effectiveness', 'scenario_pass_rate'], getNestedNumber(entity, ['scenario_pass_rate'], 0)))} tone={scoreTone(Math.round(getNestedNumber(entity, ['effectiveness', 'scenario_pass_rate'], getNestedNumber(entity, ['scenario_pass_rate'], 0))))} size="sm" />
-                    </div>
-                  </div>
-                  <div><span>Vendor</span><strong>{getString(entity, ['detected_vendor', 'expected_vendor_hint'])}</strong></div>
-                  <div><span>Criticality</span><strong>{getString(entity, ['business_criticality', 'criticality'])}</strong></div>
-                </CardContent>
-              </Card>
-              <Card className="detail-primary">
-                <CardHeader>
-                  <CardTitle>{factorsTitle}</CardTitle>
-                  <CardDescription>{factorsDescription}</CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <FactorPanel factors={factors} emptyTitle={factorsEmptyTitle} emptyBody={factorsEmptyBody} />
-                </CardContent>
-              </Card>
-            </div>
-          ) : null}
-          {route === 'cve-detail' ? (
-            <>
-              <div className="split">
-                <Card>
-                  <CardHeader>
-                    <CardTitle>Pipeline status</CardTitle>
-                    <CardDescription>Triage stage and exposure signals for this CVE item.</CardDescription>
-                  </CardHeader>
-                  <CardContent className="kv-list">
-                    <div><span>Stage</span><StatusBadge value={getString(entity, ['stage'], 'ingest')} tone={cveStageBadgeTone(getString(entity, ['stage'], 'ingest'))} fallback="ingest" /></div>
-                    <div><span>Severity</span><StatusBadge value={getString(entity, ['severity'])} tone={findingSeverityBadgeTone(getString(entity, ['severity']))} /></div>
-                    <div><span>Known exploited</span><strong>{entity?.known_exploited === true ? 'yes' : 'no'}</strong></div>
-                    <div><span>CVE ID</span><strong>{getString(entity, ['cve_id', 'id'])}</strong></div>
-                    <div><span>Triage summary</span><strong>{getNestedString(entity, ['triage_result', 'summary'], 'Run triage to populate factors.')}</strong></div>
-                    <div className="row-actions">
-                      <Button size="sm" variant="secondary" loading={busy === `cve-triage-${entityId}`} disabled={busy !== ''} onClick={() => {
-                        if (!window.confirm('Run CVE triage for this pipeline item?')) return;
-                        void runDetailAction(`cve-triage-${entityId}`, () => requestJson(config, session, `/v1/waf/cve-pipeline/${encodeURIComponent(entityId)}/triage`, { method: 'POST', body: {} }), 'CVE item triaged.');
-                      }}>Run triage</Button>
-                      <Button size="sm" variant="ghost" loading={busy === `cve-match-${entityId}` || cveAuxLoading} disabled={busy !== '' || cveAuxLoading} onClick={() => void runCveAssetMatch()}>Match assets</Button>
-                    </div>
-                  </CardContent>
-                </Card>
-                <Card aria-busy={cveAuxBusy || undefined}>
-                  <CardHeader>
-                    <CardTitle>Asset matches</CardTitle>
-                    <CardDescription>Declared asset correlation for this CVE item.</CardDescription>
-                  </CardHeader>
-                  <CardContent>
-                    {cveAuxBusy ? (
-                      <div className="kv-list" aria-label="Loading asset matches">
-                        <DetailKvSkeletonRows rows={3} />
-                      </div>
-                    ) : null}
-                    {!cveAuxBusy && cveMatches.length === 0 ? (
-                      <div className="row-actions">
-                        <p className="muted">No asset matches yet.</p>
-                        <Button size="sm" variant="secondary" loading={busy === `cve-match-${entityId}` || cveAuxLoading} disabled={busy !== '' || cveAuxLoading} onClick={() => void runCveAssetMatch()}>Run match</Button>
-                      </div>
-                    ) : null}
-                    {!cveAuxBusy && cveMatches.length > 0 ? (
-                      <div className="kv-list">
-                        {cveMatches.slice(0, 6).map((match, index) => {
-                          const assetId = getString(match, ['asset_id', 'waf_asset_id'], '');
-                          return (
-                            <div key={assetId || String(index)}>
-                              <span>{getString(match, ['asset_display', 'asset_id'], `match-${index + 1}`)}</span>
-                              <strong>
-                                {assetId ? <DetailEntityLink route="waf-asset-detail" id={assetId} label={getString(match, ['match_source'], 'declared')} /> : getString(match, ['match_source'], 'declared')}
-                              </strong>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    ) : null}
-                  </CardContent>
-                </Card>
-              </div>
-              {cvePlaybook ? (
-                <Card aria-busy={cveAuxBusy || undefined}>
-                  <CardHeader>
-                    <CardTitle>Mitigation playbook</CardTitle>
-                    <CardDescription>Grouped vendor mitigation slices for this CVE.</CardDescription>
-                  </CardHeader>
-                  <CardContent className="stack-tight">
-                    <div className="kv-list">
-                      <div><span>Status</span><StatusBadge value={getString(cvePlaybook, ['status'], 'draft')} tone={cveStageBadgeTone(getString(cvePlaybook, ['status'], 'draft'))} fallback="draft" /></div>
-                      <div><span>CVE</span><strong>{getString(cvePlaybook, ['cve_id'], getString(entity, ['cve_id']))}</strong></div>
-                      <div><span>Vendor slices</span><strong>{playbookSlices.length}</strong></div>
-                    </div>
-                    {cveAuxBusy ? <DetailKvSkeletonRows rows={2} /> : null}
-                    {!cveAuxBusy && visiblePlaybookSlices.length > 0 ? (
-                      <DataTable columns={playbookSliceColumns} items={visiblePlaybookSlices} empty={<p className="muted">No vendor slices.</p>} />
-                    ) : null}
-                    {!cveAuxBusy && playbookSlices.length > 4 ? (
-                      <Button size="sm" variant="ghost" onClick={() => setCvePlaybookExpanded((value) => !value)}>
-                        {cvePlaybookExpanded ? 'Show fewer slices' : `Show all ${playbookSlices.length} slices`}
-                      </Button>
-                    ) : null}
-                  </CardContent>
-                </Card>
-              ) : null}
-            </>
-          ) : null}
-          {route === 'supply-chain-detail' ? (
-            <div className="detail-layout">
-              <Card>
-                <CardHeader>
-                  <CardTitle>Risk status</CardTitle>
-                  <CardDescription>Exposure state and confidence for this supply-chain record.</CardDescription>
-                </CardHeader>
-                <CardContent className="kv-list">
-                  <div><span>State</span><StatusBadge value={getString(entity, ['state'], 'suspected')} tone={supplyChainStateBadgeTone(getString(entity, ['state'], 'suspected'))} fallback="suspected" /></div>
-                  <div><span>Severity</span><StatusBadge value={getString(entity, ['severity'])} tone={findingSeverityBadgeTone(getString(entity, ['severity']))} /></div>
-                  <div><span>Confidence</span><strong>{Math.round(getNestedNumber(entity, ['confidence'], 0) * 100)}%</strong></div>
-                  <div><span>Hostname</span><strong>{getString(entity, ['hostname', 'id'])}</strong></div>
-                  <div><span>Exposure type</span><strong>{supplyChainExposureLabel(getString(entity, ['exposure_type']))}</strong></div>
-                  <div><span>Remediation steps</span>
-                    {remediationSteps.length > 0 ? (
-                      <div className="queue-list">
-                        {remediationSteps.map((step, index) => (
-                          <div key={step}>
-                            <span>{index + 1}</span>
-                            <div><strong>{step}</strong></div>
-                          </div>
-                        ))}
-                      </div>
-                    ) : <strong>No steps recorded.</strong>}
-                  </div>
-                  {phaseAuthorizations.length > 0 ? (
-                    <div><span>Authorizations</span><strong>{phaseAuthorizations.length} phase records</strong></div>
-                  ) : null}
-                </CardContent>
-              </Card>
-              <Card className="detail-primary">
-                <CardHeader>
-                  <CardTitle>{factorsTitle}</CardTitle>
-                  <CardDescription>{factorsDescription}</CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <FactorPanel factors={factors} emptyTitle={factorsEmptyTitle} emptyBody={factorsEmptyBody} />
-                </CardContent>
-              </Card>
-            </div>
-          ) : null}
-          {route === 'discovery-entity' ? (
-            <Card>
-              <CardHeader>
-                <CardTitle>Discovery decision trail</CardTitle>
-                <CardDescription>Approval-gated candidate metadata only.</CardDescription>
-              </CardHeader>
-              <CardContent className="kv-list">
-                <div><span>State</span><StatusBadge value={getString(entity, ['state'])} tone={discoveryEntityStateBadgeTone(getString(entity, ['state']))} /></div>
-                <div>
-                  <span>Confidence</span>
-                  <div className="stack-tight">
-                    <strong title="Discovery source confidence score">{formatConfidencePercent(entity)}</strong>
-                    <Progress
-                      value={Math.round(getNestedNumber(entity, ['confidence'], 0) * 100)}
-                      tone={scoreTone(Math.round(getNestedNumber(entity, ['confidence'], 0) * 100))}
-                      size="sm"
-                    />
-                  </div>
-                </div>
-                <div><span>Entity type</span><strong>{getString(entity, ['entity_type', 'candidate_type', 'type'])}</strong></div>
-                <div><span>Source</span><strong>{getString(entity, ['source_type', 'source_summary'], 'declared')}</strong></div>
-              </CardContent>
-            </Card>
-          ) : null}
-          {route !== 'waf-asset-detail' && route !== 'supply-chain-detail' && route !== 'cve-detail' && route !== 'discovery-entity' && factors.length > 0 ? (
-            <div className="detail-layout">
-              <Card className="detail-primary">
-                <CardHeader>
-                  <CardTitle>{factorsTitle}</CardTitle>
-                  <CardDescription>{factorsDescription}</CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <FactorPanel factors={factors} emptyTitle={factorsEmptyTitle} emptyBody={factorsEmptyBody} />
-                </CardContent>
-              </Card>
-            </div>
-          ) : null}
-        </>
-      ) : null}
-      {tab === 'remediation' && route === 'supply-chain-detail' ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>Remediation plan</CardTitle>
-            <CardDescription>Track execution context — step text lives on the Overview tab.</CardDescription>
-          </CardHeader>
-          <CardContent className="stack-tight">
-            {remediationSteps.length > 0 ? (
-              <>
-                <p className="muted">{remediationSteps.length} remediation step{remediationSteps.length === 1 ? '' : 's'} summarized on Overview.</p>
-                <Button size="sm" variant="ghost" type="button" onClick={() => setTab('overview')}>View steps on Overview</Button>
-              </>
-            ) : <p className="muted">No remediation steps recorded.</p>}
-          </CardContent>
-        </Card>
-      ) : null}
-      {tab === 'authorization' && route === 'supply-chain-detail' ? (
-        <>
-          <Card>
-            <CardHeader><CardTitle>Phase authorizations</CardTitle></CardHeader>
-            <CardContent>
-              {phaseAuthorizations.length === 0 ? <p className="muted">No phase authorizations recorded.</p> : (
-                <div className="kv-list">
-                  {phaseAuthorizations.map((auth, index) => (
-                    <div key={getString(auth, ['id'], String(index))}>
-                      <span>{SUPPLY_CHAIN_PHASE_LABELS[getString(auth, ['target_phase'], '')]?.label ?? getString(auth, ['target_phase'])}</span>
-                      <strong>{formatDate(auth.customer_signed_at ?? auth.created_at)}</strong>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader><CardTitle>Authorize phase</CardTitle><CardDescription>Review fields and attest before recording phase authorization.</CardDescription></CardHeader>
-            <CardContent className="stack-tight">
-              <div className="form-actions">
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  loading={busy === `supply-state-${entityId}`}
-                  disabled={busy !== '' || supplyPhaseAttest}
-                  title={supplyPhaseAttest ? 'Complete phase attestation below before confirming risk separately.' : undefined}
-                  onClick={() => {
-                    if (!window.confirm('Confirm this supply-chain risk? State will move to confirmed and may trigger remediation workflows.')) return;
-                    void runDetailAction(`supply-state-${entityId}`, () => requestJson(config, session, `/v1/waf/supply-chain/risks/${encodeURIComponent(entityId)}/state`, { method: 'PATCH', body: { state: 'confirmed' } }), 'Risk state updated.');
-                  }}
-                >
-                  Confirm risk
-                </Button>
-              </div>
-              <form
-                className="product-form compact"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  if (!supplyPhaseAttest) {
-                    setError('Check the attestation box before authorizing a phase.');
-                    return;
-                  }
-                  const form = new FormData(event.currentTarget);
-                  const targetPhase = supplyTargetPhase;
-                  const approvalRef = String(form.get('customer_approval_reference') ?? '').trim();
-                  const custodyId = String(form.get('custody_id') ?? '').trim();
-                  const workflowOwner = String(form.get('manual_workflow_owner') ?? '').trim();
-                  if (!approvalRef || !custodyId || !workflowOwner) {
-                    setError('Approval reference, custody id, and workflow owner are required.');
-                    return;
-                  }
-                  const phaseLabel = SUPPLY_CHAIN_PHASE_LABELS[targetPhase]?.label ?? targetPhase;
-                  if (!window.confirm(`Authorize ${phaseLabel} for this risk?`)) return;
-                  void runDetailAction(`supply-phase-${entityId}`, () => requestJson(config, session, `/v1/waf/supply-chain/risks/${encodeURIComponent(entityId)}/phase-authorization`, {
-                    method: 'POST',
-                    body: {
-                      target_phase: targetPhase,
-                      customer_approval_reference: approvalRef,
-                      customer_signed_at: new Date().toISOString(),
-                      custody_ids: [custodyId],
-                      manual_workflow_owner: workflowOwner
-                    }
-                  }), 'Phase authorization recorded.');
-                }}
-              >
-                <Select
-                  className="inline-select-control"
-                  label="Target phase"
-                  value={supplyTargetPhase}
-                  onChange={setSupplyTargetPhase}
-                  options={Object.entries(SUPPLY_CHAIN_PHASE_LABELS).map(([value, meta]) => ({
-                    value,
-                    label: meta.label,
-                    description: meta.description
-                  }))}
-                />
-                <label><span>Approval reference</span><input name="customer_approval_reference" placeholder="ticket-123" required /></label>
-                <label><span>Custody ID</span><input name="custody_id" placeholder={`custody_${entityId}`} required /></label>
-                <label><span>Workflow owner</span><input name="manual_workflow_owner" placeholder="owner@customer.example" required /></label>
-                <label className="auth-check-row">
-                  <input type="checkbox" checked={supplyPhaseAttest} onChange={(event) => setSupplyPhaseAttest(event.target.checked)} />
-                  <span>I attest this phase authorization is approved by the customer.</span>
-                </label>
-                <div className="form-actions"><Button size="sm" type="submit" loading={busy === `supply-phase-${entityId}`} disabled={busy !== '' || !supplyPhaseAttest}>Authorize phase</Button></div>
-              </form>
-            </CardContent>
-          </Card>
-        </>
-      ) : null}
-      {tab === 'audit' && route === 'supply-chain-detail' ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>Authorization audit trail</CardTitle>
-            <CardDescription>Customer-signed phase authorizations and custody references.</CardDescription>
-          </CardHeader>
-          <CardContent className="stack-tight">
-            {phaseAuthorizations.length === 0 ? <p className="muted">No phase authorizations recorded yet.</p> : (
-              <div className="queue-list">
-                {phaseAuthorizations.map((auth, index) => (
-                  <div key={getString(auth, ['id'], String(index))}>
-                    <span>{index + 1}</span>
-                    <div>
-                      <strong>{SUPPLY_CHAIN_PHASE_LABELS[getString(auth, ['target_phase'], '')]?.label ?? getString(auth, ['target_phase'])}</strong>
-                      <p className="muted small">Signed {formatDate(auth.customer_signed_at ?? auth.created_at)}</p>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-            {getNestedArray(entity, ['custody_ids']).length > 0 ? (
-              <div className="kv-list kv-list--compact">
-                {getNestedArray(entity, ['custody_ids']).map((custodyId, index) => (
-                  <div key={String(custodyId) || String(index)}>
-                    <span>Custody id</span><strong>{String(custodyId)}</strong>
-                  </div>
-                ))}
-              </div>
-            ) : null}
-          </CardContent>
-        </Card>
-      ) : null}
-      {tab === 'decision' && route === 'discovery-entity' ? (
-        <>
-          <Card>
-            <CardHeader><CardTitle>Decision trail</CardTitle></CardHeader>
-            <CardContent className="kv-list">
-              <div><span>State</span><StatusBadge value={getString(entity, ['state'])} tone={discoveryEntityStateBadgeTone(getString(entity, ['state']))} /></div>
-              <div><span>Approver</span><strong>{getString(entity, ['approved_by', 'decision_by'], '—')}</strong></div>
-              <div><span>Target group</span><strong>{getString(entity, ['target_group_id', 'approved_target_group_id'], '—')}</strong></div>
-              <div><span>Import outcome</span><strong>{getString(entity, ['import_status', 'approved_target_id'], '—')}</strong></div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader><CardTitle>Timeline</CardTitle></CardHeader>
-            <CardContent>
-              <TimelinePanel items={timeline} />
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader><CardTitle>Review actions</CardTitle><CardDescription>Approve, reject, or import without returning to the list queue.</CardDescription></CardHeader>
-            <CardContent>
-              <form
-                className="product-form compact"
-                onSubmit={(event) => event.preventDefault()}
-              >
-                <Select
-                  className="inline-select-control"
-                  label="Approve into target group"
-                  value={discoveryApproveTg}
-                  onChange={setDiscoveryApproveTg}
-                  options={[
-                    { value: '', label: 'Select target group' },
-                    ...data.targetGroups.map((group) => ({
-                      value: getString(group, ['id']),
-                      label: getString(group, ['name', 'id'])
-                    }))
-                  ]}
-                />
-                <div className="form-actions">
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    type="button"
-                    loading={busy === `approve-${entityId}`}
-                    disabled={busy !== '' || !discoveryApproveTg}
-                    onClick={() => {
-                      if (!window.confirm('Approve this discovery candidate into the selected target group?')) return;
-                      void runDetailAction(`approve-${entityId}`, () => requestJson(config, session, `/v1/discovery/candidates/${entityId}/approve`, {
-                        method: 'POST',
-                        body: { target_group_id: discoveryApproveTg }
-                      }), 'Candidate approved.');
-                    }}
-                  >
-                    Approve
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    type="button"
-                    loading={busy === `reject-${entityId}`}
-                    disabled={busy !== ''}
-                    onClick={() => {
-                      if (!window.confirm('Reject this discovery candidate? It will not be added to scope.')) return;
-                      void runDetailAction(`reject-${entityId}`, () => requestJson(config, session, `/v1/discovery/candidates/${entityId}/reject`, {
-                        method: 'POST',
-                        body: { reason: 'not_in_scope' }
-                      }), 'Candidate rejected.');
-                    }}
-                  >
-                    Reject
-                  </Button>
-                </div>
-                <Select
-                  className="inline-select-control"
-                  label="Import into target group"
-                  value={discoveryImportTg}
-                  onChange={setDiscoveryImportTg}
-                  options={[
-                    { value: '', label: 'Select target group for import' },
-                    ...data.targetGroups.map((group) => ({
-                      value: getString(group, ['id']),
-                      label: getString(group, ['name', 'id'])
-                    }))
-                  ]}
-                />
-                <div className="form-actions">
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    type="button"
-                    loading={busy === `import-${entityId}`}
-                    disabled={busy !== '' || !discoveryImportTg}
-                    onClick={() => {
-                      if (!window.confirm('Import this candidate into the declared target group? This may create targets and WAF assets.')) return;
-                      void runDetailAction(`import-${entityId}`, () => requestJson(config, session, `/v1/discovery/candidates/${entityId}/import`, {
-                        method: 'POST',
-                        body: { target_group_id: discoveryImportTg, create_waf_asset: true }
-                      }), 'Candidate imported into declared target group.');
-                    }}
-                  >
-                    Import to target group
-                  </Button>
-                </div>
-              </form>
-            </CardContent>
-          </Card>
-        </>
-      ) : null}
-      {tab === 'scope-impact' && route === 'discovery-entity' ? (
-        <Card>
-          <CardHeader><CardTitle>Scope impact</CardTitle></CardHeader>
-            <CardContent className="kv-list">
-            <div><span>Canonical URL</span><strong>{getString(entity, ['canonical_url', 'hostname', 'value']) || '—'}</strong></div>
-            <div><span>Entity type</span><strong>{getString(entity, ['entity_type', 'candidate_type', 'type'])}</strong></div>
-            {getString(entity, ['canonical_url', 'hostname', 'value']) ? (
-              <AnchorButton size="sm" variant="secondary" href="#target-groups">Review declared target groups</AnchorButton>
-            ) : (
-              <p className="muted small">No canonical URL on record yet. Approve or import to attach scope.</p>
-            )}
-          </CardContent>
-        </Card>
-      ) : null}
-      {tab === 'timeline' ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>Timeline</CardTitle>
-            <CardDescription>Recorded milestones for this entity.</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <TimelinePanel items={timeline} />
-          </CardContent>
-        </Card>
-      ) : null}
-      {tab === 'related' ? (
-        <div className="split">
-          <Card>
-            <CardHeader>
-              <CardTitle>{route === 'supply-chain-detail' ? 'Linked custody' : 'Related evidence'}</CardTitle>
-              <CardDescription>
-                {route === 'waf-asset-detail'
-                  ? 'Validations and drift tied to this asset.'
-                  : route === 'supply-chain-detail'
-                    ? 'DNS/host metadata and custody references on this risk.'
-                    : 'Live counts and links from the current workspace payload.'}
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="kv-list">
-              {route === 'waf-asset-detail' ? (
-                <>
-                  <div><span>Validations</span><strong>{assetWafValidations.length}</strong></div>
-                  {assetWafValidations.slice(0, 5).map((validation, index) => (
-                    <div key={getString(validation, ['id'], String(index))}>
-                      <span>{getString(validation, ['status'], 'validation')}</span>
-                      <strong>{formatDate(validation.created_at ?? validation.updated_at)}</strong>
-                    </div>
-                  ))}
-                  <div><span>Drift events</span><strong>{assetDriftEvents.length}</strong></div>
-                  {assetDriftEvents.slice(0, 5).map((drift, index) => (
-                    <div key={getString(drift, ['id'], String(index))}>
-                      <span>{getString(drift, ['status'], 'drift')}</span>
-                      <strong>{formatDate(drift.detected_at ?? drift.updated_at)}</strong>
-                    </div>
-                  ))}
-                </>
-              ) : route === 'supply-chain-detail' ? (
-                <>
-                  <div><span>Hostname</span><strong>{getString(entity, ['hostname'])}</strong></div>
-                  <div><span>Exposure</span><strong>{getString(entity, ['exposure_type'])}</strong></div>
-                  <div><span>State</span><StatusBadge value={getString(entity, ['state'], 'suspected')} tone={supplyChainStateBadgeTone(getString(entity, ['state'], 'suspected'))} fallback="suspected" /></div>
-                  <div><span>Phase authorizations</span><strong>{phaseAuthorizations.length}</strong></div>
-                  <AnchorButton size="sm" variant="secondary" href="#supply-chain">Open supply-chain list</AnchorButton>
-                </>
-              ) : (
-                <>
-                  <div><span>Runs</span><strong>{relatedRuns.length}</strong></div>
-                  <div><span>Findings</span><strong>{relatedFindings.length}</strong></div>
-                  <div><span>Agents</span><strong>{relatedAgents.length}</strong></div>
-                  <div><span>Evidence</span><strong>{relatedEvidence.length}</strong></div>
-                  <div><span>Targets</span><strong>{targets.length}</strong></div>
-                  {relatedEvidence.slice(0, 5).map((item, index) => {
-                    const evidenceId = getString(item, ['id'], '');
-                    return (
-                      <div key={evidenceId || String(index)}>
-                        <span>{getString(item, ['kind', 'signal_type'], 'evidence')}</span>
-                        <strong>
-                          {evidenceId ? <DetailEntityLink route="evidence-detail" id={evidenceId} label={evidenceId} /> : '—'}
-                        </strong>
-                      </div>
-                    );
-                  })}
-                </>
-              )}
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader>
-              <CardTitle>Linked records</CardTitle>
-              <CardDescription>Open related runs, findings, and agents.</CardDescription>
-            </CardHeader>
-            <CardContent className="row-actions">
-              {relatedRuns.slice(0, 4).map((run) => (
-                <AnchorButton key={getString(run, ['id'], '')} size="sm" variant="secondary" href={buildDetailHref('run-detail', getString(run, ['id'], ''))}>
-                  Run {getString(run, ['check_id'], getString(run, ['id'], ''))}
-                </AnchorButton>
-              ))}
-              {relatedAgents.slice(0, 3).map((agent) => (
-                <AnchorButton key={getString(agent, ['id'], '')} size="sm" variant="ghost" href={buildDetailHref('agent-detail', getString(agent, ['id'], ''))}>
-                  Agent {getString(agent, ['hostname', 'id'], '')}
-                </AnchorButton>
-              ))}
-              <AnchorButton size="sm" variant="ghost" href="#findings">Open findings</AnchorButton>
-              <AnchorButton size="sm" variant="ghost" href="#evidence">Open evidence</AnchorButton>
-            </CardContent>
-          </Card>
-        </div>
-      ) : null}
-      {tab === 'actions' ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>Entity actions</CardTitle>
-            <CardDescription>Route-specific actions for this record.</CardDescription>
-          </CardHeader>
-          <CardContent>
-            {route === 'waf-asset-detail' ? (
-              <form
-                className="product-form compact"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  if (!window.confirm('Create a WAF exception? Findings may be suppressed until the exception expires.')) return;
-                  const owner = wafExceptionOwner.trim() || 'edge-team';
-                  const reason = wafExceptionReason.trim() || 'approved_scope_exception';
-                  void runDetailAction(`waf-exception-${entityId}`, () => requestJson(config, session, `/v1/waf/assets/${encodeURIComponent(entityId)}/exception`, {
-                    method: 'POST',
-                    body: {
-                      owner,
-                      reason,
-                      expires_at: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString()
-                    }
-                  }), 'WAF exception recorded.');
-                }}
-              >
-                <div className="form-actions">
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    type="button"
-                    loading={busy === `waf-validate-${entityId}`}
-                    disabled={busy !== ''}
-                    onClick={() => {
-                      if (!window.confirm('Start a safe WAF validation for this asset? This records marker observations only.')) return;
-                      void runDetailAction(`waf-validate-${entityId}`, () => requestJson(config, session, '/v1/waf/validations', {
-                        method: 'POST',
-                        body: { waf_asset_id: entityId, modes: ['marker'] }
-                      }), 'Safe WAF validation started.');
-                    }}
-                  >
-                    Run validation
-                  </Button>
-                  <AnchorButton size="sm" variant="ghost" href="#waf-posture">Open WAF posture</AnchorButton>
-                </div>
-                <label><span>Exception owner</span><input value={wafExceptionOwner} onChange={(event) => setWafExceptionOwner(event.target.value)} placeholder="edge-team" /></label>
-                <label><span>Reason</span><input value={wafExceptionReason} onChange={(event) => setWafExceptionReason(event.target.value)} placeholder="approved_scope_exception" /></label>
-                <div className="form-actions">
-                  <Button size="sm" type="submit" variant="ghost" loading={busy === `waf-exception-${entityId}`} disabled={busy !== ''}>Create exception</Button>
-                </div>
-              </form>
-            ) : null}
-            {route !== 'waf-asset-detail' ? (
-              <div className="row-actions">
-                {route === 'cve-detail' ? (
-                  <>
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      loading={busy === `cve-triage-${entityId}`}
-                      disabled={busy !== ''}
-                      onClick={() => {
-                        if (!window.confirm('Run CVE triage for this pipeline item?')) return;
-                        void runDetailAction(`cve-triage-${entityId}`, () => requestJson(config, session, `/v1/waf/cve-pipeline/${encodeURIComponent(entityId)}/triage`, { method: 'POST', body: {} }), 'CVE item triaged.');
-                      }}
-                    >
-                      Run triage
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      loading={busy === `cve-validate-${entityId}`}
-                      disabled={busy !== ''}
-                      onClick={() => {
-                        if (!window.confirm('Validate exposure for this CVE item with safe checks?')) return;
-                        void runDetailAction(`cve-validate-${entityId}`, () => requestJson(config, session, `/v1/waf/cve-pipeline/${encodeURIComponent(entityId)}/validate`, { method: 'POST' }), 'Safe validation delegated.');
-                      }}
-                    >
-                      Validate exposure
-                    </Button>
-                    <Button size="sm" variant="ghost" loading={busy === `cve-match-${entityId}` || cveAuxLoading} disabled={busy !== '' || cveAuxLoading} onClick={() => void runCveAssetMatch()}>Run asset match</Button>
-                    <AnchorButton size="sm" variant="ghost" href="#cve-pipeline">Open CVE pipeline</AnchorButton>
-                  </>
-                ) : null}
-                {route === 'supply-chain-detail' ? (
-                  <AnchorButton size="sm" variant="ghost" href="#supply-chain">Open supply chain</AnchorButton>
-                ) : null}
-                {route === 'discovery-entity' ? (
-                  <AnchorButton size="sm" variant="secondary" href={`#discovery?id=${encodeURIComponent(entityId)}`}>Open discovery queue</AnchorButton>
-                ) : null}
-              </div>
-            ) : null}
-          </CardContent>
-        </Card>
-      ) : null}
-      </>
-      ) : null}
-
+      <DetailPageIntro route={route} eyebrow="Detail surface" />
+      <EmptyState
+        icon={Target}
+        title="Unsupported detail route."
+        body="This detail view is not available in the revamp navigation."
+        actionLabel="Open dashboard"
+        actionHref="#dashboard"
+      />
     </div>
   );
+
 }
 
 export function ReportDetailPage({

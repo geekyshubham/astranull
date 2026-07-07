@@ -33,6 +33,42 @@ The goal is not just visual parity. A route is complete only when widgets render
 | Account | `/settings`, `/support`, `/subscription` | Complete for current slice |
 | Staff | `/admin`, `/internal-soc`, `/tenant-detail` | Complete for current slice |
 
+## Portal revamp 2026-07 — route disposition
+
+The 2026-07 portal revamp (see [`ux/14-portal-revamp-2026-07.md`](ux/14-portal-revamp-2026-07.md)) is a planned IA change layered on top of the "React-current" audit below. Once the revamp lands, the table below will be re-baselined against the new 29-route surface. Until then, every row still reflects **the current 44-route React implementation**; this table names the target disposition per route so implementers can plan without re-reading the spec.
+
+| Current route | Revamp disposition | New home |
+|---|---|---|
+| `/`, `/login`, `/signup`, `/signup-status`, `/internal/admin/login` | **Keep** | — |
+| `/app`, `/dashboard` | **Keep + consolidate** | Delete "Business services" + "Evidence feed" tabs; add "WAF summary" panel to Overview; keep "Risk trends" tab |
+| `/onboarding` | **Delete** | Setup ladder moves to `target-group-detail`; install + first heartbeat lives on `/agents` and `/agent-detail` |
+| `/environments` | **Keep** | Add Open findings column |
+| `/target-groups`, `/target-group-detail` | **Keep + major rewrite** | New ownership ladder, DNS TXT panel, provider inventory picker, LOA sign flow, findings-by-target table; Targets rows deep-link to new `/target-detail` |
+| (new) `/target-detail` | **Add** | Per-target checks, runs, findings, WAF posture (merges deleted `/waf-asset-detail` per-target content) |
+| `/agents`, `/agent-detail` | **Keep + rewrite** | 8-tab install matrix on `/agents`; Heartbeat verification + Placement test panels move to `/agent-detail` |
+| `/checks`, `/test-policies`, `/runs`, `/run-detail` | **Keep** | Test policies gets a multi-select target-group picker; Runs gets an inline SOC-gated queue |
+| `/findings`, `/finding-detail` | **Keep + major rewrite** | Filter/sort/pagination toolbar; per-finding Affected targets, Remediation, Evidence bundle, Custody chain panels |
+| `/evidence`, `/evidence-detail` | **Delete** | Evidence rolls into per-finding Evidence bundle + Custody chain panels |
+| `/waf-posture`, `/waf-asset-detail` | **Delete** | Roll-up moves to Dashboard "WAF summary" panel; per-asset detail merges into `/target-detail` |
+| `/cve-pipeline`, `/cve-detail` | **Delete** | Consolidate into per-finding remediation with `remAction: 'cve_patch'` |
+| `/supply-chain`, `/supply-chain-detail` | **Delete** | Consolidate into per-finding remediation with `remAction: 'supply_chain_*'` |
+| `/discovery`, `/discovery-entity` | **Delete** | External-discovery candidates promoted to declared targets appear as new rows in Target group detail with `verify-chip = unverified` |
+| `/remediation` | **Delete** | Every finding carries its own Remediation panel |
+| `/release-evidence` | **Delete** | Auditor `release_evidence:read` role retained; customer-facing surface removed |
+| `/high-scale`, `/high-scale-detail` | **Delete customer view** | Inline SOC-gated queue on `/runs`; queue-detail deep-link reparented to `internal-soc` |
+| `/soc` | **Delete customer view** | Staff SOC console at `/internal-soc` (displayed as "SOC console") is the only SOC surface |
+| `/reports`, `/report-detail` | **Keep** | — |
+| `/integrations` | **Keep + gap-fill** | Add per-connector last-poll state + "Poll now" action; connector CRUD (see backlog §6.2) |
+| `/notifications` | **Keep + gap-fill** | Surface the create-rule form (backend `POST /v1/notifications` is contract-validated) + provider-credentials management |
+| `/audit` | **Keep + gap-fill** | Add filter form + per-entry prev_hash / entry_hash drill-down |
+| `/settings` | **Keep + gap-fill** | Wire the retention inputs to `PATCH /v1/tenants/current`; keep users/SSO as documented boundaries |
+| `/support` | **Keep** | — |
+| `/subscription` | **Rename → Billing** | Route id `subscription` stays; sidebar label becomes "Billing"; icon swap to card/statement mark |
+| `/admin`, `/tenant-detail` | **Keep + gap-fill** | Admin gains Signup queue tab; Tenant detail gains Users tab |
+| `/internal-soc` | **Rename → SOC console** | Route id stays `internal-soc`; sidebar label becomes "SOC console"; queue-detail parent = `internal-soc` |
+
+Post-revamp headline: **29 total routes** (5 public + 20 customer + 4 staff), down from 44. Every remaining route wires to real APIs and includes empty / error / loading / edge states per [`ux/14-portal-revamp-2026-07.md`](ux/14-portal-revamp-2026-07.md) §10 acceptance.
+
 ## Current React Route Audit
 
 | Route/page | Current status | Real-data evidence | Remaining work |

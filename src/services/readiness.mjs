@@ -233,6 +233,10 @@ function scoreSocGovernance(store, tenantId) {
 
 export function computeReadiness(tenantId) {
   const store = getStore();
+  const rollup = store.stateRollups?.[tenantId];
+  if (rollup?.readiness && typeof rollup.readiness === 'object') {
+    return rollup.readiness;
+  }
   const nowMs = Date.now();
   const groups = activeTargetGroupsForTenant(tenantId);
   const agents = store.agents.filter((a) => a.tenant_id === tenantId && a.status !== 'revoked');

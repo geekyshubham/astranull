@@ -1,0 +1,6 @@
+{
+  "HostedZones": [
+    { "Id": "/hostedzone/Z123", "Name": "checkout.acme.com." },
+    { "Id": "/hostedzone/Z456", "Name": "static.acme.com." }
+  ]
+}

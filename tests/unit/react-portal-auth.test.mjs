@@ -118,19 +118,19 @@ describe('react portal route access', () => {
     assert.equal(canAccessRoute('admin', 'notifications'), true);
   });
 
-  it('shows audit and release evidence for auditor roles allowed by backend RBAC', () => {
+  it('shows audit for auditor roles allowed by backend RBAC', () => {
     assert.equal(canAccessRoute('auditor', 'audit'), true);
-    assert.equal(canAccessRoute('auditor', 'release-evidence'), true);
     assert.equal(canAccessRoute('viewer', 'audit'), false);
-    assert.equal(canAccessRoute('viewer', 'release-evidence'), false);
+    assert.equal(canAccessRoute('auditor', 'reports'), true);
+    assert.equal(canAccessRoute('viewer', 'reports'), true);
   });
 
-  it('allows customer SOC route navigation for all roles; SocConsolePage enforces soc actions', () => {
-    assert.equal(canAccessRoute('soc', 'soc'), true);
-    assert.equal(canAccessRoute('admin', 'soc'), true);
-    assert.equal(canAccessRoute('engineer', 'soc'), true);
-    assert.equal(canAccessRoute('viewer', 'soc'), true);
-    assert.equal(canAccessRoute('admin', 'soc', { principal: 'staff' }), false);
+  it('restricts staff SOC console to staff principals with SOC staff roles', () => {
+    assert.equal(canAccessRoute('soc', 'internal-soc', { principal: 'customer' }), false);
+    assert.equal(canAccessRoute('admin', 'internal-soc', { principal: 'customer' }), false);
+    assert.equal(canAccessRoute('viewer', 'internal-soc', { principal: 'customer' }), false);
+    assert.equal(canAccessRoute('admin', 'internal-soc', { principal: 'staff', staffRole: 'soc_analyst' }), true);
+    assert.equal(canAccessRoute('admin', 'internal-soc', { principal: 'staff', staffRole: 'support_engineer' }), false);
   });
 
   it('shows staff SOC surface only for staff principals with SOC staff roles', () => {

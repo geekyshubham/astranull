@@ -1508,6 +1508,20 @@ export function createPostgresWafPostureServices(repositories, options = {}) {
       return items.map((item) => formatConnectorForApi(item));
     },
 
+    async listConnectorsEnvelope(ctx) {
+      const items = await wafRepo.listConnectors(ctx);
+      const formatted = items.map((item) => formatConnectorForApi(item));
+      return {
+        items: formatted,
+        count: formatted.length,
+        meta: {
+          empty_reason: formatted.length
+            ? null
+            : 'No connectors are configured for this tenant.',
+        },
+      };
+    },
+
     async createConnector(ctx, body) {
       try {
         assertNoRawWafEvidence(body);

@@ -1,6 +1,8 @@
 export const DEFAULT_PRIVACY = {
   store_packet_payloads: false,
-  metadata_retention_days: 90,
+  metadata_retention_days: 365,
+  evidence_retention_days: 1825,
+  audit_retention_days: 2555,
   redact_headers_by_default: true,
 };
 
@@ -13,6 +15,12 @@ export const DEFAULT_EVIDENCE_RETENTION = {
 
 export const METADATA_RETENTION_MIN_DAYS = 1;
 export const METADATA_RETENTION_MAX_DAYS = 3650;
+
+export const RETENTION_DAYS_BOUNDS = {
+  metadata_retention_days: { min: 1, max: 3650 },
+  evidence_retention_days: { min: 30, max: 3650 },
+  audit_retention_days: { min: 365, max: 3650 },
+};
 
 export const EVIDENCE_RETENTION_BOUNDS = {
   audit_log_days: { min: 365, max: 3650 },
@@ -56,15 +64,21 @@ export function normalizeEvidenceRetention(input = {}) {
 
 export function normalizePrivacySettings(input = {}) {
   const merged = { ...DEFAULT_PRIVACY, ...(input && typeof input === 'object' ? input : {}) };
-  let days = merged.metadata_retention_days;
-  if (typeof days !== 'number' || !Number.isFinite(days)) {
-    days = DEFAULT_PRIVACY.metadata_retention_days;
-  } else {
-    days = Math.trunc(days);
-    if (days < METADATA_RETENTION_MIN_DAYS) days = METADATA_RETENTION_MIN_DAYS;
-    if (days > METADATA_RETENTION_MAX_DAYS) days = METADATA_RETENTION_MAX_DAYS;
-  }
-  merged.metadata_retention_days = days;
+  merged.metadata_retention_days = clampRetentionDays(
+    merged.metadata_retention_days,
+    DEFAULT_PRIVACY.metadata_retention_days,
+    RETENTION_DAYS_BOUNDS.metadata_retention_days,
+  );
+  merged.evidence_retention_days = clampRetentionDays(
+    merged.evidence_retention_days,
+    DEFAULT_PRIVACY.evidence_retention_days,
+    RETENTION_DAYS_BOUNDS.evidence_retention_days,
+  );
+  merged.audit_retention_days = clampRetentionDays(
+    merged.audit_retention_days,
+    DEFAULT_PRIVACY.audit_retention_days,
+    RETENTION_DAYS_BOUNDS.audit_retention_days,
+  );
   merged.store_packet_payloads = Boolean(merged.store_packet_payloads);
   merged.redact_headers_by_default = merged.redact_headers_by_default !== false;
   merged.evidence_retention = normalizeEvidenceRetention(merged.evidence_retention);

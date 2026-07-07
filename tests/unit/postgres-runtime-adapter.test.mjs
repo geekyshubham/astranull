@@ -57,6 +57,18 @@ import {
   WAF_DRIFT_REPOSITORY_METHODS,
 } from '../../src/persistence/postgres/wafDriftServiceAdapters.mjs';
 import { OWNERSHIP_VERIFICATION_REPOSITORY_METHODS } from '../../src/persistence/postgres/ownershipVerificationServiceAdapters.mjs';
+import { PORTAL_REVAMP_REPOSITORY_METHODS } from '../../src/persistence/postgres/portalRevampRepository.mjs';
+import {
+  POSTGRES_LOA_SERVICE_METHODS,
+  POSTGRES_PORTAL_DNS_SERVICE_METHODS,
+  POSTGRES_PORTAL_FINDINGS_SERVICE_METHODS,
+  POSTGRES_PORTAL_OWNERSHIP_SERVICE_METHODS,
+  POSTGRES_PORTAL_SIGNUP_SERVICE_METHODS,
+  POSTGRES_PORTAL_TARGET_GROUPS_SERVICE_METHODS,
+  POSTGRES_PORTAL_WAF_SERVICE_METHODS,
+  POSTGRES_REMEDIATION_SERVICE_METHODS,
+  POSTGRES_TARGET_DETAIL_SERVICE_METHODS,
+} from '../../src/persistence/postgres/portalRevampServiceAdapters.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -226,6 +238,13 @@ function createHarness(overrides = {}) {
         }
         return repo;
       }
+      if (key === 'portalRevamp') {
+        const repo = {};
+        for (const method of PORTAL_REVAMP_REPOSITORY_METHODS) {
+          repo[method] = async () => null;
+        }
+        return repo;
+      }
       return { key };
     };
   }
@@ -285,6 +304,7 @@ describe('postgres runtime adapter', () => {
       'wafPosture',
       'wafOrchestrator',
       'internalManagement',
+      'portalRevamp',
     ]);
     assert.equal(getDefaultPostgresMigrationsDir(), path.join(ROOT, 'db', 'migrations'));
   });
@@ -395,9 +415,36 @@ describe('postgres runtime adapter', () => {
       assert.equal(typeof runtime.services.wafOrchestrator[method], 'function', method);
     }
     assert.ok(runtime.services.internalManagement);
-    assert.equal(runtime.services.signupIntake, runtime.services.internalManagement);
     for (const method of POSTGRES_INTERNAL_MANAGEMENT_SERVICE_METHODS) {
       assert.equal(typeof runtime.services.internalManagement[method], 'function', method);
+      assert.equal(typeof runtime.services.signupIntake[method], 'function', `signupIntake.${method}`);
+    }
+    for (const method of POSTGRES_PORTAL_SIGNUP_SERVICE_METHODS) {
+      assert.equal(typeof runtime.services.signupIntake[method], 'function', method);
+    }
+    for (const method of POSTGRES_LOA_SERVICE_METHODS) {
+      assert.equal(typeof runtime.services.loa[method], 'function', method);
+    }
+    for (const method of POSTGRES_TARGET_DETAIL_SERVICE_METHODS) {
+      assert.equal(typeof runtime.services.targetDetail[method], 'function', method);
+    }
+    for (const method of POSTGRES_REMEDIATION_SERVICE_METHODS) {
+      assert.equal(typeof runtime.services.remediation[method], 'function', method);
+    }
+    for (const method of POSTGRES_PORTAL_DNS_SERVICE_METHODS) {
+      assert.equal(typeof runtime.services.dnsOwnership[method], 'function', method);
+    }
+    for (const method of POSTGRES_PORTAL_OWNERSHIP_SERVICE_METHODS) {
+      assert.equal(typeof runtime.services.ownershipVerification[method], 'function', method);
+    }
+    for (const method of POSTGRES_PORTAL_FINDINGS_SERVICE_METHODS) {
+      assert.equal(typeof runtime.services.findings[method], 'function', method);
+    }
+    for (const method of POSTGRES_PORTAL_TARGET_GROUPS_SERVICE_METHODS) {
+      assert.equal(typeof runtime.services.targetGroups[method], 'function', method);
+    }
+    for (const method of POSTGRES_PORTAL_WAF_SERVICE_METHODS) {
+      assert.equal(typeof runtime.services.wafPosture[method], 'function', method);
     }
     assert.ok(runtime.services.supplyChainRisk);
     assert.equal(typeof runtime.services.supplyChainRisk.getPhaseAuthorizations, 'function');

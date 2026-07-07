@@ -249,7 +249,7 @@ function safeCheck(def) {
     stop_conditions,
     verdict_logic:
       def.verdict_logic ??
-      'Verdict when probe external_result and agent observation align with target expected_behavior.',
+      'Verdict when probe external_result and agent observation align with the check default_expected_behavior.',
     safety_constraints,
     probe_profile,
     ...def,
@@ -1386,6 +1386,10 @@ export const CHECK_CATALOG = [
 
 export function getCheckById(checkId) {
   return CHECK_CATALOG.find((c) => c.check_id === checkId) ?? null;
+}
+
+export function resolveExpectedBehaviorForCheck(checkId) {
+  return getCheckById(checkId)?.default_expected_behavior ?? 'must_block_before_origin';
 }
 
 export function isCustomerRunnable(check) {

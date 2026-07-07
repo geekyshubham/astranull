@@ -32,6 +32,7 @@ export function isPublicApiRoute(pathname, method) {
   if (method === 'POST' && pathname === '/v1/auth/bundled-staging-login') return true;
   if (method === 'GET' && pathname === '/v1/public/site-config') return true;
   if (method === 'GET' && /^\/v1\/signup-requests\/[^/]+$/.test(pathname)) return true;
+  if (method === 'GET' && /^\/v1\/signup-requests\/[^/]+\/events$/.test(pathname)) return true;
   return false;
 }
 

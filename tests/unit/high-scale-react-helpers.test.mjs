@@ -92,28 +92,32 @@ describe('high-scale react helpers', () => {
   });
 
   it('keeps customer high-scale surfaces free of SOC execution endpoints', () => {
-    // Security invariant: neither the customer high-scale list page nor its
-    // dedicated detail view may call SOC-only execution endpoints. SOC execution
-    // lives exclusively in SocRequestDetailView (staff surface).
-    const listSource = readFileSync(new URL('../../apps/web/react/src/pages/page-components.tsx', import.meta.url), 'utf8');
-    const listPage = listSource.match(/export function HighScalePage[\s\S]*?(?=\nexport function )/)?.[0] ?? '';
-    assert.equal(listPage.includes('/internal/soc/high-scale/'), false);
-    // List page routes to the dedicated request detail page and keeps the SOC governance pointer.
-    assert.ok(listPage.includes("buildDetailHref('high-scale-detail'"));
-    assert.ok(listPage.includes('href="#soc"'));
+    // Security invariant: customer runs SOC-gate panel and queue detail must not
+    // call SOC-only execution endpoints. SOC execution lives on staff surfaces.
+    const runsSocGate = readFileSync(new URL('../../apps/web/react/src/components/runs/runs-soc-gate.tsx', import.meta.url), 'utf8');
+    assert.equal(runsSocGate.includes('/internal/soc/high-scale/'), false);
+    assert.ok(runsSocGate.includes("buildDetailHref('queue-detail'"));
+    assert.ok(runsSocGate.includes('/v1/high-scale-requests'));
 
     const detailSource = readFileSync(new URL('../../apps/web/react/src/pages/detail-pages.tsx', import.meta.url), 'utf8');
-    const detailView = detailSource.match(/function HighScaleDetailView[\s\S]*?(?=\nfunction )/)?.[0] ?? '';
-    // The customer detail view must also stay free of SOC execution endpoints...
-    assert.equal(detailView.includes('/internal/soc/high-scale/'), false);
-    // ...while carrying the customer authorization-pack + lifecycle capability that moved here.
-    assert.ok(detailView.includes('buildLifecycleTimeline'));
-    assert.ok(detailView.includes('explainArtifactReviewStatus'));
-    assert.ok(detailView.includes('authorizationArtifactTypesForRequest'));
-    assert.ok(detailView.includes('buildMetadataArtifactUploadBody'));
-    assert.ok(detailView.includes('/v1/high-scale-requests/'));
-    assert.ok(detailView.includes('custody_id'));
-    assert.ok(detailView.includes('content_sha256'));
-    assert.ok(detailView.includes('filename'));
+    const customerStart = detailSource.indexOf('function HighScaleDetailView(');
+    const customerEnd = detailSource.indexOf('function SocRequestDetailView(', customerStart);
+    const customerDetailView = customerStart >= 0 && customerEnd > customerStart
+      ? detailSource.slice(customerStart, customerEnd)
+      : '';
+    assert.ok(customerDetailView.length > 0, 'HighScaleDetailView should retain customer authorization-pack helpers');
+    assert.equal(customerDetailView.includes('/internal/soc/high-scale/'), false);
+    assert.ok(customerDetailView.includes('buildLifecycleTimeline'));
+    assert.ok(customerDetailView.includes('explainArtifactReviewStatus'));
+    assert.ok(customerDetailView.includes('authorizationArtifactTypesForRequest'));
+    assert.ok(customerDetailView.includes('buildMetadataArtifactUploadBody'));
+    assert.ok(customerDetailView.includes('/v1/high-scale-requests/'));
+    assert.ok(customerDetailView.includes('custody_id'));
+    assert.ok(customerDetailView.includes('content_sha256'));
+    assert.ok(customerDetailView.includes('filename'));
+
+    const staffStart = detailSource.indexOf('function SocRequestDetailView(');
+    assert.ok(staffStart >= 0, 'SocRequestDetailView should exist for queue-detail staff workspace');
+    assert.ok(detailSource.includes("'queue-detail'"));
   });
 });

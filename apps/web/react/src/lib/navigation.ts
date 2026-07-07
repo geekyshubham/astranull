@@ -1,12 +1,9 @@
 import {
   Activity,
   Bell,
-  BookOpenCheck,
   Bot,
-  Boxes,
-  CircleDollarSign,
   ClipboardList,
-  FileCheck2,
+  CreditCard,
   FileText,
   Gauge,
   KeyRound,
@@ -14,20 +11,12 @@ import {
   LayoutDashboard,
   ListChecks,
   LockKeyhole,
-  Network,
-  PanelTop,
   PlugZap,
-  Radar,
-  ScanSearch,
   ServerCog,
   ShieldCheck,
-  ShieldHalf,
-  Siren,
-  SquareKanban,
   Target,
   TriangleAlert,
-  UserCog,
-  Wrench
+  UserCog
 } from 'lucide-react';
 import type { NavItem, RouteId, SurfaceKind } from './types';
 
@@ -35,11 +24,11 @@ export const NAV_GROUP_LABELS: Record<SurfaceKind, string> = {
   overview: 'Overview',
   scope: 'Declared scope',
   validation: 'Validation',
-  posture: 'Posture',
   governance: 'Governance',
   staff: 'Staff'
 };
 
+/** Fifteen customer-visible sidebar items + two staff items (detail routes omitted). */
 export const NAV_ITEMS: NavItem[] = [
   {
     id: 'dashboard',
@@ -47,13 +36,6 @@ export const NAV_ITEMS: NavItem[] = [
     group: 'overview',
     description: 'Readiness score, coverage, vectors, findings, and SOC status.',
     icon: LayoutDashboard
-  },
-  {
-    id: 'onboarding',
-    label: 'Onboarding',
-    group: 'overview',
-    description: 'Guided environment, target group, agent, safe run, and evidence setup.',
-    icon: BookOpenCheck
   },
   {
     id: 'environments',
@@ -64,30 +46,16 @@ export const NAV_ITEMS: NavItem[] = [
   },
   {
     id: 'target-groups',
-    label: 'Target Groups',
+    label: 'Target groups',
     group: 'scope',
     description: 'Customer-declared business services, expected behavior, and owners.',
     icon: Target
-  },
-  {
-    id: 'target-group-detail',
-    label: 'Target Group Detail',
-    group: 'scope',
-    description: 'Per-service tabs for targets, expected behavior, agents, checks, runs, findings, and settings.',
-    icon: PanelTop
   },
   {
     id: 'agents',
     label: 'Agents',
     group: 'scope',
     description: 'Outbound-only observation agents, placement, versions, and health.',
-    icon: Bot
-  },
-  {
-    id: 'agent-detail',
-    label: 'Agent Detail',
-    group: 'scope',
-    description: 'Identity, heartbeat, capabilities, placement evidence, logs, and update history for one outbound agent.',
     icon: Bot
   },
   {
@@ -99,23 +67,16 @@ export const NAV_ITEMS: NavItem[] = [
   },
   {
     id: 'test-policies',
-    label: 'Test Policies',
+    label: 'Test policies',
     group: 'validation',
     description: 'Cadence, expected verdicts, target bindings, safe windows, and high-scale policy gating.',
     icon: ClipboardList
   },
   {
     id: 'runs',
-    label: 'Test Runs',
+    label: 'Test runs',
     group: 'validation',
     description: 'Execution timeline, probe results, agent observations, and verdicts.',
-    icon: Activity
-  },
-  {
-    id: 'run-detail',
-    label: 'Run Detail',
-    group: 'validation',
-    description: 'Timeline, probe result, agent observation, correlation truth table, and evidence chain for one run.',
     icon: Activity
   },
   {
@@ -126,129 +87,10 @@ export const NAV_ITEMS: NavItem[] = [
     icon: TriangleAlert
   },
   {
-    id: 'finding-detail',
-    label: 'Finding Detail',
-    group: 'validation',
-    description: 'Verdict explanation, triage state, SLA, owner workflow, retest, and custody export for one finding.',
-    icon: TriangleAlert
-  },
-  {
-    id: 'evidence',
-    label: 'Evidence Vault',
-    group: 'validation',
-    description: 'Custody-ready evidence, exports, and verdict source material.',
-    icon: FileCheck2
-  },
-  {
-    id: 'evidence-detail',
-    label: 'Evidence Detail',
-    group: 'validation',
-    description: 'Kind, custody digest, linked run and finding context, and export for one vault record.',
-    icon: FileCheck2
-  },
-  {
-    id: 'waf-posture',
-    label: 'WAF Posture',
-    group: 'posture',
-    description: 'Declared WAF assets, coverage rollups, drift visibility, and create actions backed by live APIs.',
-    icon: ShieldHalf
-  },
-  {
-    id: 'waf-asset-detail',
-    label: 'WAF Asset Detail',
-    group: 'posture',
-    description: 'Ruleset effectiveness, bypass classes, drift, exceptions, validation runs, and remediation for one asset.',
-    icon: ShieldHalf
-  },
-  {
-    id: 'cve-pipeline',
-    label: 'CVE Pipeline',
-    group: 'posture',
-    description: 'Live-exposure triage and mitigation workflow for declared assets.',
-    icon: Radar
-  },
-  {
-    id: 'cve-detail',
-    label: 'CVE Detail',
-    group: 'posture',
-    description: 'Triage factors, asset matches, and safe validation actions for one CVE item.',
-    icon: Radar
-  },
-  {
-    id: 'supply-chain',
-    label: 'Supply Chain',
-    group: 'posture',
-    description: 'CNAME, dependency, vendor, and exposure risk tracking.',
-    icon: Boxes
-  },
-  {
-    id: 'supply-chain-detail',
-    label: 'Supply Chain Detail',
-    group: 'posture',
-    description: 'Evidence summary, remediation steps, and state actions for one supply-chain risk.',
-    icon: Boxes
-  },
-  {
-    id: 'remediation',
-    label: 'Remediation',
-    group: 'posture',
-    description: 'Action items, safe retests, SIEM/SOAR previews, and closure paths.',
-    icon: Wrench
-  },
-  {
-    id: 'discovery',
-    label: 'Discovery',
-    group: 'posture',
-    description: 'Approval-gated candidate inbox that never promotes inventory automatically.',
-    icon: ScanSearch
-  },
-  {
-    id: 'discovery-entity',
-    label: 'Discovery Entity',
-    group: 'posture',
-    description: 'Candidate source evidence, confidence, decision trail, promote and dismiss workflow.',
-    icon: Network
-  },
-  {
-    id: 'high-scale',
-    label: 'High-Scale Requests',
-    group: 'governance',
-    description: 'Customer request form, authorization pack, windows, and custody.',
-    icon: Siren
-  },
-  {
-    id: 'high-scale-detail',
-    label: 'High-Scale Request Detail',
-    group: 'governance',
-    description: 'Authorization pack, artifacts, lifecycle trail, and provider checklist for one governed request.',
-    icon: Siren
-  },
-  {
-    id: 'soc',
-    label: 'SOC Console',
-    group: 'governance',
-    description: 'SOC-gated queue, kill switch state, checklists, and execution notes.',
-    icon: ShieldCheck
-  },
-  {
-    id: 'soc-request-detail',
-    label: 'SOC Request Detail',
-    group: 'governance',
-    description: 'SOC execution workspace with queue context, artifacts, adapter telemetry, and notes for one request.',
-    icon: ShieldCheck
-  },
-  {
     id: 'reports',
     label: 'Reports',
     group: 'governance',
     description: 'Executive, technical, SOC, audit, release, and WAF report builders.',
-    icon: FileText
-  },
-  {
-    id: 'report-detail',
-    label: 'Report Detail',
-    group: 'governance',
-    description: 'Report kind, custody preview, export formats, and digest verification for one generated report.',
     icon: FileText
   },
   {
@@ -267,17 +109,10 @@ export const NAV_ITEMS: NavItem[] = [
   },
   {
     id: 'audit',
-    label: 'Audit Log',
+    label: 'Audit log',
     group: 'governance',
     description: 'Tenant actions, security-relevant changes, and custody chain records.',
     icon: ClipboardList
-  },
-  {
-    id: 'release-evidence',
-    label: 'Release Evidence',
-    group: 'governance',
-    description: 'Production-readiness evidence inventory and launch gate visibility.',
-    icon: SquareKanban
   },
   {
     id: 'settings',
@@ -295,35 +130,90 @@ export const NAV_ITEMS: NavItem[] = [
   },
   {
     id: 'subscription',
-    label: 'Subscription',
+    label: 'Billing',
     group: 'governance',
     description: 'Plan, entitlements, limits, billing state, contract references, and effective dates.',
-    icon: CircleDollarSign
+    icon: CreditCard
   },
   {
     id: 'admin',
-    label: 'Admin Console',
+    label: 'Admin console',
     group: 'staff',
     description: 'Internal overview for sign-ups, tenant lifecycle, approvals, support, and internal audit.',
     icon: UserCog
   },
   {
-    id: 'tenant-detail',
-    label: 'Tenant Detail',
-    group: 'staff',
-    description: 'Tenant lifecycle, users, entitlements, notes, support actions, subscriptions, and audit activity.',
-    icon: UserCog
-  },
-  {
     id: 'internal-soc',
-    label: 'Internal SOC',
+    label: 'SOC console',
     group: 'staff',
     description: 'Dedicated staff SOC execution plane with kill switch, Go/No-Go checklist, provider contacts, and timeline.',
     icon: Gauge
   }
 ];
 
-export const ROUTE_BY_ID = new Map<RouteId, NavItem>(NAV_ITEMS.map((item) => [item.id, item]));
+/** Detail routes reachable via deep-link but hidden from the sidebar. */
+export const DETAIL_ROUTE_ITEMS: NavItem[] = [
+  {
+    id: 'target-group-detail',
+    label: 'Target group detail',
+    group: 'scope',
+    description: 'Ownership ladder, DNS TXT, declared targets, findings, and runs for one group.',
+    icon: Target
+  },
+  {
+    id: 'target-detail',
+    label: 'Target detail',
+    group: 'scope',
+    description: 'Per-target checks, runs, findings, WAF posture, and verification ladder.',
+    icon: Target
+  },
+  {
+    id: 'agent-detail',
+    label: 'Agent detail',
+    group: 'scope',
+    description: 'Identity, heartbeat, capabilities, placement evidence, logs, and update history for one outbound agent.',
+    icon: Bot
+  },
+  {
+    id: 'run-detail',
+    label: 'Run detail',
+    group: 'validation',
+    description: 'Timeline, probe result, agent observation, correlation truth table, and evidence chain for one run.',
+    icon: Activity
+  },
+  {
+    id: 'finding-detail',
+    label: 'Finding detail',
+    group: 'validation',
+    description: 'Verdict explanation, triage state, remediation, evidence bundle, and custody export for one finding.',
+    icon: TriangleAlert
+  },
+  {
+    id: 'report-detail',
+    label: 'Report detail',
+    group: 'governance',
+    description: 'Report kind, custody preview, export formats, and digest verification for one generated report.',
+    icon: FileText
+  },
+  {
+    id: 'tenant-detail',
+    label: 'Tenant detail',
+    group: 'staff',
+    description: 'Tenant lifecycle, users, entitlements, notes, support actions, subscriptions, and audit activity.',
+    icon: UserCog
+  },
+  {
+    id: 'queue-detail',
+    label: 'Queue detail',
+    group: 'staff',
+    description: 'SOC execution workspace with queue context, artifacts, adapter telemetry, and notes for one request.',
+    icon: ShieldCheck
+  }
+];
+
+export const ROUTE_BY_ID = new Map<RouteId, NavItem>(
+  [...NAV_ITEMS, ...DETAIL_ROUTE_ITEMS].map((item) => [item.id, item])
+);
 
 function routeIdFromHash(hash: string): RouteId | null {
   const raw = hash.replace(/^#/, '');
@@ -380,7 +270,7 @@ export const STAFF_LINKS = [
     description: 'Staff-only tenant, sign-up, support, and approval management.'
   },
   {
-    label: 'Internal SOC',
+    label: 'SOC console',
     href: '/internal/soc',
     icon: Gauge,
     description: 'Staff execution plane for governed high-scale operations.'

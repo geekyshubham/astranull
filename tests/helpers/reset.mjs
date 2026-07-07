@@ -48,6 +48,18 @@ export function freshStore() {
     notificationEvents: [],
     metrics: null,
     readiness: {},
+    stateRollups: {},
+    loaSignatures: [
+      {
+        id: 'loa_hardening_active',
+        tenant_id: 'ten_demo',
+        target_group_id: 'tg_1',
+        state: 'signed',
+        signer_name: 'Hardening Signer',
+        signer_email: 'signer@example.invalid',
+        signed_at: new Date().toISOString(),
+      },
+    ],
     auditLog: [],
     checkCatalog: CHECK_CATALOG.map((c) => ({ ...c })),
     encryptedSecrets: [],

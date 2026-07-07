@@ -1,3 +1,4 @@
+import { createFixedWindowRateLimiter } from '../lib/rateLimit.mjs';
 import { audit } from '../audit.mjs';
 import {
   canTransitionSignupState,
@@ -14,9 +15,53 @@ import {
 } from './subscriptions.mjs';
 
 const PUBLIC_SIGNUP_RATE = new Map();
+let signupEventsRateLimiter = createFixedWindowRateLimiter({
+  windowMs: 60_000,
+  maxRequests: 12,
+});
+
+const SIGNUP_EVENT_MESSAGE_MAX = 500;
 
 export function resetSignupRateLimitsForTests() {
   PUBLIC_SIGNUP_RATE.clear();
+  signupEventsRateLimiter = createFixedWindowRateLimiter({
+    windowMs: 60_000,
+    maxRequests: 12,
+  });
+}
+
+function ensureSignupEventsStore() {
+  const store = getStore();
+  if (!Array.isArray(store.signupQueueEvents)) store.signupQueueEvents = [];
+  return store;
+}
+
+function truncateSignupMessage(message) {
+  if (message == null) return null;
+  const text = String(message);
+  return text.length > SIGNUP_EVENT_MESSAGE_MAX ? text.slice(0, SIGNUP_EVENT_MESSAGE_MAX) : text;
+}
+
+export function appendSignupQueueEvent({
+  requestId,
+  eventKind,
+  actor = 'system',
+  message = null,
+  tenantId = null,
+  createdAt = new Date().toISOString(),
+}) {
+  const record = {
+    id: newId('sqe'),
+    tenant_id: tenantId,
+    request_id: requestId,
+    event_kind: eventKind,
+    actor,
+    message: truncateSignupMessage(message),
+    created_at: createdAt,
+  };
+  ensureSignupEventsStore().signupQueueEvents.push(record);
+  persistStore();
+  return record;
 }
 
 function checkPublicSignupRate(clientKey, maxPerHour = 20) {
@@ -80,6 +125,13 @@ export function createSignupRequest(body, options = {}) {
     decided_at: null,
   };
   store.signupRequests.push(record);
+  appendSignupQueueEvent({
+    requestId: record.id,
+    eventKind: 'submitted',
+    actor: 'system',
+    message: 'Signup request submitted for review.',
+    createdAt: now,
+  });
   persistStore();
 
   auditInternal({
@@ -145,6 +197,24 @@ function transitionSignup(record, toState, patch = {}) {
   }
   if (['approved', 'rejected', 'provisioned', 'customer_invited'].includes(toState)) {
     record.decided_at = record.updated_at;
+  }
+  const eventKindByState = {
+    under_review: 'review_started',
+    approved: 'approved',
+    rejected: 'rejected',
+    provisioned: 'provisioned',
+    customer_invited: 'provisioned',
+  };
+  const eventKind = eventKindByState[toState];
+  if (eventKind) {
+    appendSignupQueueEvent({
+      requestId: record.id,
+      eventKind,
+      actor: patch.reviewer_staff_id ? `staff:${patch.reviewer_staff_id}` : 'system',
+      message: patch.customer_notice ?? patch.decision_reason ?? null,
+      tenantId: record.provisioned_tenant_id ?? null,
+      createdAt: record.updated_at,
+    });
   }
   persistStore();
   return { request: record };
@@ -300,4 +370,37 @@ export function rejectSignupRequest(staffCtx, id, body = {}) {
   });
 
   return { request: record };
+}
+
+/**
+ * Customer-facing signup queue events (portal revamp §3.9).
+ *
+ * @param {string} requestId
+ */
+export function listEvents(requestId, options = {}) {
+  if (options.rateLimitKey) {
+    const rate = signupEventsRateLimiter.check(options.rateLimitKey);
+    if (!rate.allowed) {
+      return {
+        error: 'rate_limited',
+        status: 429,
+        retry_after_seconds: rate.retryAfterSeconds,
+      };
+    }
+  }
+
+  const events = (getStore().signupQueueEvents ?? [])
+    .filter((row) => row.request_id === requestId)
+    .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))
+    .map((row) => ({
+      ...row,
+      message: truncateSignupMessage(row.message),
+    }));
+  return {
+    events,
+    count: events.length,
+    meta: events.length
+      ? undefined
+      : { empty_reason: 'no_signup_events_recorded', request_id: requestId },
+  };
 }

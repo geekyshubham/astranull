@@ -682,7 +682,7 @@ export function ReleaseEvidencePage({ data, session }: { data: PortalData; sessi
 
   return (
     <div className="content">
-      <PageHeader route="release-evidence" />
+      <PageHeader route="audit" eyebrow="Release evidence" />
       {!allowed ? (
         <EmptyState icon={FileText} title="Release evidence access required." body="Switch to owner, admin, SOC, or auditor role to inspect production release evidence." />
       ) : (
@@ -832,7 +832,7 @@ export function SocConsolePage({
         const packReady = getNestedString(item, ['authorization_pack_status', 'overall'], '') === 'accepted';
         return (
           <div className="stack-tight">
-            <AnchorButton size="sm" variant="secondary" href={buildDetailHref('soc-request-detail', id)}>Open</AnchorButton>
+            <AnchorButton size="sm" variant="secondary" href={buildDetailHref('queue-detail', id)}>Open</AnchorButton>
             {['submitted', 'under_review'].includes(state) && packReady ? (
               <Button
                 size="sm"
@@ -923,8 +923,8 @@ export function SocConsolePage({
     return (
       <div className="content">
         <PageHeader
-          route={staffSocSurface ? 'internal-soc' : 'soc'}
-          eyebrow={staffSocSurface ? 'Staff SOC execution plane' : undefined}
+          route="internal-soc"
+          eyebrow={staffSocSurface ? 'Staff SOC execution plane' : 'SOC execution plane'}
         />
         <div className="stack-tight">
           <EmptyState
@@ -956,7 +956,7 @@ export function SocConsolePage({
   return (
     <div className="content">
       <PageHeader
-        route={staffSocSurface ? 'internal-soc' : 'soc'}
+        route="internal-soc"
         eyebrow="SOC execution plane"
         actions={staffSocSurface ? <Badge tone="warn">Staff plane</Badge> : undefined}
       />

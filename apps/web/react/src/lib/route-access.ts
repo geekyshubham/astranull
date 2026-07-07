@@ -1,6 +1,6 @@
 import type { RouteId } from './types';
 
-const STAFF_SOC_ROLES = new Set(['soc_analyst', 'soc_lead']);
+const STAFF_SOC_ROLES = new Set(['soc_analyst', 'soc_lead', 'admin']);
 
 /**
  * Permission keys used by route gates — keep aligned with `src/contracts/roles.mjs` PERMISSIONS.
@@ -9,7 +9,6 @@ const STAFF_SOC_ROLES = new Set(['soc_analyst', 'soc_lead']);
 const ROUTE_BACKEND_PERMISSIONS: Record<string, readonly string[]> = {
   'notification:read': ['owner', 'admin', 'engineer', 'soc', 'auditor'],
   'audit:read': ['owner', 'admin', 'soc', 'auditor'],
-  'release_evidence:read': ['owner', 'admin', 'soc', 'auditor'],
   'soc:high_scale': ['soc'],
 };
 
@@ -17,11 +16,10 @@ const ROUTE_BACKEND_PERMISSIONS: Record<string, readonly string[]> = {
 const ROUTE_PERMISSION: Partial<Record<RouteId, string>> = {
   notifications: 'notification:read',
   audit: 'audit:read',
-  'release-evidence': 'release_evidence:read',
 };
 
 const STAFF_ONLY_ROUTES = new Set<RouteId>(['admin', 'tenant-detail']);
-const STAFF_SOC_ROUTES = new Set<RouteId>(['internal-soc']);
+const STAFF_SOC_ROUTES = new Set<RouteId>(['internal-soc', 'queue-detail']);
 
 export type RouteAccessContext = {
   principal?: string;
@@ -49,10 +47,6 @@ export function canAccessRoute(
 
   if (STAFF_SOC_ROUTES.has(routeId)) {
     return principal === 'staff' && STAFF_SOC_ROLES.has(staffRole);
-  }
-
-  if ((routeId === 'soc' || routeId === 'soc-request-detail') && principal === 'staff') {
-    return false;
   }
 
   const permission = ROUTE_PERMISSION[routeId];

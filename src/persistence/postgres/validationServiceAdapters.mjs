@@ -3,6 +3,7 @@ import {
   evaluateCheckPrerequisites,
   getCheckById,
   isCustomerRunnable,
+  resolveExpectedBehaviorForCheck,
 } from '../../contracts/checks.mjs';
 import { newId } from '../../lib/ids.mjs';
 import { incMetric } from '../../lib/metrics.mjs';
@@ -435,7 +436,7 @@ export function createPostgresValidationServices(repositories, options = {}) {
     const result = correlateVerdict({
       externalResult: run.probe_external_result ?? probeEvent?.metadata?.external_result,
       agentObserved,
-      expectedBehavior: target?.expected_behavior ?? 'must_block_before_origin',
+      expectedBehavior: resolveExpectedBehaviorForCheck(run.check_id),
       agentOnline: agent?.status === 'online',
       agentBound: Boolean(
         agent && (agent.target_group_id === run.target_group_id || !agent.target_group_id),

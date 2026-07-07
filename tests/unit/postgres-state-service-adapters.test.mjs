@@ -241,7 +241,7 @@ describe('postgres state service adapter', () => {
     assert.equal(payload.recent_runs.length, 5);
     assert.equal(payload.recent_runs[0].id, 'run_5');
     assert.equal(payload.high_scale_requests, 1);
-    assert.equal(payload.high_scale_status, 'available');
+    assert.equal(payload.high_scale_status, 'degraded');
     assert.deepEqual(payload.kill_switch, {
       tenant_id: 'ten_demo',
       active: true,
@@ -279,7 +279,7 @@ describe('postgres state service adapter', () => {
     const payload = await state.getState({ tenantId: 'ten_demo', userId: 'usr_1', role: 'admin' });
     const soc = payload.readiness.factors.find((f) => f.key === 'soc_readiness');
     assert.equal(payload.high_scale_requests, 1);
-    assert.equal(payload.high_scale_status, 'available');
+    assert.equal(payload.high_scale_status, 'pending');
     assert.equal(soc.score, 0);
     assert.match(soc.detail, /Pending high-scale workflow gates remain/);
     assert.match(soc.detail, /SOC approvals 1\/2/);

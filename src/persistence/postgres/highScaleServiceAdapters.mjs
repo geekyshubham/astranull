@@ -282,8 +282,8 @@ export function createPostgresHighScaleServices(repositories, options = {}) {
       return created;
     },
 
-    async listHighScaleRequests(ctx) {
-      return repo.listHighScaleRequests(ctx);
+    async listHighScaleRequests(ctx, options = {}) {
+      return repo.listHighScaleRequests(ctx, options);
     },
 
     async addArtifact(ctx, requestId, body, options = {}) {

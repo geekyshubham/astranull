@@ -1,0 +1,6 @@
+{
+  "domains": [
+    { "domain": "checkout.acme.com", "domainId": "gd_1" },
+    { "domain": "pay.acme.com", "domainId": "gd_2" }
+  ]
+}

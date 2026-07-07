@@ -21,12 +21,16 @@ import {
   TriangleAlert,
   UserCog
 } from 'lucide-react';
-import { ReadinessGauge } from '../components/charts/readiness-gauge';
+import { ReadinessPostureDonut } from '../components/charts/readiness-posture-donut';
+import { WafSummaryPanel } from '../components/dashboard/waf-summary-panel';
 import { ScoreTrend } from '../components/charts/score-trend';
 import { VectorHeatmap } from '../components/charts/vector-heatmap';
 import { Badge } from '../components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
+import { TargetGroupPicker } from '../components/policies/target-group-picker';
 import { EmptyState } from '../components/ui/empty-state';
+import { emptyStateFromApi, readMetaAction } from '../lib/empty-from-api';
+import { ConfirmModal, formatMutationSuccessMessage, renderFriendlyEmptyState } from '../lib/crud-ui';
 import { Progress, type ProgressTone } from '../components/ui/progress';
 import { DataTable, type TableColumn } from '../components/ui/table';
 import { Select, type SelectOption } from '../components/ui/select';
@@ -49,7 +53,7 @@ import { buildDetailHref } from '../lib/route-params';
 import { DEFENSIVE_RULES, ROUTE_BY_ID } from '../lib/navigation';
 import { routeTabs } from '../lib/prototype-manifest';
 import type { DataItem, PortalConfig, PortalData, ReadinessFactor, RouteId, Session } from '../lib/types';
-import { formatDate, formatExpectedBehavior, formatNumber, scoreTone } from '../lib/utils';
+import { formatDate, formatNumber, scoreTone } from '../lib/utils';
 
 function getString(item: DataItem, keys: string[], fallback = '—') {
   for (const key of keys) {
@@ -119,13 +123,6 @@ function scoreProgressTone(score: number): ProgressTone {
   if (score >= 55) return 'warn';
   return 'danger';
 }
-
-const EXPECTED_BEHAVIOR_SELECT_OPTIONS: SelectOption[] = [
-  { value: 'must_block_before_origin', label: 'Must be blocked before origin' },
-  { value: 'must_allow_baseline_health', label: 'Must allow baseline health' },
-  { value: 'must_challenge_or_rate_limit', label: 'Must challenge or rate-limit' },
-  { value: 'must_not_expose_direct_ip', label: 'Must not expose direct IP' }
-];
 
 const TARGET_KIND_SELECT_OPTIONS: SelectOption[] = [
   { value: 'fqdn', label: 'FQDN' },
@@ -240,18 +237,6 @@ function DashboardWorkspaceSkeleton() {
   );
 }
 
-const HIGH_SCALE_CATALOG_LABELS: Record<string, string> = {
-  volumetric_metadata: 'Volumetric (metadata-only catalog)',
-  '500_rps_metadata': 'Up to 500 RPS (metadata catalog)',
-  error_rate_above_5pct: 'Abort if error rate exceeds 5%'
-};
-
-const HIGH_SCALE_CRITICALITY_OPTIONS: SelectOption[] = [
-  { value: 'medium', label: 'Medium' },
-  { value: 'high', label: 'High' },
-  { value: 'critical', label: 'Critical' }
-];
-
 const SUPPORT_CONTACT_MAILTO = 'mailto:support@astranull.example?subject=AstraNull%20support%20request';
 
 function featureEnabled(data: PortalData, key: 'waf_posture' | 'external_discovery' | 'connectors') {
@@ -350,10 +335,10 @@ export function DefensiveRulesPanel() {
   );
 }
 
-type DashboardTabId = 'overview' | 'business-services' | 'risk-trends' | 'evidence-feed';
+type DashboardTabId = 'overview' | 'risk-trends';
 
 const DASHBOARD_TAB_STORAGE_KEY = 'astranull-dashboard-tab';
-const DASHBOARD_TAB_IDS: readonly DashboardTabId[] = ['overview', 'business-services', 'risk-trends', 'evidence-feed'];
+const DASHBOARD_TAB_IDS: readonly DashboardTabId[] = ['overview', 'risk-trends'];
 
 function readDashboardTabId(): DashboardTabId {
   const fromHash = getHashQueryParam('tab');
@@ -466,7 +451,7 @@ function buildDashboardNextSteps(data: PortalData, metrics: ReturnType<typeof re
       key: 'declare-scope',
       title: 'Declare your first target group',
       detail: 'Add the business services you want to validate before any checks can run.',
-      href: '#onboarding',
+      href: '#target-groups',
       tone: 'info'
     });
   }
@@ -475,7 +460,7 @@ function buildDashboardNextSteps(data: PortalData, metrics: ReturnType<typeof re
       key: 'install-agent',
       title: 'Install an outbound observation agent',
       detail: 'Issue a bootstrap token and confirm heartbeat so inside observations correlate with probes.',
-      href: '#onboarding',
+      href: '#target-groups',
       tone: 'info'
     });
   }
@@ -504,7 +489,7 @@ function buildDashboardNextSteps(data: PortalData, metrics: ReturnType<typeof re
       key: 'high-scale-pack',
       title: 'Finish high-scale authorization metadata',
       detail: 'SOC review stays blocked until required authorization artifacts are uploaded.',
-      href: '#high-scale',
+      href: '#runs',
       tone: 'warn'
     });
   }
@@ -555,55 +540,15 @@ export function DashboardPage({ data }: { data: PortalData }) {
     .filter((finding) => getString(finding, ['status'], 'open') === 'open')
     .sort((left, right) => String(left.created_at ?? left.id ?? '').localeCompare(String(right.created_at ?? right.id ?? '')))
     .slice(0, 8);
-  const recentEvidence = [...data.evidence].slice(-5).reverse();
-  const evidenceFeed = evidenceFeedRows(data);
-  const businessServices = businessServiceRows(data);
-  const pendingHighScale = data.highScale
-    .filter((request) => ['submitted', 'under_review', 'approved', 'scheduled'].includes(getString(request, ['state'])))
-    .slice(0, 5);
   const nextSteps = buildDashboardNextSteps(data, metrics);
   const prioritizedNext = nextSteps[0] ?? null;
-  const businessServiceColumns: TableColumn<ReturnType<typeof businessServiceRows>[number]>[] = [
-    {
-      key: 'name',
-      label: 'Service',
-      render: (row) => getString(row.group, ['name', 'id'])
-    },
-    {
-      key: 'environment',
-      label: 'Environment',
-      render: (row) => getString(row.group, ['environment_id'], 'unassigned')
-    },
-    {
-      key: 'owner',
-      label: 'Owner',
-      render: (row) => getString(row.group, ['owner', 'owner_email'], 'unassigned')
-    },
-    {
-      key: 'agents',
-      label: 'Agents',
-      render: (row) => `${row.onlineAgents}/${row.boundAgents} online`
-    },
-    {
-      key: 'runs',
-      label: 'Runs',
-      render: (row) => String(row.completedRuns)
-    },
-    {
-      key: 'findings',
-      label: 'Open findings',
-      render: (row) => String(row.openFindings)
-    },
-    {
-      key: 'actions',
-      label: '',
-      render: (row) => (
-        <AnchorButton size="sm" variant="secondary" href={buildDetailHref('target-group-detail', row.groupId)}>
-          Open
-        </AnchorButton>
-      )
-    }
-  ];
+  const topTargetGroups = [...data.targetGroups]
+    .sort((left, right) => String(right.criticality ?? right.business_criticality ?? '').localeCompare(String(left.criticality ?? left.business_criticality ?? '')))
+    .slice(0, 4);
+  const topAgents = [...data.agents].slice(0, 4);
+  const agentsOnline = metrics.agentsOnline;
+  const agentsTotal = data.agents.length;
+  const lastValidation = recentRuns[0] ? formatDate(recentRuns[0].created_at ?? recentRuns[0].started_at) : '—';
 
   return (
     <div className="content">
@@ -614,31 +559,42 @@ export function DashboardPage({ data }: { data: PortalData }) {
           <DashboardWorkspaceSkeleton />
         ) : (
         <>
-          <div className="dashboard-grid">
-            <Card className="score-card">
-              <CardHeader>
-                <CardTitle>Readiness score</CardTitle>
-                <CardDescription>Evidence-backed score across declared targets.</CardDescription>
-              </CardHeader>
-              <CardContent>
-                {score === null ? (
-                  <EmptyState
-                    icon={Activity}
-                    title="Readiness state unavailable."
-                    body="The dashboard is waiting for the platform to publish an evidence-backed readiness score."
-                  />
-                ) : (
-                  <ReadinessGauge score={score} />
-                )}
-              </CardContent>
-            </Card>
-            <div className="metric-grid">
-              <MetricCard label="Target groups" value={metrics.targetGroups} sub="Customer-declared scope" icon={Target} tone="info" />
-              <MetricCard label="Agents online" value={metrics.agentsOnline} sub="Outbound-only observers" icon={Bot} tone="success" />
-              <MetricCard label="Open findings" value={metrics.openFindings} sub="Evidence-backed gaps" icon={TriangleAlert} tone={metrics.openFindings > 0 ? 'warn' : 'success'} />
-              <MetricCard label="High-scale" value={metrics.highScaleRequests} sub="SOC-gated requests" icon={ShieldCheck} tone="muted" />
-            </div>
+          <div className="metric-grid four">
+            <MetricCard label="Readiness score" value={score ?? '—'} sub="Evidence-backed readiness from state API" icon={Activity} tone={score === null ? 'muted' : 'info'} />
+            <MetricCard label="Open findings" value={metrics.openFindings} sub="Evidence-backed gaps" icon={TriangleAlert} tone={metrics.openFindings > 0 ? 'warn' : 'success'} />
+            <MetricCard label="Agents online" value={`${agentsOnline}/${agentsTotal || agentsOnline}`} sub="Outbound-only observers" icon={Bot} tone="success" />
+            <MetricCard label="Last validation" value={lastValidation} sub={recentRuns[0] ? getString(recentRuns[0], ['id'], 'recent run') : 'No runs yet'} icon={ListChecks} tone="muted" />
           </div>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Readiness posture</CardTitle>
+              <CardDescription>Segmented pass, review, and gap counts from correlated checks.</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <ReadinessPostureDonut state={data.state} runs={data.runs} checks={data.checks} />
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Correlation matrix</CardTitle>
+              <CardDescription>Vector coverage by declared target group.</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <VectorHeatmap checks={data.checks} targetGroups={data.targetGroups} testPolicies={data.testPolicies} runs={data.runs} evidence={data.evidence} />
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>WAF summary</CardTitle>
+              <CardDescription>Rolled up across declared target groups. Per-target detail on the target page.</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <WafSummaryPanel summary={data.wafCoverageSummary} />
+            </CardContent>
+          </Card>
           <Card>
             <CardHeader>
               <CardTitle>What to do next</CardTitle>
@@ -686,8 +642,8 @@ export function DashboardPage({ data }: { data: PortalData }) {
                     icon={FileCheck2}
                     title="No readiness factors returned."
                     body="Factors appear after the platform publishes evidence-backed scoring inputs."
-                    actionLabel="Open onboarding"
-                    actionHref="#onboarding"
+                    actionLabel="Open target groups"
+                    actionHref="#target-groups"
                   />
                 ) : (
                   factors.map((factor: ReadinessFactor) => {
@@ -699,7 +655,7 @@ export function DashboardPage({ data }: { data: PortalData }) {
                           <span>{factor.reason ?? factor.detail ?? 'Awaiting evidence.'}</span>
                         </div>
                         <Badge tone={scoreTone(value)}>{value}%</Badge>
-                        <Progress value={value} tone={scoreProgressTone(value)} />
+                        <Progress value={value} tone={scoreProgressTone(value)} label={factor.label ?? factor.key ?? 'Readiness factor'} />
                       </div>
                     );
                   })
@@ -715,7 +671,7 @@ export function DashboardPage({ data }: { data: PortalData }) {
               </CardHeader>
               <CardContent>
                 {recentRuns.length === 0 ? (
-                  <EmptyState icon={ListChecks} title="No test runs yet." body="Start a safe validation from Onboarding or Test Runs." actionLabel="Open onboarding" actionHref="#onboarding" />
+                  <EmptyState icon={ListChecks} title="No test runs yet." body="Start a safe validation from Test Runs after declaring scope." actionLabel="Open test runs" actionHref="#runs" />
                 ) : (
                   <ul className="dashboard-link-list">
                     {recentRuns.map((run) => {
@@ -772,23 +728,24 @@ export function DashboardPage({ data }: { data: PortalData }) {
           <div className="split">
             <Card>
               <CardHeader>
-                <CardTitle>Recent evidence</CardTitle>
-                <CardDescription>Latest vault records correlated to runs and findings.</CardDescription>
+                <CardTitle>Target group status</CardTitle>
+                <CardDescription>Top groups by criticality from target group API.</CardDescription>
               </CardHeader>
               <CardContent>
-                {recentEvidence.length === 0 ? (
-                  <EmptyState icon={FileCheck2} title="No evidence records yet." body="Evidence appears after validation runs complete and observations are correlated." actionLabel="Open evidence" actionHref="#evidence" />
+                {topTargetGroups.length === 0 ? (
+                  <EmptyState icon={Target} title="No target groups yet." body="Declare target groups to map business services to validation scope." actionHref="#target-groups" actionLabel="Open target groups" />
                 ) : (
                   <ul className="dashboard-link-list">
-                    {recentEvidence.map((item) => {
-                      const id = getString(item, ['id'], '');
+                    {topTargetGroups.map((group) => {
+                      const id = getString(group, ['id'], '');
+                      const open = data.findings.filter((finding) => getString(finding, ['target_group_id']) === id && getString(finding, ['status']) === 'open').length;
                       return (
                         <li key={id}>
                           <div>
-                            <strong>{evidenceDisplayLabel(item)}</strong>
-                            <span>{formatDate(item.created_at)}</span>
+                            <strong>{getString(group, ['name', 'id'], id)}</strong>
+                            <span className="muted">{open} open findings</span>
                           </div>
-                          <AnchorButton size="sm" variant="secondary" href={id ? buildDetailHref('evidence-detail', id) : '#evidence'}>Inspect</AnchorButton>
+                          <AnchorButton size="sm" variant="secondary" href={buildDetailHref('target-group-detail', id)}>Open</AnchorButton>
                         </li>
                       );
                     })}
@@ -798,26 +755,26 @@ export function DashboardPage({ data }: { data: PortalData }) {
             </Card>
             <Card>
               <CardHeader>
-                <CardTitle>High-scale / SOC requests</CardTitle>
-                <CardDescription>Customers submit requests only — SOC executes after approval.</CardDescription>
+                <CardTitle>Agent health</CardTitle>
+                <CardDescription>Outbound-only heartbeat readout.</CardDescription>
               </CardHeader>
               <CardContent>
-                {pendingHighScale.length === 0 ? (
-                  <EmptyState icon={ShieldCheck} title="No pending high-scale requests." body="Governed high-scale intake appears after customers submit authorization packs." actionLabel="Open high-scale" actionHref="#high-scale" />
+                {topAgents.length === 0 ? (
+                  <EmptyState icon={Bot} title="No agents registered." body="Install an outbound agent after declaring target scope." actionHref="#agents" actionLabel="Open agents" />
                 ) : (
                   <ul className="dashboard-link-list">
-                    {pendingHighScale.map((request) => {
-                      const id = getString(request, ['id'], '');
+                    {topAgents.map((agent) => {
+                      const id = getString(agent, ['id'], '');
                       return (
                         <li key={id}>
                           <div>
-                            <strong>{highScaleRequestLabel(data, request)}</strong>
+                            <strong>{getString(agent, ['hostname', 'name', 'id'], id)}</strong>
                             <span className="row-actions">
-                              <Badge tone={highScaleStateBadgeTone(getString(request, ['state']))}>{getString(request, ['state'])}</Badge>
-                              <span className="muted">{targetGroupDisplayName(data, getString(request, ['target_group_id']))}</span>
+                              <Badge tone={getString(agent, ['status']) === 'online' ? 'success' : 'warn'} title={`Agent status ${getString(agent, ['status'], 'unknown')} from agents API`}>{getString(agent, ['status'], 'unknown')}</Badge>
+                              <span className="muted">{formatDate(agent.last_heartbeat_at ?? agent.updated_at)}</span>
                             </span>
                           </div>
-                          <AnchorButton size="sm" variant="secondary" href={id ? buildDetailHref('high-scale-detail', id) : '#high-scale'}>View</AnchorButton>
+                          <AnchorButton size="sm" variant="secondary" href={buildDetailHref('agent-detail', id)}>Open</AnchorButton>
                         </li>
                       );
                     })}
@@ -832,29 +789,6 @@ export function DashboardPage({ data }: { data: PortalData }) {
           </details>
         </>
         )
-      ) : null}
-      {tab === 'business-services' ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>Business services</CardTitle>
-            <CardDescription>Declared target groups mapped to environment, owner, and current validation posture.</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <DataTable
-              columns={businessServiceColumns}
-              items={businessServices}
-              empty={(
-                <EmptyState
-                  icon={Target}
-                  title="No declared target groups yet."
-                  body="Create a target group to map business services to validation scope."
-                  actionLabel="Open target groups"
-                  actionHref="#target-groups"
-                />
-              )}
-            />
-          </CardContent>
-        </Card>
       ) : null}
       {tab === 'risk-trends' ? (
         <div className="risk-trends-grid">
@@ -917,49 +851,7 @@ export function DashboardPage({ data }: { data: PortalData }) {
           </Card>
         </div>
       ) : null}
-      {tab === 'evidence-feed' ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>Evidence feed</CardTitle>
-            <CardDescription>Newest evidence vault records and custody-related audit activity.</CardDescription>
-          </CardHeader>
-          <CardContent>
-            {evidenceFeed.length === 0 ? (
-              <EmptyState
-                icon={FileCheck2}
-                title="No evidence or custody activity yet."
-                body="Evidence and custody events appear after validation runs complete and exports are verified."
-                actionLabel="Open evidence"
-                actionHref="#evidence"
-              />
-            ) : (
-              <ul className="dashboard-link-list">
-                {evidenceFeed.map((item) => (
-                  <li key={`${item.source}-${item.id}`}>
-                    <div>
-                      <strong>{item.kind || 'Activity'}</strong>
-                      <span>{item.source} · {formatDate(item.created_at)}</span>
-                    </div>
-                    <AnchorButton
-                      size="sm"
-                      variant="secondary"
-                      href={
-                        item.source === 'audit'
-                          ? '#audit'
-                          : item.id
-                            ? buildDetailHref('evidence-detail', item.id)
-                            : '#evidence'
-                      }
-                    >
-                      Inspect
-                    </AnchorButton>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </CardContent>
-        </Card>
-      ) : null}
+
     </div>
   );
 }
@@ -1070,7 +962,6 @@ export function OnboardingPage({
         body: {
           name: String(form.get('name') ?? 'Onboarding group').trim(),
           environment_id: String(form.get('environment_id') ?? 'env_onboarding').trim(),
-          expected_behavior_default: 'must_block_before_origin',
           timezone: 'UTC'
         }
       }) as DataItem;
@@ -1080,8 +971,7 @@ export function OnboardingPage({
           method: 'POST',
           body: {
             kind: 'fqdn',
-            value: String(form.get('target_value') ?? '').trim(),
-            expected_behavior: 'must_block_before_origin'
+            value: String(form.get('target_value') ?? '').trim()
           }
         });
       }
@@ -1158,7 +1048,7 @@ export function OnboardingPage({
   const heartbeatSeconds = Math.floor((heartbeatState.elapsedMs ?? 0) / 1000);
   return (
     <div className="content">
-      <PageHeader route="onboarding" eyebrow="Guided setup" />
+      <PageHeader route="target-groups" eyebrow="Guided setup" />
       {(message || error) && <div className={error ? 'form-banner error' : 'form-banner'}>{error || message}</div>}
       <Card>
         <CardHeader>
@@ -1333,9 +1223,7 @@ export function TargetGroupsPage({
   onRefresh: () => Promise<void>;
 }) {
   const [addTargetGroupId, setAddTargetGroupId] = useState(() => getString(data.targetGroups[0] ?? {}, ['id'], ''));
-  const [createExpectedBehavior, setCreateExpectedBehavior] = useState('must_block_before_origin');
   const [addTargetKind, setAddTargetKind] = useState('fqdn');
-  const [addTargetExpectedBehavior, setAddTargetExpectedBehavior] = useState('must_block_before_origin');
   const [environmentFilter, setEnvironmentFilter] = useState(() => getHashQueryParam('environment_id'));
   const [showCreateMoreOptions, setShowCreateMoreOptions] = useState(false);
   const [busy, setBusy] = useState('');
@@ -1363,14 +1251,9 @@ export function TargetGroupsPage({
     }
   }, [data.targetGroups, filteredGroups, addTargetGroupId]);
 
-  useEffect(() => {
-    setAddTargetExpectedBehavior(getString(addTargetGroup ?? {}, ['expected_behavior_default'], 'must_block_before_origin'));
-  }, [addTargetGroupId, addTargetGroup]);
-
   const groupColumns: TableColumn<DataItem>[] = [
     { key: 'name', label: 'Group', render: (item) => getString(item, ['name', 'id']) },
     { key: 'env', label: 'Environment', render: (item) => getString(item, ['environment_id']) },
-    { key: 'behavior', label: 'Expected behavior', render: (item) => formatExpectedBehavior(getString(item, ['expected_behavior_default'], '')) },
     { key: 'timezone', label: 'Timezone', render: (item) => getString(item, ['timezone']) },
     { key: 'created', label: 'Created', render: (item) => formatDate(item.created_at) },
     {
@@ -1418,7 +1301,6 @@ export function TargetGroupsPage({
         name,
         environment_id: String(form.get('environment_id') ?? 'prod').trim() || 'prod',
         description: String(form.get('description') ?? '').trim(),
-        expected_behavior_default: String(form.get('expected_behavior_default') ?? 'must_block_before_origin'),
         timezone: String(form.get('timezone') ?? 'UTC').trim() || 'UTC',
         safety_policy: {
           max_concurrent_runs: Number(form.get('max_concurrent_runs') ?? 1),
@@ -1450,8 +1332,7 @@ export function TargetGroupsPage({
       method: 'POST',
       body: {
         kind: String(form.get('kind') ?? 'fqdn'),
-        value,
-        expected_behavior: String(form.get('expected_behavior') ?? getString(addTargetGroup ?? {}, ['expected_behavior_default'], 'must_block_before_origin'))
+        value
       }
     }), 'Declared target added to the selected group.');
     formElement.reset();
@@ -1490,14 +1371,6 @@ export function TargetGroupsPage({
                 <span>Environment</span>
                 <input name="environment_id" placeholder="prod" defaultValue="prod" />
               </label>
-              <input type="hidden" name="expected_behavior_default" value={createExpectedBehavior} />
-              <Select
-                className="full"
-                label="Expected behavior"
-                value={createExpectedBehavior}
-                options={EXPECTED_BEHAVIOR_SELECT_OPTIONS}
-                onChange={setCreateExpectedBehavior}
-              />
               <details className="full" open={showCreateMoreOptions} onToggle={(event) => setShowCreateMoreOptions((event.currentTarget as HTMLDetailsElement).open)}>
                 <summary>More options</summary>
                 <label className="full">
@@ -1554,14 +1427,6 @@ export function TargetGroupsPage({
                 <span>Value</span>
                 <input name="value" placeholder="checkout.example.com" required />
               </label>
-              <input type="hidden" name="expected_behavior" value={addTargetExpectedBehavior} />
-              <Select
-                className="full"
-                label="Expected behavior"
-                value={addTargetExpectedBehavior}
-                options={EXPECTED_BEHAVIOR_SELECT_OPTIONS}
-                onChange={setAddTargetExpectedBehavior}
-              />
               <div className="form-actions full">
                 <Button type="submit" loading={busy.startsWith('add-target-')} disabled={busy !== '' || !effectiveGroupId}>Add target</Button>
               </div>
@@ -1581,15 +1446,12 @@ export function TargetGroupsPage({
           <DataTable
             columns={groupColumns}
             items={filteredGroups}
-            empty={(
-              <EmptyState
-                icon={Target}
-                title={environmentFilter ? 'No groups in this environment.' : 'No target groups declared.'}
-                body={environmentFilter ? 'Declare a target group with this environment ID or clear the filter.' : 'Create the first business service or protected zone before running validation.'}
-                actionLabel={environmentFilter ? 'Clear filter' : 'Create first group'}
-                actionHref={environmentFilter ? '#target-groups' : '#onboarding'}
-              />
-            )}
+            empty={emptyStateFromApi({
+              icon: Target,
+              meta: data.targetGroupsMeta,
+              actionHref: readMetaAction(data.targetGroupsMeta, 'empty_action_href'),
+              actionLabel: readMetaAction(data.targetGroupsMeta, 'empty_action_label')
+            })}
           />
         </CardContent>
       </Card>
@@ -1613,8 +1475,8 @@ export function ValidationPage({
   const [busy, setBusy] = useState('');
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
-  const source = route === 'checks' ? data.checks : route === 'runs' ? data.runs : route === 'findings' ? data.findings : data.evidence;
-  const emptyIcon = route === 'findings' ? TriangleAlert : route === 'evidence' ? FileCheck2 : ListChecks;
+  const source = route === 'checks' ? data.checks : route === 'runs' ? data.runs : data.findings;
+  const emptyIcon = route === 'findings' ? TriangleAlert : ListChecks;
   const firstGroup = data.targetGroups[0] ?? null;
   const safeCheck = data.checks.find((check) => getString(check, ['safety_class']) === 'safe') ?? null;
 
@@ -1715,7 +1577,7 @@ export function ValidationPage({
           <DataTable
             columns={columns}
             items={source}
-            empty={<EmptyState icon={emptyIcon} title="No evidence-backed records yet." body="Run a safe validation after target group and agent setup. High-scale validation remains request-only for customers." actionLabel="Open onboarding" actionHref="#onboarding" />}
+            empty={<EmptyState icon={emptyIcon} title="No evidence-backed records yet." body="Run a safe validation after target group and agent setup. High-scale validation remains request-only for customers." actionLabel="Open target groups" actionHref="#target-groups" />}
           />
         </CardContent>
       </Card>
@@ -1725,11 +1587,9 @@ export function ValidationPage({
 
 export function GovernancePage({ route, data }: { route: RouteId; data: PortalData }) {
   const source =
-    route === 'high-scale' ? data.highScale :
-      route === 'notifications' ? data.notificationRules :
-        route === 'audit' ? data.audit :
-          route === 'release-evidence' ? data.releaseEvidence :
-            data.runs;
+    route === 'notifications' ? data.notificationRules :
+      route === 'audit' ? data.audit :
+        data.runs;
   const columns: TableColumn<DataItem>[] = [
     { key: 'id', label: 'Record', render: (item) => getString(item, ['title', 'name', 'id']) },
     { key: 'state', label: 'State', render: (item) => <Badge tone={getString(item, ['status', 'state'], 'recorded') === 'open' ? 'warn' : 'muted'}>{getString(item, ['status', 'state'], 'recorded')}</Badge> },
@@ -1757,288 +1617,6 @@ export function GovernancePage({ route, data }: { route: RouteId; data: PortalDa
           />
         </CardContent>
       </Card>
-    </div>
-  );
-}
-
-function datetimeLocalValue(offsetHours: number) {
-  const date = new Date(Date.now() + offsetHours * 60 * 60 * 1000);
-  const pad = (value: number) => String(value).padStart(2, '0');
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
-}
-
-function isoFromLocalDatetime(value: FormDataEntryValue | null) {
-  const raw = String(value ?? '').trim();
-  if (!raw) return '';
-  const date = new Date(raw);
-  return Number.isNaN(date.getTime()) ? '' : date.toISOString();
-}
-
-function csvValues(value: FormDataEntryValue | null) {
-  return String(value ?? '')
-    .split(',')
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
-export function HighScalePage({
-  data,
-  config,
-  session,
-  onRefresh
-}: {
-  data: PortalData;
-  config: PortalConfig;
-  session: Session;
-  onRefresh: () => Promise<void>;
-}) {
-  const [busy, setBusy] = useState('');
-  const [message, setMessage] = useState('');
-  const [error, setError] = useState('');
-  const [showIntakeAdvanced, setShowIntakeAdvanced] = useState(false);
-  const [highScaleTargetGroupId, setHighScaleTargetGroupId] = useState(() => getString(data.targetGroups[0] ?? {}, ['id'], ''));
-  const [businessCriticality, setBusinessCriticality] = useState('high');
-  const firstTargetGroupEnvironment = getString(data.targetGroups[0] ?? {}, ['environment_id'], '');
-  const highScaleTargetGroupOptions: SelectOption[] = [
-    { value: '', label: 'Select declared scope' },
-    ...data.targetGroups.map((group) => ({
-      value: getString(group, ['id']),
-      label: getString(group, ['name', 'id'])
-    }))
-  ];
-  const pendingReviewCount = data.highScale.filter((item) => ['submitted', 'under_review'].includes(getString(item, ['state'], ''))).length;
-  const packsAcceptedCount = data.highScale.filter((item) => getNestedString(item, ['authorization_pack_status', 'overall'], '') === 'accepted').length;
-  const requestColumns: TableColumn<DataItem>[] = [
-    { key: 'objective', label: 'Request', render: (item) => getString(item, ['objective', 'reason', 'id']) },
-    { key: 'state', label: 'State', render: (item) => <Badge tone={getString(item, ['state']) === 'submitted' ? 'warn' : 'info'}>{getString(item, ['state'])}</Badge> },
-    { key: 'target', label: 'Target group', render: (item) => targetGroupDisplayName(data, getString(item, ['target_group_id'])) },
-    { key: 'pack', label: 'Pack', render: (item) => <Badge tone={getNestedString(item, ['authorization_pack_status', 'overall']) === 'accepted' ? 'success' : 'warn'}>{getNestedString(item, ['authorization_pack_status', 'overall'], 'missing')}</Badge> },
-    { key: 'window', label: 'Window', render: (item) => formatDate(getNestedString(item, ['requested_window', 'window_start'], '')) },
-    {
-      key: 'actions',
-      label: 'Actions',
-      render: (item) => {
-        const id = getString(item, ['id'], '');
-        return id
-          ? <AnchorButton size="sm" variant="secondary" href={buildDetailHref('high-scale-detail', id)}>Open</AnchorButton>
-          : '—';
-      }
-    }
-  ];
-
-  async function runHighScaleAction<T>(label: string, action: () => Promise<T>, success: string) {
-    setBusy(label);
-    setError('');
-    setMessage('');
-    try {
-      const result = await action();
-      setMessage(success);
-      await onRefresh();
-      return result;
-    } catch (err) {
-      const payload = (err as Error & { payload?: unknown }).payload as { error?: string; message?: string; missing?: string[] } | undefined;
-      const missing = Array.isArray(payload?.missing) ? ` Missing: ${payload.missing.join(', ')}.` : '';
-      setError(`${payload?.message ?? payload?.error ?? (err instanceof Error ? err.message : 'High-scale action failed.')}${missing}`);
-      return null;
-    } finally {
-      setBusy('');
-    }
-  }
-
-  async function handleCreateRequest(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const formElement = event.currentTarget;
-    const form = new FormData(formElement);
-    if (form.get('scope_confirmation') !== 'on') {
-      setError('Confirm that declared scope and authorization metadata are accurate before submitting.');
-      return;
-    }
-    if (!String(form.get('target_group_id') ?? '').trim()) {
-      setError('Select a declared target group before submitting.');
-      return;
-    }
-    const duration = Number(form.get('max_duration_minutes') ?? 45);
-    const maxErrorRate = Number(form.get('max_error_rate_pct') ?? 5);
-    const body = {
-      target_group_id: String(form.get('target_group_id') ?? '').trim(),
-      objective: String(form.get('objective') ?? '').trim(),
-      environment: String(form.get('environment') ?? 'staging').trim(),
-      business_criticality: String(form.get('business_criticality') ?? 'high').trim(),
-      requested_scenario_families: csvValues(form.get('requested_scenario_families')),
-      requested_limits: {
-        max_rate: String(form.get('max_rate') ?? '').trim(),
-        max_duration_minutes: Number.isFinite(duration) && duration > 0 ? duration : 45
-      },
-      stop_criteria: {
-        abort_on_customer_signal: true,
-        max_error_rate_pct: Number.isFinite(maxErrorRate) && maxErrorRate > 0 ? maxErrorRate : 5
-      },
-      abort_criteria: {
-        threshold: String(form.get('abort_threshold') ?? 'error_rate_above_5pct').trim(),
-        auto_stop: true
-      },
-      requested_window: {
-        window_start: isoFromLocalDatetime(form.get('window_start')),
-        window_end: isoFromLocalDatetime(form.get('window_end')),
-        timezone: String(form.get('timezone') ?? 'UTC').trim() || 'UTC'
-      },
-      emergency_contacts: [{
-        name: String(form.get('contact_name') ?? '').trim(),
-        contact: String(form.get('contact') ?? '').trim()
-      }],
-      provider_context: {
-        provider_name: String(form.get('provider_name') ?? '').trim(),
-        requires_provider_approval: form.get('requires_provider_approval') === 'on'
-      },
-      scope_confirmation: form.get('scope_confirmation') === 'on'
-    };
-    const created = await runHighScaleAction('create-high-scale', () => requestJson(config, session, '/v1/high-scale-requests', {
-      method: 'POST',
-      body
-    }), 'High-scale request submitted for SOC review.');
-    if (created) formElement.reset();
-  }
-
-  return (
-    <div className="content">
-      <PageHeader route="high-scale" eyebrow="SOC-gated validation" />
-      <PageContextSummary>
-        <span className="tabular-nums">{data.highScale.length}</span> requests ·{' '}
-        <span className="tabular-nums">{pendingReviewCount}</span> pending SOC review ·{' '}
-        <span className="tabular-nums">{packsAcceptedCount}</span> packs accepted
-      </PageContextSummary>
-      {(message || error) && (
-        <div className={error ? 'form-banner error' : 'form-banner'}>
-          {error || message}
-        </div>
-      )}
-      <Card>
-        <CardHeader>
-          <CardTitle>Request governed validation</CardTitle>
-          <CardDescription>Submit authorization metadata for SOC review. Customers cannot approve, schedule, start, stop, or close high-scale execution. Open a request to review packs, artifacts, lifecycle, and provider checklist.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form className="product-form" onSubmit={handleCreateRequest} aria-busy={busy === 'create-high-scale' || undefined}>
-              <fieldset disabled={busy !== ''}>
-              <p className="muted full">Scope — which services and environment SOC should review.</p>
-              <input type="hidden" name="target_group_id" value={highScaleTargetGroupId} />
-              <Select
-                label="Target group"
-                value={highScaleTargetGroupId}
-                options={highScaleTargetGroupOptions}
-                disabled={data.targetGroups.length === 0}
-                onChange={setHighScaleTargetGroupId}
-              />
-              <label>
-                <span>Environment</span>
-                <input name="environment" defaultValue={firstTargetGroupEnvironment} placeholder="staging" required />
-              </label>
-              <label className="full">
-                <span>Objective</span>
-                <textarea name="objective" rows={3} placeholder="Describe the governed readiness validation objective." required />
-              </label>
-              <Select
-                label="Business criticality"
-                name="business_criticality"
-                value={businessCriticality}
-                options={HIGH_SCALE_CRITICALITY_OPTIONS}
-                onChange={setBusinessCriticality}
-              />
-              <p className="muted full">Schedule — preferred execution window (SOC sets the final schedule).</p>
-              <label>
-                <span>Window start</span>
-                <input name="window_start" type="datetime-local" defaultValue={datetimeLocalValue(24)} required />
-              </label>
-              <label>
-                <span>Window end</span>
-                <input name="window_end" type="datetime-local" defaultValue={datetimeLocalValue(48)} required />
-              </label>
-              <label>
-                <span>Timezone</span>
-                <input name="timezone" defaultValue="UTC" />
-              </label>
-              <details className="disclosure full" open={showIntakeAdvanced} onToggle={(event) => setShowIntakeAdvanced((event.currentTarget as HTMLDetailsElement).open)}>
-                <summary>Load limits, provider context, and contacts</summary>
-                <p className="muted full">Internal catalog values are sent as metadata — SOC translates them into governed execution limits.</p>
-                <label>
-                  <span>Scenario families</span>
-                  <input name="requested_scenario_families" defaultValue="volumetric_metadata" placeholder={HIGH_SCALE_CATALOG_LABELS.volumetric_metadata} required />
-                  <span className="muted">Default: {HIGH_SCALE_CATALOG_LABELS.volumetric_metadata}</span>
-                </label>
-                <label>
-                  <span>Max rate (catalog)</span>
-                  <input name="max_rate" defaultValue="500_rps_metadata" placeholder={HIGH_SCALE_CATALOG_LABELS['500_rps_metadata']} required />
-                  <span className="muted">Default: {HIGH_SCALE_CATALOG_LABELS['500_rps_metadata']}</span>
-                </label>
-                <label>
-                  <span>Max duration (minutes)</span>
-                  <input name="max_duration_minutes" type="number" min="1" max="240" defaultValue="45" />
-                </label>
-                <label>
-                  <span>Stop if error rate exceeds (%)</span>
-                  <input name="max_error_rate_pct" type="number" min="1" max="100" defaultValue="5" />
-                </label>
-                <label>
-                  <span>Abort criteria (catalog)</span>
-                  <input name="abort_threshold" defaultValue="error_rate_above_5pct" placeholder={HIGH_SCALE_CATALOG_LABELS.error_rate_above_5pct} required />
-                  <span className="muted">Default: {HIGH_SCALE_CATALOG_LABELS.error_rate_above_5pct}</span>
-                </label>
-                <label>
-                  <span>Edge provider</span>
-                  <input name="provider_name" defaultValue="Cloudflare" placeholder="Provider name" required />
-                </label>
-                <label className="check-row full">
-                  <input name="requires_provider_approval" type="checkbox" />
-                  <span>Provider approval is required before SOC can schedule execution.</span>
-                </label>
-                <p className="muted full">Leave unchecked unless your edge provider must pre-approve the window — SOC still gates all high-scale execution.</p>
-                <label>
-                  <span>Emergency contact</span>
-                  <input name="contact_name" defaultValue="Primary on-call" placeholder="Primary on-call" required />
-                </label>
-                <label>
-                  <span>Contact path</span>
-                  <input name="contact" defaultValue="ops@example.invalid" placeholder="ops@example.com or bridge path" required />
-                </label>
-              </details>
-              <label className="check-row full">
-                <input name="scope_confirmation" type="checkbox" />
-                <span>I confirm declared scope and authorization metadata are accurate.</span>
-              </label>
-              <div className="form-actions full">
-                <Button type="submit" loading={busy === 'create-high-scale'} disabled={data.targetGroups.length === 0}>Submit high-scale request</Button>
-              </div>
-              </fieldset>
-          </form>
-        </CardContent>
-      </Card>
-      <Card>
-        <CardHeader>
-          <div>
-            <CardTitle>High-scale requests</CardTitle>
-            <CardDescription>Governed intake records — execution stays SOC-only.</CardDescription>
-          </div>
-          <Badge tone="info">{data.highScale.length} requests</Badge>
-        </CardHeader>
-        <CardContent aria-busy={busy === 'create-high-scale' || undefined}>
-          <DataTable
-            columns={requestColumns}
-            items={data.highScale}
-            empty={<EmptyState icon={ShieldCheck} title="No governed requests." body="Submit a high-scale request after declaring target scope and authorization metadata." />}
-          />
-        </CardContent>
-      </Card>
-      <Card>
-        <CardHeader>
-          <CardTitle>SOC handoff (read-only)</CardTitle>
-          <CardDescription>Customers submit requests and authorization metadata here. Approval, scheduling, execution, stop, and close remain on the SOC console — this page cannot operate high-scale execution.</CardDescription>
-        </CardHeader>
-        <CardContent className="row-actions">
-          <AnchorButton href="#soc" variant="secondary" size="sm">Open SOC console</AnchorButton>
-          <AnchorButton href="#support" variant="ghost" size="sm">Open support readiness</AnchorButton>
-        </CardContent>
-      </Card>
-
     </div>
   );
 }
@@ -2381,7 +1959,6 @@ export function SettingsPage({
   const role = session.role ?? 'admin';
   const canReadAudit = canAccessRoute(role, 'audit', routeAccessContext);
   const canReadNotifications = canAccessRoute(role, 'notifications', routeAccessContext);
-  const canReadReleaseEvidence = canAccessRoute(role, 'release-evidence', routeAccessContext);
   const settingsTabOptions = SETTINGS_TAB_OPTIONS;
   const tokenColumns: TableColumn<DataItem>[] = [
     { key: 'name', label: 'Token', render: (item) => getString(item, ['name', 'id']) },
@@ -2744,7 +2321,6 @@ export function SettingsPage({
             </CardHeader>
             <CardContent className="row-actions">
               {canReadNotifications ? <AnchorButton href="#notifications" variant="ghost" size="sm">Notification rules</AnchorButton> : null}
-              {canReadReleaseEvidence ? <AnchorButton href="#release-evidence" variant="ghost" size="sm">Release evidence</AnchorButton> : null}
               <AnchorButton href="#integrations" variant="ghost" size="sm">Integrations</AnchorButton>
             </CardContent>
           </Card>
@@ -3065,7 +2641,7 @@ export function EnvironmentsPage({ data }: { data: PortalData }) {
                   {row.state}
                 </Badge>
               </div>
-              <Progress value={row.coverage} tone={scoreProgressTone(row.coverage)} />
+              <Progress value={row.coverage} tone={scoreProgressTone(row.coverage)} label={`${row.id} coverage`} />
               <span className="muted">{row.groupsWithEvidence}/{row.groupCount} groups with completed runs</span>
               <span className="muted">{row.completedRuns} completed or verdicted runs</span>
               <span className="muted">{row.openFindings} open findings</span>
@@ -3095,19 +2671,13 @@ export function PolicyPage({
   const [busy, setBusy] = useState('');
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
-  const [policyTargetGroupId, setPolicyTargetGroupId] = useState('');
+  const [policyTargetGroupIds, setPolicyTargetGroupIds] = useState<string[]>([]);
   const [policyCheckId, setPolicyCheckId] = useState('');
   const [policyCadence, setPolicyCadence] = useState('weekly');
   const [policyExpectedVerdict, setPolicyExpectedVerdict] = useState('pass');
+  const [archivePolicyId, setArchivePolicyId] = useState('');
   const safeChecks = data.checks.filter((check) => getString(check, ['safety_class']) === 'safe');
   const socGatedChecks = data.checks.filter((check) => getString(check, ['safety_class']) === 'soc_gated');
-  const policyTargetGroupOptions: SelectOption[] = [
-    { value: '', label: 'Select declared group' },
-    ...data.targetGroups.map((group) => ({
-      value: getString(group, ['id']),
-      label: getString(group, ['name', 'id'])
-    }))
-  ];
   const policyCheckOptions: SelectOption[] = [
     { value: '', label: 'Select safe check' },
     ...safeChecks.map((check) => ({
@@ -3163,7 +2733,7 @@ export function PolicyPage({
             <Button variant="secondary" loading={rowPatchBusy} disabled={rowBlocked || rowArchiveBusy} onClick={() => void patchPolicy(id, { state: state === 'paused' ? 'active' : 'paused' }, state === 'paused' ? 'Policy resumed.' : 'Policy paused.')}>
               {state === 'paused' ? 'Resume' : 'Pause'}
             </Button>
-            <Button variant="danger" loading={rowArchiveBusy} disabled={rowBlocked || rowPatchBusy} onClick={() => void archivePolicy(id)}>Archive</Button>
+            <Button variant="danger" loading={rowArchiveBusy} disabled={rowBlocked || rowPatchBusy} onClick={() => setArchivePolicyId(id)}>Archive</Button>
           </div>
         );
       }
@@ -3176,7 +2746,7 @@ export function PolicyPage({
     setMessage('');
     try {
       const result = await action();
-      setMessage(success);
+      setMessage(formatMutationSuccessMessage(success, result));
       await onRefresh();
       return result;
     } catch (err) {
@@ -3192,10 +2762,9 @@ export function PolicyPage({
     event.preventDefault();
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
-    const targetGroupId = String(form.get('target_group_id') ?? '').trim();
     const checkId = String(form.get('check_id') ?? '').trim();
-    if (!targetGroupId) {
-      setError('Select a declared target group before creating a policy.');
+    if (policyTargetGroupIds.length === 0) {
+      setError('Select at least one declared target group before creating policies.');
       return;
     }
     if (!checkId) {
@@ -3208,17 +2777,36 @@ export function PolicyPage({
     const safe_windows = day && start && end
       ? [{ day, start, end, timezone: String(form.get('safe_window_timezone') ?? 'UTC').trim() || 'UTC' }]
       : [];
-    const created = await runPolicyAction('create-test-policy', () => requestJson(config, session, '/v1/test-policies', {
-      method: 'POST',
-      body: {
-        target_group_id: targetGroupId,
-        check_id: checkId,
-        cadence: String(form.get('cadence') ?? 'manual'),
-        expected_verdict: String(form.get('expected_verdict') ?? 'pass'),
-        safe_windows
+    const bodyBase = {
+      check_id: checkId,
+      cadence: String(form.get('cadence') ?? 'manual'),
+      expected_verdict: String(form.get('expected_verdict') ?? 'pass'),
+      safe_windows
+    };
+    setBusy('create-test-policy');
+    setError('');
+    setMessage('');
+    try {
+      let lastResult: unknown = null;
+      for (const targetGroupId of policyTargetGroupIds) {
+        lastResult = await requestJson(config, session, '/v1/test-policies', {
+          method: 'POST',
+          body: { ...bodyBase, target_group_id: targetGroupId }
+        });
       }
-    }), 'Test policy created from declared scope and safe check catalog.');
-    if (created) formElement.reset();
+      setMessage(formatMutationSuccessMessage(
+        `Created ${policyTargetGroupIds.length} test ${policyTargetGroupIds.length === 1 ? 'policy' : 'policies'} from declared scope and safe check catalog.`,
+        lastResult
+      ));
+      setPolicyTargetGroupIds([]);
+      formElement.reset();
+      await onRefresh();
+    } catch (err) {
+      const payload = (err as Error & { payload?: unknown }).payload as { error?: string; message?: string } | undefined;
+      setError(payload?.message ?? payload?.error ?? (err instanceof Error ? err.message : 'Action failed.'));
+    } finally {
+      setBusy('');
+    }
   }
 
   async function patchPolicy(id: string, body: Record<string, unknown>, success: string) {
@@ -3238,8 +2826,8 @@ export function PolicyPage({
 
   async function archivePolicy(id: string) {
     if (!id) return;
-    if (!window.confirm('Archive this test policy? Scheduled runs under it will stop.')) return;
     await runPolicyAction(`archive-policy-${id}`, () => requestJson(config, session, `/v1/test-policies/${id}`, { method: 'DELETE' }), 'Test policy archived.');
+    setArchivePolicyId('');
   }
 
   return (
@@ -3249,7 +2837,7 @@ export function PolicyPage({
         <div className={error ? 'form-banner error' : 'form-banner neutral'}>{error || message}</div>
       )}
       <div className="split">
-      <Card>
+      <Card id="test-policies-create">
         <CardHeader>
           <CardTitle>Create safe validation policy</CardTitle>
           <CardDescription>
@@ -3262,16 +2850,14 @@ export function PolicyPage({
         </CardHeader>
         <CardContent>
           <form className="product-form" onSubmit={handleCreatePolicy}>
-            <input type="hidden" name="target_group_id" value={policyTargetGroupId} />
             <input type="hidden" name="check_id" value={policyCheckId} />
             <input type="hidden" name="cadence" value={policyCadence} />
             <input type="hidden" name="expected_verdict" value={policyExpectedVerdict} />
-            <Select
-              label="Target group"
-              value={policyTargetGroupId}
-              options={policyTargetGroupOptions}
-              disabled={data.targetGroups.length === 0}
-              onChange={setPolicyTargetGroupId}
+            <TargetGroupPicker
+              groups={data.targetGroups}
+              selectedIds={policyTargetGroupIds}
+              onChange={setPolicyTargetGroupIds}
+              disabled={data.targetGroups.length === 0 || busy !== ''}
             />
             <Select
               label="Safe check"
@@ -3336,11 +2922,26 @@ export function PolicyPage({
               const rowBusy = busy === `patch-policy-${id}` || busy === `archive-policy-${id}`;
               return rowBusy ? { 'aria-busy': true } : {};
             }}
-            empty={<EmptyState icon={ClipboardList} title="No test policies yet." body="Create a safe validation policy after declaring target groups and reviewing the safe check catalog." />}
+            empty={renderFriendlyEmptyState({
+              icon: ClipboardList,
+              title: 'No test policies yet.',
+              body: 'Create a safe validation policy after declaring target groups and reviewing the safe check catalog.',
+              actionLabel: 'Create policy above',
+              onAction: () => document.querySelector('#test-policies-create')?.scrollIntoView({ behavior: 'smooth' })
+            })}
           />
         </CardContent>
       </Card>
       </div>
+      <ConfirmModal
+        open={Boolean(archivePolicyId)}
+        title={`Archive test policy ${archivePolicyId}`}
+        description={<p>Are you sure? Scheduled runs under this policy will stop and an audit entry will be written.</p>}
+        confirmLabel="Archive policy"
+        busy={busy === `archive-policy-${archivePolicyId}`}
+        onCancel={() => setArchivePolicyId('')}
+        onConfirm={() => void archivePolicy(archivePolicyId)}
+      />
     </div>
   );
 }
@@ -3383,6 +2984,8 @@ export function IntegrationPage({
     { key: 'name', label: 'Connector', render: (item) => getString(item, ['name', 'id']) },
     { key: 'provider', label: 'Provider', render: (item) => <Badge tone="info">{getString(item, ['provider'])}</Badge> },
     { key: 'status', label: 'Status', render: (item) => <Badge tone={getString(item, ['status']) === 'active' ? 'success' : getString(item, ['status']) === 'error' ? 'danger' : 'muted'}>{getString(item, ['status'])}</Badge> },
+    { key: 'last_poll', label: 'Last poll', render: (item) => formatDate(item.last_polled_at ?? item.last_success_at ?? item.last_poll_at) },
+    { key: 'poll_errors', label: 'Poll errors', render: (item) => getNumber(item, ['poll_error_count', 'error_count'], 0) },
     { key: 'secret', label: 'Secret ref', render: (item) => getString(item, ['secret_id'], 'manual snapshots only') },
     { key: 'updated', label: 'Updated', render: (item) => formatDate(item.updated_at ?? item.created_at) },
     {
@@ -3397,7 +3000,7 @@ export function IntegrationPage({
         return (
           <div className="row-actions" aria-busy={rowBusy || undefined}>
             <Button size="sm" variant="secondary" loading={busy === `validate-${id}`} disabled={rowBlocked || isDisabled} onClick={() => void validateConnector(id)}>Validate</Button>
-            <Button size="sm" variant="secondary" loading={busy === `poll-${id}`} disabled={rowBlocked || isDisabled} onClick={() => void pollConnector(id)}>Poll</Button>
+            <Button size="sm" variant="secondary" loading={busy === `poll-${id}`} disabled={rowBlocked || isDisabled} onClick={() => void pollConnector(id)}>Poll now</Button>
             <Button size="sm" variant="ghost" loading={busy === `snapshots-${id}`} disabled={rowBlocked} onClick={() => void loadSnapshots(id)}>Snapshots</Button>
             <Button size="sm" variant="danger" loading={busy === `disable-${id}`} disabled={rowBlocked || isDisabled} onClick={() => void disableConnector(id)}>Disable</Button>
           </div>
@@ -3412,7 +3015,7 @@ export function IntegrationPage({
     setMessage('');
     try {
       const result = await action();
-      setMessage(success);
+      setMessage(formatMutationSuccessMessage(success, result));
       await onRefresh();
       return result;
     } catch (err) {
@@ -3770,7 +3373,6 @@ export function SupportPage({ data, session }: { data: PortalData; session: Sess
   };
   const role = session.role ?? 'admin';
   const canReadNotifications = canAccessRoute(role, 'notifications', routeAccessContext);
-  const canReadReleaseEvidence = canAccessRoute(role, 'release-evidence', routeAccessContext);
   const supportRows = summary
     ? [
         { label: 'Support owner', value: supportOwner, icon: LifeBuoy },
@@ -3843,9 +3445,8 @@ export function SupportPage({ data, session }: { data: PortalData; session: Sess
         </CardHeader>
         <CardContent className="row-actions">
           <AnchorButton href="#findings" variant="secondary" size="sm">Review open findings ({openFindings})</AnchorButton>
-          <AnchorButton href="#high-scale" variant="secondary" size="sm">Request SOC-governed test ({pendingHighScale} pending)</AnchorButton>
+          <AnchorButton href="#runs" variant="secondary" size="sm">Request SOC-governed test ({pendingHighScale} pending)</AnchorButton>
           {canReadNotifications ? <AnchorButton href="#notifications" variant="secondary" size="sm">Notification rules</AnchorButton> : null}
-          {canReadReleaseEvidence ? <AnchorButton href="#release-evidence" variant="ghost" size="sm">Release evidence</AnchorButton> : null}
         </CardContent>
       </Card>
     </div>
@@ -4068,6 +3669,8 @@ export function StaffSurfacePage({
     { value: 'false', label: 'Revoke / disable' }
   ];
   const isStaff = session.principal === 'staff';
+  const [adminTab, setAdminTab] = useState('signup-queue');
+  const adminTabOptions = routeTabs('admin').map((tab) => ({ id: tab.id, label: tab.label }));
   const overview = data.internalOverview;
   const queueDepth = getNumber(overview ?? {}, ['pending_signups']) + getNumber(overview ?? {}, ['pending_approval_requests']);
   const tenantCount = getNumber(overview ?? {}, ['tenant_count'], data.internalTenants.length);
@@ -4246,46 +3849,61 @@ export function StaffSurfacePage({
         </Card>
       ) : (
         <>
-          <div className="split">
+          <Tabs value={adminTab} options={adminTabOptions} onChange={setAdminTab} className="tabs-wrap" />
+          {adminTab === 'overview' ? (
+            <Card density="compact">
+              <CardHeader><CardTitle>Staff overview</CardTitle><CardDescription>Queue depth and tenant posture from internal management APIs.</CardDescription></CardHeader>
+              <CardContent className="kv-list">
+                <div><span>Review queue</span><strong>{queueDepth}</strong></div>
+                <div><span>Tenants</span><strong>{tenantCount}</strong></div>
+                <div><span>SOC reviews pending</span><strong>{highScaleReviews}</strong></div>
+              </CardContent>
+            </Card>
+          ) : null}
+          {adminTab === 'signup-queue' ? (
             <Card density="compact" className="staff-queue-priority">
               <CardHeader>
                 <CardTitle>Signup queue</CardTitle>
                 <CardDescription>Requests from the staff-only signup review API.</CardDescription>
               </CardHeader>
               <CardContent>
-                <DataTable columns={signupColumns} items={data.internalSignupRequests} empty={<EmptyState icon={ClipboardList} title="No signup requests." body="Reviewed account intake records will appear here after customers submit requests." />} />
+                <DataTable columns={signupColumns} items={data.internalSignupRequests} empty={renderFriendlyEmptyState({ icon: ClipboardList, title: 'No signup requests.', body: 'Reviewed account intake records will appear here after customers submit requests.' })} />
               </CardContent>
             </Card>
+          ) : null}
+          {adminTab === 'tenants' ? (
             <Card density="compact">
               <CardHeader>
                 <CardTitle>Tenant directory</CardTitle>
                 <CardDescription>Managed tenant account and subscription metadata.</CardDescription>
               </CardHeader>
               <CardContent>
-                <DataTable columns={tenantColumns} items={data.internalTenants} empty={<EmptyState icon={Target} title="No managed tenants." body="Provisioned tenants appear here after staff approval creates account records." />} />
+                <DataTable columns={tenantColumns} items={data.internalTenants} empty={renderFriendlyEmptyState({ icon: Target, title: 'No managed tenants.', body: 'Provisioned tenants appear here after staff approval creates account records.' })} />
               </CardContent>
             </Card>
-          </div>
-          <div className="split">
+          ) : null}
+          {adminTab === 'approvals' ? (
             <Card density="compact">
               <CardHeader>
                 <CardTitle>Approval requests</CardTitle>
                 <CardDescription>Unified internal approvals, including subscription exceptions.</CardDescription>
               </CardHeader>
               <CardContent>
-                <DataTable columns={approvalColumns} items={data.internalApprovalRequests} empty={<EmptyState icon={ShieldCheck} title="No internal approvals." body="Pending approval records will appear here when backend workflows create them." />} />
+                <DataTable columns={approvalColumns} items={data.internalApprovalRequests} empty={renderFriendlyEmptyState({ icon: ShieldCheck, title: 'No internal approvals.', body: 'Pending approval records will appear here when backend workflows create them.' })} />
               </CardContent>
             </Card>
+          ) : null}
+          {adminTab === 'audit' ? (
             <Card density="compact">
               <CardHeader>
                 <CardTitle>Internal audit</CardTitle>
                 <CardDescription>Recent staff actions from the internal audit API.</CardDescription>
               </CardHeader>
               <CardContent>
-                <DataTable columns={auditColumns} items={data.internalAudit} empty={<EmptyState icon={FileCheck2} title="No internal audit events." body="Staff decisions and support actions will be listed after they are recorded." />} />
+                <DataTable columns={auditColumns} items={data.internalAudit} empty={renderFriendlyEmptyState({ icon: FileCheck2, title: 'No internal audit events.', body: 'Staff decisions and support actions will be listed after they are recorded.' })} />
               </CardContent>
             </Card>
-          </div>
+          ) : null}
           <Card>
             <CardHeader>
               <CardTitle>Support owner assignment</CardTitle>

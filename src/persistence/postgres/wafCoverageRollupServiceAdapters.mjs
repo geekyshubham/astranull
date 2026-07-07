@@ -90,6 +90,10 @@ export function createPostgresWafCoverageRollupServices(repositories) {
         ...metrics,
       });
 
+      if (repositories?.portalRevamp?.refreshWafCoverageSummary) {
+        await repositories.portalRevamp.refreshWafCoverageSummary();
+      }
+
       return {
         rollup_result: {
           tenant_id: tenantId,
@@ -130,6 +134,10 @@ export function createPostgresWafCoverageRollupServices(repositories) {
         });
         if (outcome.skipped) return outcome;
         results.push(outcome.rollup_result ?? outcome.scope ?? { tenant_id: tenantId });
+      }
+
+      if (!ctx.dryRun && repositories?.portalRevamp?.refreshWafCoverageSummary) {
+        await repositories.portalRevamp.refreshWafCoverageSummary();
       }
 
       return {

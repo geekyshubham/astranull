@@ -1,4 +1,5 @@
 import { loadRuntimeConfig } from '../config.mjs';
+import { computeWafCoverageSummaryRow } from '../lib/wafCoverageSummary.mjs';
 import { newId } from '../lib/ids.mjs';
 import { computeCoverageDailyRollup } from './wafCoverageService.mjs';
 import { getStore, persistStore } from '../store.mjs';
@@ -14,7 +15,30 @@ function ensureStoreShape() {
   if (!Array.isArray(store.wafCoverageDailyRollups)) {
     store.wafCoverageDailyRollups = [];
   }
+  if (!store.wafCoverageSummaries || typeof store.wafCoverageSummaries !== 'object') {
+    store.wafCoverageSummaries = {};
+  }
   return store;
+}
+
+/**
+ * @param {string} tenantId
+ * @param {Date} [now]
+ */
+export function refreshWafCoverageSummaryForTenant(tenantId, now = new Date()) {
+  const store = ensureStoreShape();
+  const assets = store.wafAssets.filter((asset) => asset.tenant_id === tenantId);
+  const snapshots = store.wafPostureSnapshots.filter((snap) => snap.tenant_id === tenantId);
+  const connectors = (store.wafConnectors ?? []).filter((row) => row.tenant_id === tenantId);
+  const currentSnapshotsByAsset = indexCurrentSnapshots(snapshots);
+  const summary = computeWafCoverageSummaryRow({
+    assets,
+    currentSnapshotsByAsset,
+    connectors,
+    refreshedAt: now,
+  });
+  store.wafCoverageSummaries[tenantId] = summary;
+  return summary;
 }
 
 function indexCurrentSnapshots(snapshots = []) {
@@ -128,6 +152,7 @@ export function runCoverageRollup(ctx) {
     store.wafCoverageDailyRollups.push(record);
   }
 
+  refreshWafCoverageSummaryForTenant(tenantId, now);
   persistStore();
 
   return {

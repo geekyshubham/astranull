@@ -12,6 +12,7 @@ export async function request(baseUrl, method, path, { headers = {}, body, rawBo
       ...headers,
     },
     body: payload,
+    signal: AbortSignal.timeout(Number(process.env.ASTRANULL_TEST_HTTP_TIMEOUT_MS ?? 30_000)),
   });
   const text = await res.text();
   let json = null;
