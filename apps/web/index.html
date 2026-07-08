@@ -4,11 +4,12 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>AstraNull</title>
-  <meta name="description" content="AstraNull No-access-first DDoS readiness validation. Sign up for reviewed access or log in to the React readiness console." />
-  <!-- Space Grotesk · Inter · JetBrains Mono -->
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <meta name="description" content="AstraNull — no-access-first DDoS readiness validation. Sign up for reviewed access or log in to the readiness console." />
+  <meta name="color-scheme" content="dark light" />
+  <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)" />
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+
+  <!-- Early theme init (light/dark) so there is no flash before React boots. -->
   <script>
     (function () {
       try {
@@ -18,10 +19,378 @@
       } catch (e) {}
     })();
   </script>
-  <link rel="stylesheet" href="/react-app.css" />
+
+  <!-- Space Grotesk · Inter · JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+  <!--
+    Boot styles. A minimal token subset (identical values to the compiled
+    react-app.css) is declared inline so the canvas is painted and the boot
+    overlay is fully styled BEFORE the 83 KB stylesheet + ~1.1 MB module arrive.
+    This is the FOUC fix: the page is never a bare white/black flash.
+  -->
+  <style id="boot-styles">
+    :root {
+      --bg: #000;
+      --surface: #000;
+      --fg: #f0f0f0;
+      --fg-2: #a1a4a5;
+      --muted: #7e8386;
+      --border: rgba(214, 235, 253, .19);
+      --border-strong: #d6ebfd57;
+      --accent: #ff801f;
+      --accent-on: #000;
+      --danger: #ff2047;
+      --font-display: "Space Grotesk", "Inter", -apple-system, system-ui, "Segoe UI", Arial, sans-serif;
+      --font-body: "Inter", -apple-system, system-ui, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+      --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace;
+      --motion-fast: .15s;
+      --motion-ease: cubic-bezier(.2, 0, 0, 1);
+    }
+    [data-theme="light"] {
+      --bg: #fff;
+      --surface: #fff;
+      --fg: #0b0d0f;
+      --fg-2: #44484d;
+      --muted: #5b6066;
+      --border: #09142424;
+      --border-strong: #0914243d;
+      --accent-on: #fff;
+      --danger: #d61f43;
+    }
+
+    html, body {
+      margin: 0;
+      min-height: 100%;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: var(--font-body);
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+
+    /* ── Boot overlay: sibling of #root, removed once React mounts ── */
+    #boot {
+      position: fixed;
+      inset: 0;
+      z-index: 2147483000;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background: var(--bg);
+      opacity: 1;
+      transition: opacity .42s var(--motion-ease);
+    }
+    #boot.boot-hidden { opacity: 0; pointer-events: none; }
+
+    .boot-inner {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+      max-width: 30rem;
+      width: 100%;
+    }
+
+    .boot-loader {
+      position: relative;
+      width: 72px;
+      height: 72px;
+      display: grid;
+      place-items: center;
+    }
+    #boot .brand-mark { width: 42px; height: 42px; display: block; overflow: visible; }
+    #boot .brand-mark .ring { fill: none; stroke: var(--fg); stroke-width: 1.6px; }
+    #boot .brand-mark .core { fill: var(--fg); }
+
+    .boot-spin {
+      position: absolute;
+      inset: 0;
+      width: 72px;
+      height: 72px;
+      animation: boot-rotate 1.05s linear infinite;
+    }
+    .boot-spin-track { fill: none; stroke: var(--border); stroke-width: 2; }
+    .boot-spin-arc {
+      fill: none;
+      stroke: var(--accent);
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-dasharray: 34 200;
+    }
+    @keyframes boot-rotate { to { transform: rotate(360deg); } }
+
+    .boot-word {
+      margin-top: 22px;
+      font-family: var(--font-display);
+      font-weight: 600;
+      font-size: clamp(22px, 5vw, 30px);
+      letter-spacing: -.02em;
+      color: var(--fg);
+    }
+    .boot-status {
+      margin: 11px 0 0;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 500;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    /* ── Error / timeout state (revealed by the boot controller) ── */
+    .boot-error { display: none; margin-top: 26px; width: 100%; }
+    #boot.boot-errored .boot-spin { display: none; }
+    #boot.boot-errored .boot-status { display: none; }
+    #boot.boot-errored .boot-error { display: block; }
+
+    .boot-error-card {
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      background: var(--surface);
+      box-shadow: 0 0 0 1px rgba(176, 199, 217, .1);
+      padding: clamp(20px, 4vw, 26px);
+      text-align: left;
+    }
+    .boot-error-title {
+      margin: 0 0 8px;
+      font-family: var(--font-display);
+      font-weight: 600;
+      font-size: clamp(19px, 3.4vw, 23px);
+      letter-spacing: -.01em;
+      color: var(--fg);
+    }
+    .boot-error-body {
+      margin: 0 0 18px;
+      font-family: var(--font-body);
+      font-size: 14px;
+      line-height: 1.6;
+      color: var(--fg-2);
+      text-wrap: pretty;
+    }
+    .boot-error-body code {
+      font-family: var(--font-mono);
+      font-size: 12.5px;
+      color: var(--fg);
+      background: color-mix(in oklab, var(--fg), transparent 92%);
+      padding: 1px 6px;
+      border-radius: 6px;
+    }
+    .boot-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+
+    .boot-btn {
+      appearance: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 44px;
+      padding: 0 20px;
+      border-radius: 9999px;
+      border: 1px solid var(--fg);
+      background: var(--fg);
+      color: var(--bg);
+      font-family: var(--font-body);
+      font-size: 14px;
+      font-weight: 500;
+      letter-spacing: .01em;
+      text-decoration: none;
+      cursor: pointer;
+      transition: transform var(--motion-fast) var(--motion-ease),
+                  background var(--motion-fast) ease,
+                  border-color var(--motion-fast) ease;
+    }
+    .boot-btn:hover { background: #fff; transform: translateY(-1px); }
+    [data-theme="light"] .boot-btn:hover { background: #000; }
+    .boot-btn:active { transform: translateY(0); }
+    .boot-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+    .boot-btn-ghost {
+      background: transparent;
+      color: var(--fg);
+      border: 1px solid var(--border-strong);
+    }
+    .boot-btn-ghost:hover {
+      background: color-mix(in oklab, var(--fg), transparent 90%);
+      border-color: var(--fg);
+    }
+    [data-theme="light"] .boot-btn-ghost:hover { background: color-mix(in oklab, var(--fg), transparent 94%); }
+
+    /* ── No-JS fallback ── */
+    .boot-noscript {
+      position: fixed;
+      inset: 0;
+      z-index: 2147483001;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background: var(--bg);
+      text-align: center;
+    }
+    .boot-noscript p {
+      max-width: 28rem;
+      font-family: var(--font-body);
+      font-size: 15px;
+      line-height: 1.6;
+      color: var(--fg-2);
+    }
+    .boot-noscript strong {
+      display: block;
+      margin-bottom: 6px;
+      font-family: var(--font-display);
+      font-weight: 600;
+      font-size: 20px;
+      letter-spacing: -.01em;
+      color: var(--fg);
+    }
+
+    /* ── Motion discipline: strip axis motion; keep a static affordance ── */
+    @media (prefers-reduced-motion: reduce) {
+      #boot { transition: none; }
+      .boot-spin { animation: none; }
+      .boot-spin-arc { display: none; }
+      .boot-spin-track { stroke: var(--accent); opacity: .55; }
+      .boot-btn:hover, .boot-btn:active { transform: none; }
+    }
+  </style>
+
+  <!--
+    Load the compiled stylesheet non-render-blocking (origin-absolute, so it
+    resolves on nested routes like /app and /internal/admin that the server
+    aliases to this same shell). Injecting it here — rather than a render-
+    blocking <link> in <head> — lets the inline boot styles above paint the
+    splash instantly instead of waiting on the 83 KB bundle stylesheet.
+  -->
+  <script>
+    (function () {
+      var link = document.createElement('link');
+      link.rel = 'stylesheet';
+      link.href = '/react-app.css';
+      document.head.appendChild(link);
+    })();
+  </script>
 </head>
 <body>
+  <!-- Branded boot overlay. Sits over (not inside) #root, because the app mounts
+       with createRoot(#root).render(), which clears #root's own children. The
+       controller below removes this overlay the moment React commits its tree. -->
+  <div id="boot" role="status" aria-live="polite" aria-busy="true" aria-label="Loading the AstraNull console" data-od-id="boot-overlay">
+    <div class="boot-inner">
+      <div class="boot-loader">
+        <!-- App brand mark, reproduced verbatim from the compiled bundle for a seamless handoff. -->
+        <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+          <defs>
+            <clipPath id="bootMarkClip"><circle cx="16" cy="16" r="13.4" /></clipPath>
+          </defs>
+          <circle class="ring" cx="16" cy="16" r="14.5" />
+          <path class="core" clip-path="url(#bootMarkClip)" d="M16 -5 L34.6 27 L-2.6 27 Z" />
+        </svg>
+        <svg class="boot-spin" viewBox="0 0 44 44" aria-hidden="true" focusable="false">
+          <circle class="boot-spin-track" cx="22" cy="22" r="20" />
+          <circle class="boot-spin-arc" cx="22" cy="22" r="20" />
+        </svg>
+      </div>
+
+      <div class="boot-word">AstraNull</div>
+      <p class="boot-status" id="boot-status">Loading console</p>
+
+      <div class="boot-error" data-od-id="boot-error">
+        <div class="boot-error-card" role="alert" aria-hidden="true" id="boot-error-alert">
+          <h1 class="boot-error-title">Console didn't load</h1>
+          <p class="boot-error-body">
+            The readiness console didn't finish loading. This is usually a
+            temporary network issue — reload to try again, or return to the
+            landing page.
+          </p>
+          <div class="boot-actions">
+            <button type="button" class="boot-btn" id="boot-retry" data-od-id="boot-retry">Reload console</button>
+            <a class="boot-btn boot-btn-ghost" href="/" data-od-id="boot-landing">View landing page</a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <noscript>
+    <div class="boot-noscript">
+      <p><strong>AstraNull needs JavaScript</strong>Enable JavaScript to load the readiness console.</p>
+    </div>
+  </noscript>
+
   <div id="root"></div>
-  <script type="module" src="/react-app.js"></script>
+
+  <!-- Boot controller: detect mount, escalate to an error state on timeout/failure. -->
+  <script>
+    (function () {
+      var boot = document.getElementById('boot');
+      var root = document.getElementById('root');
+      if (!boot || !root) return;
+
+      var settled = false;
+      var timer = null;
+      var obs = null;
+
+      function mounted() { return !!root.querySelector('*'); }
+
+      function finish() {
+        if (settled) return;
+        settled = true;
+        if (timer) { clearTimeout(timer); timer = null; }
+        if (obs) { obs.disconnect(); obs = null; }
+        boot.classList.add('boot-hidden');
+        var removed = false;
+        function remove() {
+          if (removed) return;
+          removed = true;
+          if (boot && boot.parentNode) boot.parentNode.removeChild(boot);
+        }
+        boot.addEventListener('transitionend', remove, { once: true });
+        // Fallback if the fade doesn't fire (e.g. prefers-reduced-motion).
+        setTimeout(remove, 650);
+      }
+
+      function fail() {
+        if (settled) return;
+        settled = true;
+        if (timer) { clearTimeout(timer); timer = null; }
+        if (obs) { obs.disconnect(); obs = null; }
+        var status = document.getElementById('boot-status');
+        if (status) status.textContent = '';
+        var alertEl = document.getElementById('boot-error-alert');
+        if (alertEl) alertEl.setAttribute('aria-hidden', 'false');
+        boot.classList.add('boot-errored');
+        boot.setAttribute('aria-busy', 'false');
+        var retry = document.getElementById('boot-retry');
+        if (retry) { try { retry.focus(); } catch (e) {} }
+      }
+
+      // React commits its tree into #root — that's our "mounted" signal.
+      obs = new MutationObserver(function () { if (mounted()) finish(); });
+      obs.observe(root, { childList: true, subtree: true });
+      if (mounted()) finish(); // guard against a race where mount already happened
+
+      var TIMEOUT = (typeof window.__BOOT_TIMEOUT_MS__ === 'number') ? window.__BOOT_TIMEOUT_MS__ : 12000;
+      timer = setTimeout(function () { if (!settled && !mounted()) fail(); }, TIMEOUT);
+
+      var retryBtn = document.getElementById('boot-retry');
+      if (retryBtn) retryBtn.addEventListener('click', function () { window.location.reload(); });
+
+      // Let the module loader report a hard load failure without waiting for the timeout.
+      window.__astranullBootFail = fail;
+    })();
+  </script>
+
+  <!-- Inject the ES module bundle after #root exists. Origin-absolute so it
+       resolves on nested routes the server aliases to this shell. -->
+  <script>
+    (function () {
+      var s = document.createElement('script');
+      s.type = 'module';
+      s.src = '/react-app.js';
+      s.onerror = function () { if (window.__astranullBootFail) window.__astranullBootFail(); };
+      document.body.appendChild(s);
+    })();
+  </script>
 </body>
 </html>

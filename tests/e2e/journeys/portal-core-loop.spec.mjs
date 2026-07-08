@@ -28,7 +28,7 @@ test.describe('portal core loop (Playwright)', () => {
     await injectPortalDevHeadersSession(page);
     await gotoPortalRoute(page, 'dashboard', baseUrl);
 
-    await expect(page.getByText('Readiness score', { exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Readiness overview', exact: true })).toBeVisible();
     await expect(page.getByText(String(apiScore), { exact: true }).first()).toBeVisible();
   });
 
@@ -43,7 +43,7 @@ test.describe('portal core loop (Playwright)', () => {
     await injectPortalDevHeadersSession(page);
     await gotoPortalRoute(page, 'target-groups', baseUrl);
 
-    await expect(page.getByText('Declared target groups')).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Target groups', exact: true })).toBeVisible();
     await expect(page.getByRole('cell', { name: 'edge-checkout' })).toBeVisible();
   });
 });

@@ -129,7 +129,7 @@ test.describe('portal state coverage (FT-STATE-*)', () => {
       entityIds: { 'target-group-detail': PORTAL_EDGE_IDS.longNameGroupId },
     });
 
-    const title = page.locator('h2.page-title');
+    const title = page.locator('h1.page-title');
     await expect(title).toBeVisible();
     const titleText = await title.textContent();
     expect((titleText ?? '').length).toBeGreaterThanOrEqual(256);

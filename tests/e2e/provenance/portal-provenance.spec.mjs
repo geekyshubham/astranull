@@ -118,7 +118,7 @@ test.describe('portal dynamic provenance', () => {
 
     const ladderMeta = page.locator('.verify-ladder .vl-meta');
     const promotedTargetRow = page.locator('tr').filter({ hasText: PROVENANCE_DNS_LADDER.promotedTargetValue });
-    await expect(ladderMeta.filter({ hasText: `${PROVENANCE_DNS_LADDER.baselineDnsVerified}/${PROVENANCE_DNS_LADDER.total}` })).toBeVisible();
+    await expect(ladderMeta.filter({ hasText: `${PROVENANCE_DNS_LADDER.baselineDnsVerified} of ${PROVENANCE_DNS_LADDER.total}` })).toBeVisible();
     await expect(promotedTargetRow).toContainText('agent_verified');
 
     await restartPortalPlaywrightServer({ mutate: applyPortalProvenanceDnsLadderExpanded });
@@ -128,7 +128,7 @@ test.describe('portal dynamic provenance', () => {
     expect(mutatedDns?.count).toBe(PROVENANCE_DNS_LADDER.mutatedDnsVerified);
 
     await page.goto(`${mutatedBaseUrl}/app#target-group-detail?id=${encodeURIComponent(PORTAL_BASELINE_IDS.targetGroupId)}`, { waitUntil: 'networkidle', timeout: 60_000 });
-    await expect(ladderMeta.filter({ hasText: `${PROVENANCE_DNS_LADDER.mutatedDnsVerified}/${PROVENANCE_DNS_LADDER.total}` })).toBeVisible();
+    await expect(ladderMeta.filter({ hasText: `${PROVENANCE_DNS_LADDER.mutatedDnsVerified} of ${PROVENANCE_DNS_LADDER.total}` })).toBeVisible();
     await expect(promotedTargetRow).toContainText('dns_verified');
   });
 
