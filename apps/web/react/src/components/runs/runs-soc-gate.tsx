@@ -456,7 +456,6 @@ export function RunsPageHeadActions({
 }) {
   return (
     <>
-      <Button size="sm" variant="ghost" loading={refreshBusy} onClick={onRefresh}>Refresh</Button>
       <Button size="sm" variant="secondary" onClick={onRequestSoc}>Request SOC-gated run</Button>
       <Button size="sm" loading={safeRunBusy} disabled={safeRunDisabled} onClick={onStartSafeRun}>Run safe checks</Button>
     </>

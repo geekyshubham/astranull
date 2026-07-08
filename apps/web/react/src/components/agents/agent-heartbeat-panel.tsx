@@ -114,18 +114,6 @@ export function AgentHeartbeatPanel({
         </div>
         <div className="row-actions">
           <VerifyChip state={verified ? 'agent_verified' : 'awaiting_heartbeat'} provenance={provenance} />
-          <Button
-            size="sm"
-            variant="ghost"
-            loading={refreshing}
-            aria-label="Refresh heartbeat trace"
-            onClick={() => {
-              setNowMs(Date.now());
-              onRefresh();
-            }}
-          >
-            Refresh
-          </Button>
         </div>
       </CardHeader>
       <CardContent className="stack-tight">

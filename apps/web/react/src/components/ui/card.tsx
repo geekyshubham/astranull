@@ -15,7 +15,7 @@ const cardPrimitiveStyles = `
 [data-ui='card'] .card-title {
   font-family: var(--font-display);
   font-size: 15px;
-  font-weight: 500;
+  font-weight: 600;
   letter-spacing: -0.01em;
   color: var(--fg);
 }

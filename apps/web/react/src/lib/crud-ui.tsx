@@ -120,6 +120,66 @@ export function ConfirmModal({
   );
 }
 
+/**
+ * Reusable form popup built on the native <dialog> element (focus trap, Esc, and
+ * backdrop for free). Controlled via `open`; renders a titled header with a Close
+ * affordance and a scrollable body for the form. Errors/success should be rendered
+ * inside `children` so they stay visible above the backdrop.
+ */
+export function FormModal({
+  open,
+  title,
+  description,
+  onClose,
+  children,
+  wide = false
+}: {
+  open: boolean;
+  title: string;
+  description?: ReactNode;
+  onClose: () => void;
+  children: ReactNode;
+  wide?: boolean;
+}) {
+  const titleId = useId();
+  const descId = useId();
+  const dialogRef = useRef<HTMLDialogElement>(null);
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    if (open && !dialog.open) dialog.showModal();
+    if (!open && dialog.open) dialog.close();
+  }, [open]);
+
+  if (!open) return null;
+
+  return (
+    <dialog
+      ref={dialogRef}
+      className={`modal-confirm form-modal${wide ? ' form-modal-wide' : ''}`}
+      aria-labelledby={titleId}
+      aria-describedby={description ? descId : undefined}
+      onCancel={(event) => {
+        event.preventDefault();
+        onClose();
+      }}
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div className="form-modal-head">
+        <div className="form-modal-heading">
+          <h3 id={titleId}>{title}</h3>
+          {description ? <p id={descId} className="form-modal-desc">{description}</p> : null}
+        </div>
+        <Button type="button" size="sm" variant="ghost" onClick={onClose} aria-label="Close dialog">Close</Button>
+      </div>
+      <div className="form-modal-body">{children}</div>
+    </dialog>
+  );
+}
+
 export function useConfirmModal() {
   const [state, setState] = useState<{
     open: boolean;

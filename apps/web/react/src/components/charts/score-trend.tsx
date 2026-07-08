@@ -50,9 +50,9 @@ function classifyRunVerdict(verdict: string): 'pass' | 'review' | 'gap' | null {
   return 'review';
 }
 
-const TREND_WIDTH = 200;
-const TREND_HEIGHT = 48;
-const TREND_PADDING = 4;
+const TREND_WIDTH = 320;
+const TREND_HEIGHT = 120;
+const TREND_PADDING = 12;
 
 function trendCoordinates(values: number[]) {
   const maxValue = Math.max(100, ...values, 1);
@@ -90,14 +90,26 @@ export function ScoreTrend({ runs, currentScore, tone }: ScoreTrendProps) {
     );
   }
 
-  const coords = trendCoordinates(points.map((point) => point.value));
+  const chartValues = points.map((point) => point.value);
+  const maxValue = Math.max(100, ...chartValues);
+  const coords = trendCoordinates(chartValues);
   const polylinePoints = coords.map(({ x, y }) => `${x},${y}`).join(' ');
+  const baselineY = TREND_HEIGHT - TREND_PADDING;
+  const areaPoints = `${coords[0].x},${baselineY} ${polylinePoints} ${coords[coords.length - 1].x},${baselineY}`;
+  const gridLevels = [0, 50, 100];
+  const gridYs = gridLevels.map(
+    (level) => TREND_HEIGHT - TREND_PADDING - (level / maxValue) * (TREND_HEIGHT - TREND_PADDING * 2)
+  );
 
   const ariaLabel = `Readiness verdict trend across ${points.length} verdicted run${points.length === 1 ? '' : 's'}; current score ${end}`;
 
   return (
     <div className="score-trend" role="img" aria-label={ariaLabel}>
       <svg className="score-trend-svg" viewBox={`0 0 ${TREND_WIDTH} ${TREND_HEIGHT}`} width="100%" preserveAspectRatio="xMidYMid meet">
+        {gridYs.map((gy, index) => (
+          <line key={gridLevels[index]} className="score-trend-grid" x1={TREND_PADDING} x2={TREND_WIDTH - TREND_PADDING} y1={gy} y2={gy} />
+        ))}
+        <polygon className={cn('score-trend-area', `score-trend-stroke--${strokeTone}`)} points={areaPoints} />
         <polyline
           className={cn('score-trend-line', `score-trend-stroke--${strokeTone}`)}
           points={polylinePoints}
@@ -112,7 +124,7 @@ export function ScoreTrend({ runs, currentScore, tone }: ScoreTrendProps) {
             className={cn('score-trend-point', `score-trend-stroke--${strokeTone}`)}
             cx={x}
             cy={y}
-            r={2.5}
+            r={3}
             fill={strokeColor}
           />
         ))}

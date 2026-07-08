@@ -1,6 +1,7 @@
 import type { DataItem } from './types';
 
 export type CheckFamilyTabId =
+  | 'all'
   | 'recommended'
   | 'origin-bypass'
   | 'l3l4'
@@ -69,6 +70,7 @@ function isL7ApiCheck(check: DataItem) {
 }
 
 export function filterChecksByFamilyTab(checks: DataItem[], familyTab: CheckFamilyTabId) {
+  if (familyTab === 'all') return checks;
   if (familyTab === 'custom') return [];
   if (familyTab === 'recommended') {
     const safe = checks.filter((check) => isSafeCheck(check));

@@ -3821,6 +3821,26 @@ function CheckDetailPage({ entityId, data }: { entityId: string; data: PortalDat
     `last_verdict: ${latest ? latest.verdict : 'none'}`
   ].join('\n');
 
+  const toList = (value: unknown): string[] =>
+    Array.isArray(value) ? value.map((entry) => String(entry)).filter(Boolean) : [];
+  const humanize = (value: string) => value.replace(/_/g, ' ');
+  const remediation = getString(check, ['remediation_template', 'remediation'], '');
+  const verdictLogic = getString(check, ['verdict_logic'], '');
+  const explanation = getString(check, ['explanation_template', 'explanation'], '');
+  const expectedBehavior = getString(check, ['default_expected_behavior'], '');
+  const supportedTargets = toList(check.supported_targets);
+  const agentModes = toList(check.required_agent_modes);
+  const prerequisites = toList(check.prerequisites);
+  const customerSetup = toList(check.required_customer_setup);
+  const evidenceRequired = toList(check.evidence_required);
+  const stopConditions = toList(check.stop_conditions);
+  const maxEvents = getNestedNumber(check, ['safety_constraints', 'max_events'], 0);
+  const maxDuration = getNestedNumber(check, ['safety_constraints', 'max_duration_seconds'], 0);
+  const maxConcurrent = getNestedNumber(check, ['safety_constraints', 'max_concurrent_runs_per_target_group'], 0);
+  const probeProfile = getNestedItem(check, ['probe_profile']);
+  const probeKind = probeProfile ? getString(probeProfile, ['kind'], '') : '';
+  const probeRequests = getNestedNumber(check, ['probe_profile', 'max_requests'], 0);
+
   return (
     <div className="content">
       <DetailPageHeader
@@ -3837,6 +3857,120 @@ function CheckDetailPage({ entityId, data }: { entityId: string; data: PortalDat
         <MetricCard label="Bound" value={bound} sub="Rate / probe bound" icon={Activity} tone="muted" />
         <MetricCard label="Last verdict" value={latest ? formatStatusLabel(latest.verdict) : 'None'} sub={latest ? 'From most recent run' : 'No runs yet'} icon={FileCheck2} tone={latest ? (outcomeBadgeTone(latest.verdict) === 'danger' ? 'danger' : outcomeBadgeTone(latest.verdict) === 'warn' ? 'warn' : 'success') : 'muted'} />
       </div>
+      {remediation ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Remediation</CardTitle>
+            <CardDescription>Recommended action when this check surfaces a gap.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <p className="check-detail-text">{remediation}</p>
+          </CardContent>
+        </Card>
+      ) : null}
+      {verdictLogic || explanation || expectedBehavior ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>How this check reaches a verdict</CardTitle>
+            <CardDescription>Correlation logic and expected behavior for this vector.</CardDescription>
+          </CardHeader>
+          <CardContent className="stack">
+            {verdictLogic ? (
+              <div>
+                <p className="check-fact-label">Verdict logic</p>
+                <p className="check-detail-text">{verdictLogic}</p>
+              </div>
+            ) : null}
+            {explanation ? (
+              <div>
+                <p className="check-fact-label">Explanation</p>
+                <p className="check-detail-text">{explanation}</p>
+              </div>
+            ) : null}
+            {expectedBehavior ? (
+              <div>
+                <p className="check-fact-label">Expected behavior</p>
+                <p className="check-detail-text">{humanize(expectedBehavior)}</p>
+              </div>
+            ) : null}
+          </CardContent>
+        </Card>
+      ) : null}
+      {supportedTargets.length || agentModes.length || prerequisites.length || customerSetup.length ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Requirements &amp; scope</CardTitle>
+            <CardDescription>What must be declared and placed before this check can run.</CardDescription>
+          </CardHeader>
+          <CardContent className="stack">
+            {supportedTargets.length ? (
+              <div>
+                <p className="check-fact-label">Supported targets</p>
+                <div className="row-actions">{supportedTargets.map((target) => <Badge key={target} tone="muted">{target}</Badge>)}</div>
+              </div>
+            ) : null}
+            {agentModes.length ? (
+              <div>
+                <p className="check-fact-label">Required agent modes</p>
+                <div className="row-actions">{agentModes.map((mode) => <Badge key={mode} tone="muted">{humanize(mode)}</Badge>)}</div>
+              </div>
+            ) : null}
+            {customerSetup.length ? (
+              <div>
+                <p className="check-fact-label">Required customer setup</p>
+                <ul className="check-detail-list">{customerSetup.map((item) => <li key={item}>{humanize(item)}</li>)}</ul>
+              </div>
+            ) : null}
+            {prerequisites.length ? (
+              <div>
+                <p className="check-fact-label">Prerequisites</p>
+                <ul className="check-detail-list">{prerequisites.map((item) => <li key={item}>{humanize(item)}</li>)}</ul>
+              </div>
+            ) : null}
+          </CardContent>
+        </Card>
+      ) : null}
+      {evidenceRequired.length || stopConditions.length || maxEvents || maxDuration || probeKind ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Evidence &amp; safety bounds</CardTitle>
+            <CardDescription>How the run stays bounded and what evidence a verdict requires.</CardDescription>
+          </CardHeader>
+          <CardContent className="stack">
+            {evidenceRequired.length ? (
+              <div>
+                <p className="check-fact-label">Evidence required</p>
+                <div className="row-actions">{evidenceRequired.map((item) => <Badge key={item} tone="info">{humanize(item)}</Badge>)}</div>
+              </div>
+            ) : null}
+            {maxEvents || maxDuration || maxConcurrent ? (
+              <div>
+                <p className="check-fact-label">Safety bounds</p>
+                <div className="row-actions">
+                  {maxEvents ? <Badge tone="muted">max {maxEvents} events</Badge> : null}
+                  {maxDuration ? <Badge tone="muted">max {maxDuration}s</Badge> : null}
+                  {maxConcurrent ? <Badge tone="muted">{maxConcurrent} concurrent / group</Badge> : null}
+                </div>
+              </div>
+            ) : null}
+            {probeKind ? (
+              <div>
+                <p className="check-fact-label">Probe profile</p>
+                <div className="row-actions">
+                  <code className="traffic-path-label">{probeKind}</code>
+                  {probeRequests ? <Badge tone="muted">{probeRequests} request{probeRequests === 1 ? '' : 's'}</Badge> : null}
+                </div>
+              </div>
+            ) : null}
+            {stopConditions.length ? (
+              <div>
+                <p className="check-fact-label">Stop conditions</p>
+                <ul className="check-detail-list">{stopConditions.map((item) => <li key={item}>{humanize(item)}</li>)}</ul>
+              </div>
+            ) : null}
+          </CardContent>
+        </Card>
+      ) : null}
       <Card>
         <CardHeader>
           <CardTitle>Definition</CardTitle>
@@ -4653,7 +4787,6 @@ export function ReportDetailPage({
         actions={(
           <>
             <AnchorButton size="sm" variant="secondary" href="#reports">Reports</AnchorButton>
-            <Button size="sm" variant="ghost" loading={busy === 'refresh-report'} disabled={busy !== ''} onClick={() => void runReportAction('refresh-report', onRefresh, 'Report refreshed.')}>Refresh</Button>
             <Button size="sm" variant="default" loading={busy === `export-${entityId}-json`} disabled={busy !== ''} onClick={() => void exportReport(entityId, 'json')}>Export JSON</Button>
           </>
         )}

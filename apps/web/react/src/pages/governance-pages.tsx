@@ -804,11 +804,6 @@ export function NotificationsPage({
     <div className="content">
       <PageHeader
         route="notifications"
-        actions={
-          <Button size="sm" variant="ghost" onClick={() => void onRefresh()} disabled={busy !== ''}>
-            Refresh
-          </Button>
-        }
       />
       <div className="metric-grid three">
         <MetricCard label="Delivered" value={deliveredCount} sub="successful deliveries" icon={CheckCircle2} tone="success" />
@@ -1583,9 +1578,6 @@ export function SocConsolePage({
         actions={
           <>
             {staffSocSurface ? <Badge tone="warn">Staff plane</Badge> : null}
-            <Button size="sm" variant="ghost" onClick={() => void onRefresh()} disabled={busy !== ''}>
-              Refresh
-            </Button>
           </>
         }
       />

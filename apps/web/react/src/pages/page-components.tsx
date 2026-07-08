@@ -32,7 +32,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../co
 import { TargetGroupPicker } from '../components/policies/target-group-picker';
 import { EmptyState } from '../components/ui/empty-state';
 import { emptyStateFromApi, readMetaAction } from '../lib/empty-from-api';
-import { ConfirmModal, formatMutationSuccessMessage, renderFriendlyEmptyState } from '../lib/crud-ui';
+import { ConfirmModal, FormModal, formatMutationSuccessMessage, renderFriendlyEmptyState } from '../lib/crud-ui';
 import { Progress, type ProgressTone } from '../components/ui/progress';
 import { DataTable, type TableColumn } from '../components/ui/table';
 import { Select, type SelectOption } from '../components/ui/select';
@@ -937,39 +937,8 @@ export function DashboardPage({
   onRefresh: () => Promise<void>;
 }) {
   const [tab, setTab] = useState<DashboardTabId>(readDashboardTabId);
-  const [runSafeBusy, setRunSafeBusy] = useState(false);
   const tabOptions = routeTabs('dashboard').map((item) => ({ id: item.id as DashboardTabId, label: item.label }));
   const workspaceHydrating = !data.state && data.targetGroups.length === 0 && data.runs.length === 0;
-
-  // Start a bounded safe run against the first declared target group + its first target + a safe
-  // check (mirrors startSafeRun in ValidationPage). Always navigates to Test runs so the CTA is
-  // never a dead end, even when required scope is missing or the start call fails.
-  async function handleRunSafeChecks() {
-    const firstGroup = data.targetGroups[0] ?? null;
-    const safeCheck = data.checks.find((check) => getString(check, ['safety_class']) === 'safe') ?? null;
-    const targetGroupId = getString(firstGroup ?? {}, ['id'], '');
-    const checkId = getString(safeCheck ?? {}, ['check_id'], '');
-    if (targetGroupId && checkId) {
-      setRunSafeBusy(true);
-      try {
-        const detail = (await requestJson(config, session, `/v1/target-groups/${targetGroupId}`)) as DataItem;
-        const targets = Array.isArray(detail.targets) ? (detail.targets as DataItem[]) : [];
-        const targetId = getString(targets[0] ?? {}, ['id'], '');
-        if (targetId) {
-          await requestJson(config, session, '/v1/test-runs', {
-            method: 'POST',
-            body: { check_id: checkId, target_group_id: targetGroupId, target_id: targetId }
-          });
-          await onRefresh();
-        }
-      } catch {
-        // Non-fatal: fall through to the run list.
-      } finally {
-        setRunSafeBusy(false);
-      }
-    }
-    window.location.hash = 'runs';
-  }
 
   useEffect(() => {
     const onHashChange = () => {
@@ -985,7 +954,6 @@ export function DashboardPage({
     persistDashboardTab(next);
   }
   const score = typeof data.state?.readiness?.score === 'number' ? data.state.readiness.score : null;
-  const factors = Array.isArray(data.state?.readiness?.factors) ? data.state.readiness.factors : [];
   const metrics = resolveDashboardMetrics(data);
   const recentRuns = resolveRecentRuns(data, 6);
   const openFindingRows = data.findings
@@ -995,8 +963,6 @@ export function DashboardPage({
     .filter((finding) => getString(finding, ['status'], 'open') === 'open')
     .sort((left, right) => String(left.created_at ?? left.id ?? '').localeCompare(String(right.created_at ?? right.id ?? '')))
     .slice(0, 8);
-  const nextSteps = buildDashboardNextSteps(data, metrics);
-  const prioritizedNext = nextSteps[0] ?? null;
   const topTargetGroups = [...data.targetGroups]
     .sort((left, right) => String(right.criticality ?? right.business_criticality ?? '').localeCompare(String(left.criticality ?? left.business_criticality ?? '')))
     .slice(0, 4);
@@ -1184,22 +1150,6 @@ export function DashboardPage({
         eyebrow={tenantEyebrow}
         title="Readiness overview"
         description="Every verdict below traces to observed probe data, agent observations, or explicit declarations."
-        actions={
-          <>
-            <Button variant="secondary" size="sm" onClick={() => void onRefresh()}>
-              Refresh
-            </Button>
-            <Button
-              variant="default"
-              size="sm"
-              loading={runSafeBusy}
-              disabled={runSafeBusy}
-              onClick={() => void handleRunSafeChecks()}
-            >
-              Run safe checks
-            </Button>
-          </>
-        }
       />
       <Tabs value={tab} options={tabOptions} onChange={handleDashboardTabChange} className="tabs-wrap" />
       {tab === 'overview' ? (
@@ -1357,92 +1307,6 @@ export function DashboardPage({
           </div>
           <Card>
             <CardHeader>
-              <CardTitle>Correlation matrix</CardTitle>
-              <CardDescription>Vector family x declared target group. Each cell classifies the latest bounded verdict as pass, review, or gap from real run evidence.</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <DashboardCorrelationMatrix checks={data.checks} targetGroups={data.targetGroups} runs={data.runs} />
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader>
-              <CardTitle>What to do next</CardTitle>
-              <CardDescription>One prioritized action from your current readiness posture. Complete it before diving into charts and feeds.</CardDescription>
-            </CardHeader>
-            <CardContent>
-              {!prioritizedNext ? (
-                <EmptyState icon={CheckCircle2} title="No urgent setup steps." body="Keep running safe validations and triage new findings as evidence arrives." actionLabel="Open test runs" actionHref="#runs" />
-              ) : (
-                <div className="stack-tight">
-                  <div className="row-actions">
-                    <Badge tone={prioritizedNext.tone}>{prioritizedNext.tone === 'warn' ? 'priority' : 'suggested'}</Badge>
-                    <strong>{prioritizedNext.title}</strong>
-                  </div>
-                  <p className="muted">{prioritizedNext.detail}</p>
-                  <AnchorButton href={prioritizedNext.href} variant="secondary" size="sm">Go to step</AnchorButton>
-                  {nextSteps.length > 1 ? (
-                    <ul className="dashboard-link-list muted">
-                      {nextSteps.slice(1, 4).map((step) => (
-                        <li key={step.key}>
-                          <div>
-                            <strong>{step.title}</strong>
-                            <span>{step.detail}</span>
-                          </div>
-                          <AnchorButton size="sm" variant="ghost" href={step.href}>Open</AnchorButton>
-                        </li>
-                      ))}
-                    </ul>
-                  ) : null}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-          <div className="split split--single">
-            <Card>
-              <CardHeader>
-                <CardTitle>Weighted factors</CardTitle>
-                <CardDescription>
-                  No factor can pass without supporting evidence. Each factor shows its weight and current score; the readiness trend and vector coverage matrix live on the Risk trends tab.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="factor-list">
-                {factors.length === 0 ? (
-                  <EmptyState
-                    icon={FileCheck2}
-                    title="No readiness factors returned."
-                    body="Factors appear after the platform publishes evidence-backed scoring inputs."
-                    actionLabel="Open target groups"
-                    actionHref="#target-groups"
-                  />
-                ) : (
-                  factors.map((factor: ReadinessFactor) => {
-                    const rawScore = Math.round(factor.score ?? 0);
-                    const weightFromApi = typeof factor.weight === 'number' && factor.weight > 0 ? factor.weight : null;
-                    const weight = weightFromApi ?? READINESS_FACTOR_WEIGHTS[factor.key ?? ''] ?? null;
-                    // Factor score is emitted in [0, weight] points; render per-factor health as a 0-100% share.
-                    const value = weight ? Math.max(0, Math.min(100, Math.round((rawScore / weight) * 100))) : rawScore;
-                    return (
-                      <div className="factor" key={factor.key ?? factor.label}>
-                        <div>
-                          <strong>{factor.label ?? factor.key}</strong>
-                          <span>{factor.reason ?? factor.detail ?? 'Awaiting evidence.'}</span>
-                          {weight !== null ? (
-                            <span className="mono" title={`Contributes up to ${weight} points to the readiness score`}>
-                              weight {weight} pts · scored {rawScore}/{weight}
-                            </span>
-                          ) : null}
-                        </div>
-                        <Badge tone={scoreTone(value)}>{value}%</Badge>
-                        <Progress value={value} tone={scoreProgressTone(value)} label={factor.label ?? factor.key ?? 'Readiness factor'} />
-                      </div>
-                    );
-                  })
-                )}
-              </CardContent>
-            </Card>
-          </div>
-          <Card>
-            <CardHeader>
               <CardTitle>WAF summary</CardTitle>
               <CardDescription>Rolled up across declared target groups. Per-target detail on the target page.</CardDescription>
             </CardHeader>
@@ -1450,15 +1314,12 @@ export function DashboardPage({
               <WafSummaryPanel summary={data.wafCoverageSummary} />
             </CardContent>
           </Card>
-          <details className="full">
-            <summary>Product guardrails (defensive validation rules)</summary>
-            <DefensiveRulesPanel />
-          </details>
         </>
         )
       ) : null}
       {tab === 'risk-trends' ? (
-        <div className="risk-trends-grid">
+        <div className="risk-trends-stack">
+          <div className="risk-trends-grid">
           <Card>
             <CardHeader>
               <CardTitle>Readiness trend</CardTitle>
@@ -1470,21 +1331,6 @@ export function DashboardPage({
               ) : (
                 <ScoreTrend runs={data.runs} currentScore={score} />
               )}
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader>
-              <CardTitle>Vector coverage matrix</CardTitle>
-              <CardDescription>Coverage by vector family and declared target group.</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <VectorHeatmap
-                checks={data.checks}
-                targetGroups={data.targetGroups}
-                testPolicies={data.testPolicies}
-                runs={data.runs}
-                evidence={data.evidence}
-              />
             </CardContent>
           </Card>
           <Card>
@@ -1514,6 +1360,22 @@ export function DashboardPage({
                   })}
                 </ul>
               )}
+            </CardContent>
+          </Card>
+          </div>
+          <Card>
+            <CardHeader>
+              <CardTitle>Vector coverage matrix</CardTitle>
+              <CardDescription>Coverage by vector family and declared target group.</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <VectorHeatmap
+                checks={data.checks}
+                targetGroups={data.targetGroups}
+                testPolicies={data.testPolicies}
+                runs={data.runs}
+                evidence={data.evidence}
+              />
             </CardContent>
           </Card>
         </div>
@@ -1948,7 +1810,8 @@ export function TargetGroupsPage({
     }
   }, [data.targetGroups, filteredGroups, addTargetGroupId]);
 
-  const [createFormsOpen, setCreateFormsOpen] = useState(false);
+  const [showCreateGroup, setShowCreateGroup] = useState(false);
+  const [showAddTarget, setShowAddTarget] = useState(false);
 
   const groupStatsById = new Map(
     businessServiceRows(data).map((row) => [row.groupId, row])
@@ -2132,6 +1995,7 @@ export function TargetGroupsPage({
       const id = String((created as { id: string }).id);
       setAddTargetGroupId(id);
       formElement.reset();
+      setShowCreateGroup(false);
     }
   }
 
@@ -2148,14 +2012,17 @@ export function TargetGroupsPage({
       setError('Target value is required.');
       return;
     }
-    await runTargetAction(`add-target-${effectiveGroupId}`, () => requestJson(config, session, `/v1/target-groups/${effectiveGroupId}/targets`, {
+    const added = await runTargetAction(`add-target-${effectiveGroupId}`, () => requestJson(config, session, `/v1/target-groups/${effectiveGroupId}/targets`, {
       method: 'POST',
       body: {
         kind: String(form.get('kind') ?? 'fqdn'),
         value
       }
     }), 'Declared target added to the selected group.');
-    formElement.reset();
+    if (added) {
+      formElement.reset();
+      setShowAddTarget(false);
+    }
   }
 
   return (
@@ -2164,15 +2031,26 @@ export function TargetGroupsPage({
         route="target-groups"
         actions={
           <>
-            <Button variant="secondary" size="sm" disabled={busy !== ''} onClick={() => void onRefresh()}>Refresh</Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={busy !== '' || filteredGroups.length === 0}
+              onClick={() => {
+                setError('');
+                setMessage('');
+                setShowAddTarget(true);
+              }}
+            >
+              Add target
+            </Button>
             <Button
               variant="default"
               size="sm"
+              disabled={busy !== ''}
               onClick={() => {
-                setCreateFormsOpen((open) => !open);
-                requestAnimationFrame(() =>
-                  document.getElementById('tg-create-forms')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-                );
+                setError('');
+                setMessage('');
+                setShowCreateGroup(true);
               }}
             >
               Create target group
@@ -2208,98 +2086,96 @@ export function TargetGroupsPage({
           />
         </CardContent>
       </Card>
-      {createFormsOpen ? (
-        <div id="tg-create-forms" className="split">
-          <Card>
-            <CardHeader>
-              <CardTitle>Create declared target group</CardTitle>
-              <CardDescription>Customers declare scope manually. AstraNull does not discover inventory automatically.</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <form className="product-form" onSubmit={handleCreateGroup}>
-                <label>
-                  <span>Name</span>
-                  <input name="name" placeholder="Retail Checkout - Production" required />
-                </label>
-                {environmentSelectOptions.length > 0 ? (
-                  <Select
-                    label="Environment"
-                    name="environment_id"
-                    value={selectedEnvironmentId}
-                    options={environmentSelectOptions}
-                    onChange={setSelectedEnvironmentId}
-                  />
-                ) : (
-                  <label>
-                    <span>Environment</span>
-                    <input name="environment_id" placeholder="Create an environment first" defaultValue="" />
-                    <p className="muted full">No environments exist yet. Create one on the <AnchorButton href="#environments" variant="ghost" size="sm">Environments</AnchorButton> page, then declare a target group.</p>
-                  </label>
-                )}
-                <details className="full" open={showCreateMoreOptions} onToggle={(event) => setShowCreateMoreOptions((event.currentTarget as HTMLDetailsElement).open)}>
-                  <summary>More options</summary>
-                  <label className="full">
-                    <span>Description</span>
-                    <textarea name="description" rows={3} placeholder="Business service, owner, and known protection context." />
-                  </label>
-                  <label>
-                    <span>Timezone</span>
-                    <input name="timezone" defaultValue="UTC" />
-                  </label>
-                  <label>
-                    <span>Max concurrent runs</span>
-                    <input name="max_concurrent_runs" type="number" min="1" max="5" defaultValue="1" />
-                  </label>
-                  <label>
-                    <span>Cooldown between runs (seconds)</span>
-                    <input name="min_seconds_between_runs" type="number" min="60" defaultValue="300" />
-                  </label>
-                </details>
-                <div className="form-actions full">
-                  <Button type="submit" loading={busy === 'create-target-group'}>Create group</Button>
-                </div>
-              </form>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader>
-              <CardTitle>Add declared target</CardTitle>
-              <CardDescription>Add FQDN, URL, IP/port, DNS, or canary targets to the selected group.</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <form className="product-form" onSubmit={handleAddTarget}>
-                <input type="hidden" name="kind" value={addTargetKind} />
-                <Select
-                  className="full"
-                  label="Selected group"
-                  value={effectiveGroupId}
-                  disabled={filteredGroups.length === 0}
-                  options={filteredGroups.length === 0
-                    ? [{ value: '', label: 'No target groups yet' }]
-                    : filteredGroups.map((group) => ({
-                      value: getString(group, ['id']),
-                      label: getString(group, ['name', 'id'])
-                    }))}
-                  onChange={setAddTargetGroupId}
-                />
-                <Select
-                  label="Target type"
-                  value={addTargetKind}
-                  options={TARGET_KIND_SELECT_OPTIONS}
-                  onChange={setAddTargetKind}
-                />
-                <label>
-                  <span>Value</span>
-                  <input name="value" placeholder="checkout.example.com" required />
-                </label>
-                <div className="form-actions full">
-                  <Button type="submit" loading={busy.startsWith('add-target-')} disabled={busy !== '' || !effectiveGroupId}>Add target</Button>
-                </div>
-              </form>
-            </CardContent>
-          </Card>
-        </div>
-      ) : null}
+      <FormModal
+        open={showCreateGroup}
+        title="Create declared target group"
+        description="Customers declare scope manually. AstraNull does not discover inventory automatically."
+        onClose={() => setShowCreateGroup(false)}
+      >
+        {error ? <div className="form-banner error" role="alert">{error}</div> : null}
+        <form className="product-form" onSubmit={handleCreateGroup}>
+          <label>
+            <span>Name</span>
+            <input name="name" placeholder="Retail Checkout - Production" required autoFocus />
+          </label>
+          {environmentSelectOptions.length > 0 ? (
+            <Select
+              label="Environment"
+              name="environment_id"
+              value={selectedEnvironmentId}
+              options={environmentSelectOptions}
+              onChange={setSelectedEnvironmentId}
+            />
+          ) : (
+            <label>
+              <span>Environment</span>
+              <input name="environment_id" placeholder="Create an environment first" defaultValue="" />
+              <p className="muted full">No environments exist yet. Create one on the <AnchorButton href="#environments" variant="ghost" size="sm">Environments</AnchorButton> page, then declare a target group.</p>
+            </label>
+          )}
+          <details className="full" open={showCreateMoreOptions} onToggle={(event) => setShowCreateMoreOptions((event.currentTarget as HTMLDetailsElement).open)}>
+            <summary>More options</summary>
+            <label className="full">
+              <span>Description</span>
+              <textarea name="description" rows={3} placeholder="Business service, owner, and known protection context." />
+            </label>
+            <label>
+              <span>Timezone</span>
+              <input name="timezone" defaultValue="UTC" />
+            </label>
+            <label>
+              <span>Max concurrent runs</span>
+              <input name="max_concurrent_runs" type="number" min="1" max="5" defaultValue="1" />
+            </label>
+            <label>
+              <span>Cooldown between runs (seconds)</span>
+              <input name="min_seconds_between_runs" type="number" min="60" defaultValue="300" />
+            </label>
+          </details>
+          <div className="form-actions full">
+            <Button type="button" variant="ghost" disabled={busy !== ''} onClick={() => setShowCreateGroup(false)}>Cancel</Button>
+            <Button type="submit" loading={busy === 'create-target-group'}>Create group</Button>
+          </div>
+        </form>
+      </FormModal>
+      <FormModal
+        open={showAddTarget}
+        title="Add declared target"
+        description="Add FQDN, URL, IP/port, DNS, or canary targets to the selected group."
+        onClose={() => setShowAddTarget(false)}
+      >
+        {error ? <div className="form-banner error" role="alert">{error}</div> : null}
+        <form className="product-form" onSubmit={handleAddTarget}>
+          <input type="hidden" name="kind" value={addTargetKind} />
+          <Select
+            className="full"
+            label="Selected group"
+            value={effectiveGroupId}
+            disabled={filteredGroups.length === 0}
+            options={filteredGroups.length === 0
+              ? [{ value: '', label: 'No target groups yet' }]
+              : filteredGroups.map((group) => ({
+                value: getString(group, ['id']),
+                label: getString(group, ['name', 'id'])
+              }))}
+            onChange={setAddTargetGroupId}
+          />
+          <Select
+            label="Target type"
+            value={addTargetKind}
+            options={TARGET_KIND_SELECT_OPTIONS}
+            onChange={setAddTargetKind}
+          />
+          <label>
+            <span>Value</span>
+            <input name="value" placeholder="checkout.example.com" required autoFocus />
+          </label>
+          <div className="form-actions full">
+            <Button type="button" variant="ghost" disabled={busy !== ''} onClick={() => setShowAddTarget(false)}>Cancel</Button>
+            <Button type="submit" loading={busy.startsWith('add-target-')} disabled={busy !== '' || !effectiveGroupId}>Add target</Button>
+          </div>
+        </form>
+      </FormModal>
     </div>
   );
 }
@@ -2629,7 +2505,6 @@ export function ReportsPage({
     <div className="content">
       <PageHeader
         route="reports"
-        actions={<Button variant="secondary" size="sm" disabled={busy !== ''} onClick={() => void onRefresh()}>Refresh</Button>}
       />
       <PageContextSummary>
         <span className="tabular-nums">{reports.length}</span> reports ·{' '}
@@ -2984,7 +2859,6 @@ export function SettingsPage({
       <PageHeader
         route="settings"
         eyebrow="Tenant configuration"
-        actions={<Button variant="secondary" size="sm" disabled={busy !== ''} onClick={() => void onRefresh()}>Refresh</Button>}
       />
       <PageContextSummary>
         {getString(tenant ?? {}, ['name'], 'Organization')} ·{' '}
@@ -3399,11 +3273,18 @@ export function EnvironmentsPage({
   const [busy, setBusy] = useState('');
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const [showDeclare, setShowDeclare] = useState(false);
   const rows = buildEnvironmentReadinessRows({
     targetGroups: data.targetGroups,
     runs: data.runs,
     findings: data.findings
   });
+
+  function openDeclare() {
+    setError('');
+    setMessage('');
+    setShowDeclare(true);
+  }
 
   async function handleCreateEnvironment(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -3425,8 +3306,7 @@ export function EnvironmentsPage({
       });
       setMessage(formatMutationSuccessMessage(`Declared environment ${name}.`, result));
       formElement.reset();
-      const el = document.querySelector('#environments-create');
-      if (el instanceof HTMLDetailsElement) el.open = false;
+      setShowDeclare(false);
       await onRefresh();
     } catch (err) {
       const payload = (err as Error & { payload?: unknown }).payload as { error?: string; message?: string } | undefined;
@@ -3511,21 +3391,9 @@ export function EnvironmentsPage({
       <PageHeader
         route="environments"
         actions={
-          <>
-            <Button variant="secondary" size="sm" disabled={busy !== ''} onClick={() => void onRefresh()}>Refresh</Button>
-            <Button
-              variant="default"
-              size="sm"
-              disabled={busy !== ''}
-              onClick={() => {
-                const el = document.querySelector('#environments-create');
-                if (el instanceof HTMLDetailsElement) el.open = true;
-                el?.scrollIntoView({ behavior: 'smooth' });
-              }}
-            >
-              Declare environment
-            </Button>
-          </>
+          <Button variant="default" size="sm" disabled={busy !== ''} onClick={openDeclare}>
+            Declare environment
+          </Button>
         }
       />
       {(message || error) && (
@@ -3544,44 +3412,34 @@ export function EnvironmentsPage({
                 title="No environments yet."
                 body="Declare an environment below, or create a target group with an environment ID to populate this view."
                 actionLabel="Declare environment"
-                onAction={() => {
-                  const el = document.querySelector('#environments-create');
-                  if (el instanceof HTMLDetailsElement) el.open = true;
-                  el?.scrollIntoView({ behavior: 'smooth' });
-                }}
+                onAction={openDeclare}
               />
             }
           />
         </CardContent>
       </Card>
-      <details id="environments-create" className="disclosure">
-        <summary>Declare environment</summary>
-        <Card>
-          <CardHeader>
-            <CardTitle>Declare a new environment</CardTitle>
-            <CardDescription>
-              Declared environments group target scope and validation evidence. No cloud credentials or IP discovery required.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <form className="product-form" onSubmit={handleCreateEnvironment}>
-              <label>
-                <span>Environment name</span>
-                <input name="name" placeholder="Production edge" required />
-              </label>
-              <label className="full">
-                <span>Description (optional)</span>
-                <input name="description" placeholder="What this environment covers" />
-              </label>
-              <div className="form-actions full">
-                <Button type="submit" loading={busy === 'create-environment'}>
-                  Declare environment
-                </Button>
-              </div>
-            </form>
-          </CardContent>
-        </Card>
-      </details>
+      <FormModal
+        open={showDeclare}
+        title="Declare a new environment"
+        description="Declared environments group target scope and validation evidence. No cloud credentials or IP discovery required."
+        onClose={() => setShowDeclare(false)}
+      >
+        {error ? <div className="form-banner error" role="alert">{error}</div> : null}
+        <form className="product-form" onSubmit={handleCreateEnvironment}>
+          <label>
+            <span>Environment name</span>
+            <input name="name" placeholder="Production edge" required autoFocus />
+          </label>
+          <label className="full">
+            <span>Description (optional)</span>
+            <input name="description" placeholder="What this environment covers" />
+          </label>
+          <div className="form-actions full">
+            <Button type="button" variant="ghost" disabled={busy !== ''} onClick={() => setShowDeclare(false)}>Cancel</Button>
+            <Button type="submit" loading={busy === 'create-environment'}>Declare environment</Button>
+          </div>
+        </form>
+      </FormModal>
     </div>
   );
 }
@@ -3813,7 +3671,6 @@ export function PolicyPage({
         description="Scheduled validation cadences, safe windows, and target bindings. Each schedule declares when bounded checks run and the verdict they expect. High-scale scenarios stay SOC-scheduled. Click a schedule to open its detail."
         actions={
           <>
-            <Button variant="secondary" size="sm" disabled={busy !== ''} onClick={() => void onRefresh()}>Refresh</Button>
             <Button
               variant="default"
               size="sm"
@@ -4174,7 +4031,6 @@ export function IntegrationPage({
         eyebrow="Connectors"
         actions={
           <>
-            <Button variant="secondary" size="sm" disabled={busy !== ''} onClick={() => void onRefresh()}>Refresh</Button>
             {connectorsEnabled ? (
               <Button
                 variant="default"
@@ -4893,7 +4749,6 @@ export function StaffSurfacePage({
       <PageHeader
         route={route}
         eyebrow={route === 'internal-soc' ? 'Staff SOC surface' : 'Staff-only surface'}
-        actions={<Button variant="secondary" size="sm" disabled={busy !== ''} onClick={() => void onRefresh()}>Refresh</Button>}
       />
       {(message || error) && <div className={error ? 'form-banner error' : 'form-banner'}>{error || message}</div>}
       <PageContextSummary>

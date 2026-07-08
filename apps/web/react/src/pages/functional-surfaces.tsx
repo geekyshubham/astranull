@@ -426,6 +426,7 @@ function checkStatusFilterKey(
 }
 
 const CHECK_FAMILY_FILTER_OPTIONS: { value: CheckFamilyTabId; label: string }[] = [
+  { value: 'all', label: 'All families' },
   { value: 'recommended', label: 'Recommended' },
   { value: 'origin-bypass', label: 'Origin bypass' },
   { value: 'l3l4', label: 'L3 / L4' },
@@ -797,6 +798,7 @@ export function AgentsPage({
   const [updateReleases, setUpdateReleases] = useState<DataItem[]>([]);
   const [trustKeys, setTrustKeys] = useState<DataItem[]>([]);
   const [auxLoading, setAuxLoading] = useState(false);
+  const [agentsTab, setAgentsTab] = useState<'fleet' | 'install' | 'operations'>('fleet');
 
   const onlineAgents = data.agents.filter((agent) => getString(agent, ['status']) === 'online').length;
   const firstGroup = data.targetGroups[0] ?? null;
@@ -1116,27 +1118,28 @@ export function AgentsPage({
 
   return (
     <div className="content">
-      <PageHeader
-        route="agents"
-        actions={(
-          <Button
-            size="sm"
-            variant="ghost"
-            loading={busy === 'refresh'}
-            disabled={busy !== ''}
-            onClick={() => void handleAgentsRefresh()}
-          >
-            Refresh
-          </Button>
-        )}
-      />
+      <PageHeader route="agents" />
       <PageContextSummary>
         <span className="tabular-nums">{data.targetGroups.length}</span> declared groups ·{' '}
         <span className="tabular-nums">{data.agents.length}</span> agents ·{' '}
         <span className="tabular-nums">{onlineAgents}</span> online
       </PageContextSummary>
       <MutationFeedbackBanner message={message} error={error} />
-      <div className="stack">
+      <Tabs
+        value={agentsTab}
+        options={[
+          { id: 'fleet' as const, label: 'Fleet', count: data.agents.length },
+          { id: 'install' as const, label: 'Install' },
+          { id: 'operations' as const, label: 'Operations' }
+        ]}
+        onChange={setAgentsTab}
+        className="tabs-wrap"
+        ariaLabel="Agents sections"
+        getTabId={(id) => `agents-tab-${id}`}
+        getPanelId={(id) => `agents-panel-${id}`}
+      />
+      {agentsTab === 'fleet' ? (
+        <div className="stack" role="tabpanel" id="agents-panel-fleet" aria-labelledby="agents-tab-fleet">
         <SurfaceTableCard
           title="Installed agents"
           description="Outbound-only observation agents. They call AstraNull over HTTPS. Click a row to open the agent detail."
@@ -1158,6 +1161,10 @@ export function AgentsPage({
             />
           )}
         />
+        </div>
+      ) : null}
+      {agentsTab === 'install' ? (
+        <div className="stack" role="tabpanel" id="agents-panel-install" aria-labelledby="agents-tab-install">
         <Card>
           <CardHeader>
             <CardTitle>Bootstrap token</CardTitle>
@@ -1229,6 +1236,10 @@ export function AgentsPage({
           createBusy={busy === 'create-bootstrap-token'}
           actionsDisabled={busy !== ''}
         />
+        </div>
+      ) : null}
+      {agentsTab === 'operations' ? (
+        <div className="stack" role="tabpanel" id="agents-panel-operations" aria-labelledby="agents-tab-operations">
         <div className="split">
           <SurfaceTableCard
             title="Release rollout"
@@ -1278,7 +1289,8 @@ export function AgentsPage({
             </CardContent>
           </Card>
         </div>
-      </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -1518,69 +1530,52 @@ export function ValidationSurfacePage({
   if (route === 'checks') {
     const columns: TableColumn<DataItem>[] = [
       {
-        key: 'check',
-        label: 'Check',
-        render: (item) => (
-          <code className="traffic-path-label" title={getString(item, ['check_id'])}>{getString(item, ['check_id'])}</code>
-        )
+        key: 'name',
+        label: 'Name',
+        render: (item) => <strong>{getString(item, ['name', 'check_id'], '—')}</strong>
       },
       {
         key: 'family',
         label: 'Family',
         render: (item) => (
-          <code className="traffic-path-label">{getString(item, ['vector_family'], '—').replace(/_/g, '-')}</code>
+          <Badge tone="info" title="Vector family from check catalog">
+            {formatVectorFamilyLabel(getString(item, ['vector_family'], ''))}
+          </Badge>
         )
       },
       {
-        key: 'mode',
-        label: 'Mode',
+        key: 'description',
+        label: 'Description',
         render: (item) => {
-          const safetyClass = getString(item, ['safety_class'], '');
-          return <Badge tone={checkModeBadgeTone(safetyClass)} title="Safety class from check catalog">{formatCheckModeLabel(safetyClass)}</Badge>;
+          const desc = getString(item, ['description', 'summary'], '');
+          return desc
+            ? <span className="cell-truncate" title={desc}>{desc}</span>
+            : <span className="muted">—</span>;
         }
       },
       {
-        key: 'bound',
-        label: 'Bound',
-        render: (item) => <code className="traffic-path-label">{formatCheckBoundLabel(item)}</code>
+        key: 'targets',
+        label: 'Targets',
+        render: (item) => {
+          const targets = Array.isArray(item.supported_targets)
+            ? (item.supported_targets as unknown[]).map((value) => String(value))
+            : [];
+          return targets.length
+            ? <code className="traffic-path-label">{targets.join(', ')}</code>
+            : <span className="muted">—</span>;
+        }
       },
       {
-        key: 'verdict',
-        label: 'Last verdict',
-        render: (item) => {
-          const checkId = getString(item, ['check_id'], '');
-          const safetyClass = getString(item, ['safety_class'], '');
-          const latest = latestCheckVerdicts.get(checkId);
-          if (!latest?.verdict) {
-            if (safetyClass === 'soc_gated') {
-              return <Badge tone="muted" title="SOC-gated checks run only after SOC approval">request</Badge>;
-            }
-            return <span className="muted">—</span>;
-          }
-          return (
-            <Badge tone={catalogVerdictBadgeTone(latest.verdict)} title="Latest correlated verdict for this check">
-              {formatCatalogVerdictLabel(latest.verdict)}
-            </Badge>
-          );
-        }
+        key: 'check',
+        label: 'Check ID',
+        render: (item) => (
+          <code className="traffic-path-label" title={getString(item, ['check_id'])}>{getString(item, ['check_id'])}</code>
+        )
       }
     ];
     return (
       <div className="content">
-        <PageHeader
-          route="checks"
-          actions={(
-            <Button
-              size="sm"
-              variant="ghost"
-              loading={busy === 'refresh'}
-              disabled={busy !== ''}
-              onClick={() => void handleSurfaceRefresh()}
-            >
-              Refresh
-            </Button>
-          )}
-        />
+        <PageHeader route="checks" />
         <Card>
           <CardHeader>
             <CardTitle>Check catalog</CardTitle>
@@ -1778,20 +1773,7 @@ export function ValidationSurfacePage({
   if (route === 'findings') {
     return (
       <div className="content">
-        <PageHeader
-          route="findings"
-          actions={(
-            <Button
-              size="sm"
-              variant="ghost"
-              loading={busy === 'refresh'}
-              disabled={busy !== ''}
-              onClick={() => void handleSurfaceRefresh()}
-            >
-              Refresh
-            </Button>
-          )}
-        />
+        <PageHeader route="findings" />
         <MutationFeedbackBanner message={message} error={error} neutral />
         <Card>
           <CardHeader>
