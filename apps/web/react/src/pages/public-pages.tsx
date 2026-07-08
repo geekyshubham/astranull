@@ -7,6 +7,7 @@ import {
   LockKeyhole,
   ShieldCheck,
   Siren,
+  TrendingUp,
   TriangleAlert,
   UserRound,
   type LucideIcon
@@ -394,7 +395,10 @@ function ReadinessConsolePreview() {
           <div style={{ position: 'absolute', textAlign: 'center' }}>
             <div style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-2xl)', lineHeight: 1, color: 'var(--fg)' }}>{readiness}</div>
             <div className="muted" style={{ fontSize: 'var(--text-xs)', textTransform: 'uppercase', letterSpacing: 'var(--tracking-caps)' }}>Readiness</div>
-            <div style={{ fontSize: 'var(--text-xs)', color: 'var(--success)' }}>▲ 6 vs last cycle</div>
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: 'var(--text-xs)', color: 'var(--fg-2)' }}>
+              <TrendingUp size={12} aria-hidden="true" style={{ color: 'var(--success)' }} />
+              6 vs last cycle
+            </div>
           </div>
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
@@ -408,7 +412,10 @@ function ReadinessConsolePreview() {
         </div>
       </div>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-2)', alignItems: 'center', fontSize: 'var(--text-xs)', borderTop: '1px solid var(--border)', paddingTop: 'var(--space-3)' }}>
-        <span style={{ color: 'var(--success)' }}>custody · json-key-sorted-v1</span>
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', color: 'var(--fg-2)' }}>
+          <ShieldCheck size={12} aria-hidden="true" style={{ color: 'var(--success)' }} />
+          custody · json-key-sorted-v1
+        </span>
         <span className="mono muted">sha256:9f2a…c41e</span>
         <span className="muted" style={{ marginLeft: 'auto' }}>evidence vault · 1,284 artifacts</span>
       </div>

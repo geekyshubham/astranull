@@ -18,6 +18,8 @@ import {
   ShieldCheck,
   Siren,
   Target,
+  TrendingDown,
+  TrendingUp,
   TriangleAlert,
   UserCog
 } from 'lucide-react';
@@ -408,11 +410,23 @@ function KpiCell({
   deltaVariant?: 'up' | 'down';
 }) {
   const deltaClassName = deltaVariant ? `kpi-delta ${deltaVariant}` : 'kpi-delta';
+  // Carry the up/down trend through a colored Lucide glyph (graphical, needs only 3:1) and keep the
+  // delta label on an AA-safe token. The bare --success text token is ~3.3:1 on the light theme's
+  // white KPI surface (DESIGN.md flags it "large only"), which fails WCAG AA 4.5:1 at this 11px
+  // size; the glyph preserves the direction signal without small colored text on white.
+  const DeltaIcon = deltaVariant === 'up' ? TrendingUp : deltaVariant === 'down' ? TrendingDown : null;
   return (
     <div className="kpi-cell">
       <div className="kpi-label">{label}</div>
       <div className="kpi-value">{value}</div>
-      <div className={deltaClassName}>{delta}</div>
+      {DeltaIcon ? (
+        <div className={deltaClassName} style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--space-1)' }}>
+          <DeltaIcon size={12} aria-hidden />
+          <span style={{ color: 'var(--fg-2)', minWidth: 0, overflowWrap: 'anywhere' }}>{delta}</span>
+        </div>
+      ) : (
+        <div className={deltaClassName}>{delta}</div>
+      )}
     </div>
   );
 }

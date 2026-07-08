@@ -575,10 +575,7 @@ function DetailBreadcrumb({ route, title, entityId }: { route: RouteId; title: s
   return (
     <p className="muted stack-tight">
       {listLink && listHref ? (
-        <>
-          <AnchorButton size="sm" variant="ghost" href={listHref}>← Back to {listLink.label}</AnchorButton>
-          {' · '}
-        </>
+        <AnchorButton size="sm" variant="ghost" href={listHref}>← Back to {listLink.label}</AnchorButton>
       ) : null}
       {groupLabel} › {listLabel} › {title}
     </p>
@@ -3309,10 +3306,11 @@ function SocRequestDetailView({
 
   async function submitSocNote(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const body = String(new FormData(event.currentTarget).get('body') ?? '').trim();
+    const form = event.currentTarget;
+    const body = String(new FormData(form).get('body') ?? '').trim();
     if (!body) return;
     await socAction('notes', { body });
-    event.currentTarget.reset();
+    form.reset();
     void loadSocNotes();
   }
 
@@ -4665,7 +4663,7 @@ export function ReportDetailPage({
         <DetailLoadingPlaceholder label={reportDetail.loading ? 'Loading report detail…' : 'Loading custody preview…'} variant="layout" />
       ) : (
       <>
-      <div className="metric-grid four">
+      <div className="metric-grid">
         <MetricCard label="Readiness" value={readinessScore} sub="Score out of 100" icon={ShieldCheck} tone={scoreTone(readinessScore)} />
         <MetricCard label="Status" value={formatStatusLabel(getString(report, ['status'], 'ready'))} sub="Delivery status" icon={FileCheck2} tone={reportStatusBadgeTone(getString(report, ['status'], 'ready')) === 'success' ? 'success' : 'muted'} />
         <MetricCard label="Open findings" value={openFindings} sub="Unresolved gaps at generation" icon={TriangleAlert} tone={openFindings > 0 ? 'danger' : 'muted'} />

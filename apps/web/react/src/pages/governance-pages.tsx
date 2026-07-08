@@ -1290,7 +1290,11 @@ export function ReleaseEvidencePage({ data, session }: { data: PortalData; sessi
 
   return (
     <div className="content">
-      <PageHeader route="audit" eyebrow="Release evidence" />
+      <PageHeader
+        route="audit"
+        title="Release evidence"
+        description="Accepted release-evidence kinds, coverage gaps, and the latest staging attestation for this tenant."
+      />
       {!allowed ? (
         <EmptyState icon={FileText} title="Release evidence access required." body="Switch to owner, admin, SOC, or auditor role to inspect production release evidence." />
       ) : (

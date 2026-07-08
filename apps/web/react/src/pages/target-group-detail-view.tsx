@@ -90,6 +90,15 @@ const tgDetailStyles = `
 .tg-detail-view .link-btn { background: none; border: 0; padding: 0; font: inherit; color: var(--accent); cursor: pointer; font-size: var(--text-xs); text-decoration: underline; text-underline-offset: 2px; }
 .tg-detail-view .link-btn:hover { color: var(--fg); }
 .tg-detail-view .link-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); border-radius: var(--radius-sm); }
+/* Light theme: brand orange (--accent) resolves to ~2.5:1 on the white surface and fails WCAG AA
+   4.5:1 for this small link text. Scope an AA-safe ink token to light only; dark theme keeps the
+   orange link (~9:1 on black). The underline carries the affordance in both themes. */
+:root[data-theme="light"] .tg-detail-view .link-btn { color: var(--fg-2); }
+:root[data-theme="light"] .tg-detail-view .link-btn:hover { color: var(--fg); }
+/* A signed LOA is a success state: realize the documented "green when signed" intent so the
+   callout no longer wears the unsigned warn border. Border + icon tone only, token-driven. */
+.tg-detail-view .callout-loa[data-loa-state="signed"] { border-color: color-mix(in oklab, var(--success), transparent 55%); }
+.tg-detail-view .callout-loa[data-loa-state="signed"] .callout-icon { color: var(--success); border-color: color-mix(in oklab, var(--success), transparent 55%); }
 `;
 
 function ensureStyles(id: string, css: string) {
