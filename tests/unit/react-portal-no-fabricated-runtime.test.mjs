@@ -38,10 +38,10 @@ describe('portal has no fabricated runtime fallbacks (audit FT-PROV)', () => {
 
   it('the tenant_id sent by bundled/dev login stays gated (not shown, not oidc identity)', () => {
     const src = read('pages/public-pages.tsx');
-    // ten_demo may only appear inside the dev-headers save and bundled-staging POST body,
-    // both of which are unreachable under a pure oidc-jwt build (loginDisabled short-circuits).
+    // ten_demo may only appear inside gated dev/bundled login paths and the optional Try demo CTA
+    // (all unreachable under a pure oidc-jwt build when loginDisabled short-circuits).
     const occurrences = src.match(/'ten_demo'/g) ?? [];
-    assert.equal(occurrences.length, 2, 'ten_demo should only exist in the two gated login request paths');
+    assert.equal(occurrences.length, 3, 'ten_demo should only exist in gated login and Try demo paths');
   });
 
   it('api.ts no longer ships the dead ensureDevSession helper', () => {

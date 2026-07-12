@@ -303,7 +303,7 @@ export function TargetDetailView({
               <div className="kpi-cell"><div className="kpi-label">Drift</div><div className="kpi-value">{getString(wafPosture, ['drift_reason'], 'none')}</div></div>
               <div className="kpi-cell"><div className="kpi-label">Validation</div><div className="kpi-value">{getString(wafPosture?.validation as DataItem | undefined, ['verdict'], '—')}</div></div>
               <div className="kpi-cell"><div className="kpi-label">Connector</div><div className="kpi-value">{getString(wafPosture?.connector as DataItem | undefined, ['state'], '—')}</div></div>
-              <div className="kpi-cell"><div className="kpi-label">Fingerprint</div><div className="kpi-value">{getString(wafPosture?.fingerprint as DataItem | undefined, ['signature'], '—')}</div></div>
+              <div className="kpi-cell"><div className="kpi-label">Fingerprint</div><div className="kpi-value mono" title={getString(wafPosture?.fingerprint as DataItem | undefined, ['signature'], '—')}>{getString(wafPosture?.fingerprint as DataItem | undefined, ['signature'], '—')}</div></div>
               <div className="kpi-cell"><div className="kpi-label">Marker rules</div><div className="kpi-value">{String(wafPosture?.marker_rules ?? '—')}</div></div>
               <div className="kpi-cell"><div className="kpi-label">Origin bypass</div><div className="kpi-value">{getString(wafPosture?.origin_bypass as DataItem | undefined, ['state'], '—')}</div></div>
             </div>

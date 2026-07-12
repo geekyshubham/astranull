@@ -68,6 +68,8 @@ const detailModalStyles = `
 .detail-modal .detail-modal-body {
   padding: 18px 20px;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  max-height: calc(min(88vh, 920px) - 64px);
 }
 .detail-modal .detail-modal-body .tabs {
   margin-bottom: var(--space-4);
@@ -85,6 +87,8 @@ const tgDetailStyles = `
 .tg-detail-view .dns-head { display: flex; align-items: center; gap: 10px; }
 .tg-detail-view .dns-head .spacer { flex: 1 1 auto; }
 .tg-detail-view .dns-footer { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.tg-detail-view .dns-footer .btn-loading { display: inline-flex; align-items: center; gap: 8px; }
+.tg-detail-view .dns-fields { align-items: start; }
 .tg-detail-view .dns-history { margin-top: 16px; }
 .tg-detail-view .dns-history-title { font-family: var(--font-mono); font-size: 10.5px; letter-spacing: var(--tracking-caps); text-transform: uppercase; color: var(--fg-2); margin: 0 0 8px; }
 .tg-detail-view .link-btn { background: none; border: 0; padding: 0; font: inherit; color: var(--accent); cursor: pointer; font-size: var(--text-xs); text-decoration: underline; text-underline-offset: 2px; }

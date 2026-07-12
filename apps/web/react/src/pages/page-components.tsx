@@ -55,7 +55,7 @@ import { buildDetailHref } from '../lib/route-params';
 import { DEFENSIVE_RULES, ROUTE_BY_ID } from '../lib/navigation';
 import { routeTabs } from '../lib/prototype-manifest';
 import type { DataItem, PortalConfig, PortalData, ReadinessFactor, RouteId, Session } from '../lib/types';
-import { formatDate, formatNumber, scoreTone } from '../lib/utils';
+import { formatAuditAction, formatDate, formatNumber, formatResourceTypeLabel, formatSeverityLabel, scoreTone } from '../lib/utils';
 
 function getString(item: DataItem, keys: string[], fallback = '—') {
   for (const key of keys) {
@@ -237,9 +237,9 @@ function runStatusBadgeTone(status: string): UiBadgeTone {
 
 function findingSeverityBadgeTone(severity: string): UiBadgeTone {
   const normalized = severity.toLowerCase();
-  if (normalized === 'critical' || normalized === 'high') return 'danger';
-  if (normalized === 'medium') return 'warn';
-  if (normalized === 'low') return 'info';
+  if (normalized === 'critical' || normalized === 'high' || normalized === 's1' || normalized === 's2') return 'danger';
+  if (normalized === 'medium' || normalized === 's3') return 'warn';
+  if (normalized === 'low' || normalized === 's4') return 'info';
   return 'muted';
 }
 
@@ -1104,7 +1104,7 @@ export function DashboardPage({
       key: 'severity',
       label: 'Severity',
       render: (item) => (
-        <Badge tone={findingSeverityBadgeTone(getString(item, ['severity']))}>{getString(item, ['severity'], 'unknown')}</Badge>
+        <Badge tone={findingSeverityBadgeTone(getString(item, ['severity']))}>{formatSeverityLabel(getString(item, ['severity'], 'unknown'))}</Badge>
       )
     },
     { key: 'owner', label: 'Owner', render: (item) => <span className="muted">{getString(item, ['assignee', 'owner'], 'unassigned')}</span> }
@@ -1185,7 +1185,7 @@ export function DashboardPage({
               }
               delta={`${formatNumber(metrics.targetGroups)} targets`}
             />
-            <KpiCell label="Open findings" value={metrics.openFindings} delta={`${openFindingsAtS2} at S2`} />
+            <KpiCell label="Open findings" value={metrics.openFindings} delta={`${openFindingsAtS2} at Severity 2 (High)`} />
             <KpiCell
               label="Agents healthy"
               value={`${agentsOnline}/${agentsTotalDisplay || agentsOnline}`}
@@ -1345,12 +1345,13 @@ export function DashboardPage({
                 <ul className="dashboard-link-list">
                   {agingFindings.map((finding) => {
                     const id = getString(finding, ['id'], '');
+                    const title = getString(finding, ['title', 'summary'], id);
                     return (
                       <li key={id}>
-                        <div>
-                          <strong>{getString(finding, ['title', 'id'])}</strong>
-                          <span className="row-actions">
-                            <Badge tone={findingSeverityBadgeTone(getString(finding, ['severity']))}>{getString(finding, ['severity'], 'unknown')}</Badge>
+                        <div className="dashboard-link-copy">
+                          <strong>{title}</strong>
+                          <span className="dashboard-link-meta">
+                            <Badge tone={findingSeverityBadgeTone(getString(finding, ['severity']))}>{formatSeverityLabel(getString(finding, ['severity'], 'unknown'))}</Badge>
                             <span className="muted">opened {formatDate(finding.created_at)}</span>
                           </span>
                         </div>
@@ -3463,6 +3464,7 @@ export function PolicyPage({
   const [policyCadence, setPolicyCadence] = useState('weekly');
   const [policyExpectedVerdict, setPolicyExpectedVerdict] = useState('pass');
   const [archivePolicyId, setArchivePolicyId] = useState('');
+  const [showCreateSchedule, setShowCreateSchedule] = useState(false);
   const safeChecks = data.checks.filter((check) => getString(check, ['safety_class']) === 'safe');
   const socGatedChecks = data.checks.filter((check) => getString(check, ['safety_class']) === 'soc_gated');
   const checksById = new Map<string, DataItem>(
@@ -3481,6 +3483,18 @@ export function PolicyPage({
       label: getString(check, ['name', 'check_id'])
     }))
   ];
+
+  useEffect(() => {
+    if (!showCreateSchedule) return;
+    if (!policyCheckId && safeChecks.length > 0) {
+      setPolicyCheckId(getString(safeChecks[0], ['check_id'], ''));
+    }
+    if (policyTargetGroupIds.length === 0 && data.targetGroups.length > 0) {
+      const firstGroup = data.targetGroups.find((group) => group.archived_at == null) ?? data.targetGroups[0];
+      const groupId = getString(firstGroup, ['id'], '');
+      if (groupId) setPolicyTargetGroupIds([groupId]);
+    }
+  }, [showCreateSchedule, data.targetGroups, policyCheckId, policyTargetGroupIds.length, safeChecks]);
   function formatPolicySafeWindow(item: DataItem) {
     const windows = item.safe_windows;
     if (!Array.isArray(windows) || windows.length === 0) return '—';
@@ -3633,6 +3647,7 @@ export function PolicyPage({
       ));
       setPolicyTargetGroupIds([]);
       formElement.reset();
+      setShowCreateSchedule(false);
       await onRefresh();
     } catch (err) {
       const payload = (err as Error & { payload?: unknown }).payload as { error?: string; message?: string } | undefined;
@@ -3675,13 +3690,9 @@ export function PolicyPage({
               variant="default"
               size="sm"
               disabled={busy !== ''}
-              onClick={() => {
-                const el = document.querySelector('#test-policies-create');
-                if (el instanceof HTMLDetailsElement) el.open = true;
-                el?.scrollIntoView({ behavior: 'smooth' });
-              }}
+              onClick={() => setShowCreateSchedule(true)}
             >
-              New schedule
+              Create schedule
             </Button>
           </>
         }
@@ -3706,7 +3717,7 @@ export function PolicyPage({
       {(message || error) && (
         <div className={error ? 'form-banner error' : 'form-banner neutral'}>{error || message}</div>
       )}
-      <Card>
+      <Card className="card--dense">
         <PanelCardHeader
           title="Safe validation schedules"
           description={
@@ -3737,26 +3748,22 @@ export function PolicyPage({
               title: 'No schedules yet.',
               body: 'Create a safe validation schedule after declaring target groups and reviewing the safe check catalog.',
               actionLabel: 'New schedule',
-              onAction: () => {
-                const el = document.querySelector('#test-policies-create');
-                if (el instanceof HTMLDetailsElement) el.open = true;
-                el?.scrollIntoView({ behavior: 'smooth' });
-              }
+              onAction: () => setShowCreateSchedule(true)
             })}
           />
         </CardContent>
       </Card>
-      <details id="test-policies-create" className="disclosure">
-        <summary>New schedule</summary>
-        <Card>
-          <CardHeader>
-            <CardTitle>Create safe validation schedule</CardTitle>
-            <CardDescription>
-              Bind a customer-runnable safe check to an active declared target group. SOC-gated checks remain request-only.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <form className="product-form" onSubmit={handleCreatePolicy}>
+      <FormModal
+        open={showCreateSchedule}
+        title="Create safe validation schedule"
+        description="Bind a customer-runnable safe check to an active declared target group. SOC-gated checks remain request-only."
+        wide
+        onClose={() => setShowCreateSchedule(false)}
+      >
+            {(message || error) && showCreateSchedule ? (
+              <div className={error ? 'form-banner error' : 'form-banner neutral'}>{error || message}</div>
+            ) : null}
+            <form className="product-form" onSubmit={(event) => void handleCreatePolicy(event)}>
               <input type="hidden" name="check_id" value={policyCheckId} />
               <input type="hidden" name="cadence" value={policyCadence} />
               <input type="hidden" name="expected_verdict" value={policyExpectedVerdict} />
@@ -3789,7 +3796,7 @@ export function PolicyPage({
                 <summary>Safe window (optional)</summary>
                 <label>
                   <span>Safe window day</span>
-                  <input name="safe_window_day" placeholder="Mon" />
+                  <input name="safe_window_day" defaultValue="Mon" placeholder="Mon" />
                 </label>
                 <label>
                   <span>Window timezone</span>
@@ -3797,22 +3804,21 @@ export function PolicyPage({
                 </label>
                 <label>
                   <span>Window start</span>
-                  <input name="safe_window_start" type="time" />
+                  <input name="safe_window_start" type="time" defaultValue="02:00" />
                 </label>
                 <label>
                   <span>Window end</span>
-                  <input name="safe_window_end" type="time" />
+                  <input name="safe_window_end" type="time" defaultValue="04:00" />
                 </label>
               </details>
               <div className="form-actions full">
+                <Button type="button" variant="ghost" disabled={busy !== ''} onClick={() => setShowCreateSchedule(false)}>Cancel</Button>
                 <Button type="submit" loading={busy === 'create-test-policy'} disabled={data.targetGroups.length === 0 || safeChecks.length === 0}>
                   Create schedule
                 </Button>
               </div>
             </form>
-          </CardContent>
-        </Card>
-      </details>
+      </FormModal>
       <ConfirmModal
         open={Boolean(archivePolicyId)}
         title={`Archive schedule ${archivePolicyId}`}
@@ -3847,6 +3853,8 @@ export function IntegrationPage({
 }) {
   const [selectedConnectorId, setSelectedConnectorId] = useState('');
   const [showConnectorAdvanced, setShowConnectorAdvanced] = useState(false);
+  const [showCreateConnector, setShowCreateConnector] = useState(false);
+  const [showManualSnapshot, setShowManualSnapshot] = useState(false);
   const [snapshots, setSnapshots] = useState<DataItem[]>([]);
   const [busy, setBusy] = useState('');
   const [message, setMessage] = useState('');
@@ -3878,9 +3886,9 @@ export function IntegrationPage({
         const rowBusy = busy === `validate-${id}` || busy === `poll-${id}` || busy === `snapshots-${id}` || busy === `disable-${id}`;
         const rowBlocked = busy !== '' && !rowBusy;
         return (
-          <div className="row-actions" aria-busy={rowBusy || undefined}>
+          <div className="row-actions row-actions--compact" aria-busy={rowBusy || undefined}>
             <Button size="sm" variant="secondary" loading={busy === `validate-${id}`} disabled={rowBlocked || isDisabled} onClick={() => void validateConnector(id)}>Validate</Button>
-            <Button size="sm" variant="secondary" loading={busy === `poll-${id}`} disabled={rowBlocked || isDisabled} onClick={() => void pollConnector(id)}>Poll now</Button>
+            <Button size="sm" variant="secondary" loading={busy === `poll-${id}`} disabled={rowBlocked || isDisabled} onClick={() => void pollConnector(id)}>Poll</Button>
             <Button size="sm" variant="ghost" loading={busy === `snapshots-${id}`} disabled={rowBlocked} onClick={() => void loadSnapshots(id)}>Snapshots</Button>
             <Button size="sm" variant="danger" loading={busy === `disable-${id}`} disabled={rowBlocked || isDisabled} onClick={() => void disableConnector(id)}>Disable</Button>
           </div>
@@ -3955,6 +3963,7 @@ export function IntegrationPage({
       }) as { connector?: DataItem };
       formElement.reset();
       if (created.connector?.id) setSelectedConnectorId(String(created.connector.id));
+      setShowCreateConnector(false);
       return created;
     }, 'Connector created from backend API.');
   }
@@ -4022,6 +4031,7 @@ export function IntegrationPage({
     const nextSnapshots = result && typeof result === 'object' && 'snapshots' in result ? (result as { snapshots?: DataItem[] }).snapshots : null;
     if (Array.isArray(nextSnapshots)) setSnapshots(nextSnapshots);
     formElement.reset();
+    setShowManualSnapshot(false);
   }
 
   return (
@@ -4030,21 +4040,19 @@ export function IntegrationPage({
         route="integrations"
         eyebrow="Connectors"
         actions={
-          <>
-            {connectorsEnabled ? (
+          connectorsEnabled ? (
+            <>
+              <Button variant="default" size="sm" onClick={() => setShowCreateConnector(true)}>Add connector</Button>
               <Button
-                variant="default"
+                variant="secondary"
                 size="sm"
-                onClick={() => {
-                  const el = document.querySelector('#integrations-create-connector');
-                  if (el instanceof HTMLDetailsElement) el.open = true;
-                  el?.scrollIntoView({ behavior: 'smooth' });
-                }}
+                disabled={activeConnectors.length === 0}
+                onClick={() => setShowManualSnapshot(true)}
               >
-                Add connector
+                Manual snapshot
               </Button>
-            ) : null}
-          </>
+            </>
+          ) : null
         }
       />
       <PageContextSummary>
@@ -4070,7 +4078,7 @@ export function IntegrationPage({
               {error || message}
             </div>
           )}
-          <Card>
+          <Card className="card--dense">
             <PanelCardHeader
               title="Configured connectors"
               description="Validate, poll, and disable connectors — plaintext credentials are never rendered."
@@ -4084,33 +4092,52 @@ export function IntegrationPage({
               />
             </CardContent>
           </Card>
-          <details id="integrations-create-connector" className="disclosure" open={activeConnectors.length === 0}>
-            <summary>Add connector</summary>
-            <Card>
-              <CardHeader>
-                <CardTitle>Create read-only connector</CardTitle>
-                <CardDescription>Store a provider credential in the encrypted secret vault or reference an existing secret, then create a metadata-only connector.</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <form className="product-form" onSubmit={handleCreateConnector} aria-busy={busy === 'create-connector' || undefined}>
-                  <fieldset disabled={busy !== ''}>
-                  <label>
-                    <span>Provider</span>
-                    <select name="provider" defaultValue="cloudflare">
-                      <option value="cloudflare">Cloudflare</option>
-                      <option value="aws_waf">AWS WAF</option>
-                    </select>
-                  </label>
-                  <label>
-                    <span>Name</span>
-                    <input name="name" placeholder="edge-readonly" required />
-                  </label>
-                  <label className="full">
-                    <span>API key or credential JSON</span>
-                    <textarea name="secret" rows={4} placeholder='Cloudflare token, or AWS JSON: {"access_key_id":"...","secret_access_key":"...","region":"us-east-1"}' />
-                  </label>
-                  <p className="muted full">Credentials are stored encrypted in the tenant secret vault before the connector is created. Plaintext is never shown again after submit.</p>
-                  {activeConnectors.length > 0 ? (
+          {snapshots.length > 0 ? (
+            <Card className="card--dense">
+              <PanelCardHeader
+                title="Loaded connector snapshots"
+                description="From poll results or manual metadata ingest."
+                trailing={<Badge tone="muted">{snapshots.length}</Badge>}
+              />
+              <CardContent className="support-evidence-list">
+                {snapshots.map((snapshot) => (
+                  <div key={getString(snapshot, ['id'])} className="support-evidence-item">
+                    <div className="support-evidence-main">
+                      <span className="support-evidence-type">{getString(snapshot, ['snapshot_kind'])}</span>
+                      <span className="support-evidence-action">{getString(snapshot, ['display_ref'])}</span>
+                    </div>
+                    <span className="muted">{formatDate(snapshot.observed_at ?? snapshot.created_at)}</span>
+                  </div>
+                ))}
+              </CardContent>
+            </Card>
+          ) : null}
+          <FormModal
+            open={showCreateConnector}
+            title="Create read-only connector"
+            description="Store a provider credential in the encrypted secret vault or reference an existing secret, then create a metadata-only connector."
+            wide
+            onClose={() => setShowCreateConnector(false)}
+          >
+            <form className="product-form" onSubmit={handleCreateConnector} aria-busy={busy === 'create-connector' || undefined}>
+              <fieldset disabled={busy !== ''}>
+                <label>
+                  <span>Provider</span>
+                  <select name="provider" defaultValue="cloudflare">
+                    <option value="cloudflare">Cloudflare</option>
+                    <option value="aws_waf">AWS WAF</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Name</span>
+                  <input name="name" placeholder="edge-readonly" required />
+                </label>
+                <label className="full">
+                  <span>API key or credential JSON</span>
+                  <textarea name="secret" rows={4} placeholder='Cloudflare token, or AWS JSON: {"access_key_id":"...","secret_access_key":"...","region":"us-east-1"}' />
+                </label>
+                <p className="muted full">Credentials are stored encrypted in the tenant secret vault before the connector is created. Plaintext is never shown again after submit.</p>
+                {activeConnectors.length > 0 ? (
                   <details className="full" open={showConnectorAdvanced} onToggle={(event) => setShowConnectorAdvanced((event.currentTarget as HTMLDetailsElement).open)}>
                     <summary>Advanced options</summary>
                     <label>
@@ -4134,97 +4161,74 @@ export function IntegrationPage({
                       </select>
                     </label>
                   </details>
-                  ) : null}
-                  <div className="form-actions full">
-                    <Button loading={busy === 'create-connector'} disabled={busy !== ''} type="submit">Create connector</Button>
-                  </div>
-                  </fieldset>
-                </form>
-              </CardContent>
-            </Card>
-          </details>
-          <details className="disclosure">
-            <summary>Manual metadata snapshot</summary>
-            <Card>
-              <CardHeader>
-                <CardTitle>Manual metadata snapshot</CardTitle>
-                <CardDescription>Use this when provider polling is unavailable or encryption is not configured locally.</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <form className="product-form" onSubmit={handleManualSnapshot}>
-                  <label className="full">
-                    <span>Connector</span>
-                    <select value={effectiveConnectorId} onChange={(event) => setSelectedConnectorId(event.target.value)}>
-                      {activeConnectors.map((connector) => (
-                        <option key={getString(connector, ['id'])} value={getString(connector, ['id'])}>
-                          {getString(connector, ['name'])} - {getString(connector, ['provider'])}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    <span>Snapshot kind</span>
-                    <select name="snapshot_kind" defaultValue="waf_policy">
-                      {CONNECTOR_SNAPSHOT_KIND_OPTIONS.map((option) => (
-                        <option key={option.value} value={option.value}>{option.label}</option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    <span>Display ref</span>
-                    <input name="display_ref" placeholder="zone-a" required />
-                  </label>
-                  <label>
-                    <span>Resource hash</span>
-                    <input name="resource_ref_hash" placeholder="res_hash_1" required />
-                  </label>
-                  <label>
-                    <span>Config hash</span>
-                    <input name="config_hash" placeholder="cfg_hash_1" required />
-                  </label>
-                  <label>
-                    <span>Policy mode</span>
-                    <select name="policy_mode" defaultValue="monitor">
-                      <option value="block">Block</option>
-                      <option value="monitor">Monitor</option>
-                      <option value="unknown">Unknown</option>
-                    </select>
-                  </label>
-                  <label>
-                    <span>Rule count</span>
-                    <input name="rule_count" type="number" min="0" defaultValue="0" />
-                  </label>
-                  <label className="full">
-                    <span>Hostnames</span>
-                    <input name="hostnames" placeholder="app.example.com, api.example.com" />
-                  </label>
-                  <div className="form-actions full">
-                    <Button disabled={busy !== '' || !effectiveConnectorId} type="submit">Ingest snapshot</Button>
-                  </div>
-                </form>
-              </CardContent>
-            </Card>
-          </details>
-          <details>
-            <summary>Connector snapshots ({snapshots.length} loaded)</summary>
-            <Card>
-              <PanelCardHeader
-                title="Connector snapshots"
-                description="Snapshots come from backend poll results or manual metadata ingest."
-                trailing={<Badge tone="muted">{snapshots.length} loaded</Badge>}
-              />
-              <CardContent className="queue-list">
-                {snapshots.length === 0 ? (
-                  <EmptyState icon={FileCheck2} title="No snapshots loaded." body="Select a connector action to load or ingest metadata snapshots." />
-                ) : snapshots.map((snapshot) => (
-                  <div key={getString(snapshot, ['id'])}>
-                    <Badge tone="info">{getString(snapshot, ['snapshot_kind'])}</Badge>
-                    <span>{getString(snapshot, ['display_ref'])} - {formatDate(snapshot.observed_at ?? snapshot.created_at)}</span>
-                  </div>
-                ))}
-              </CardContent>
-            </Card>
-          </details>
+                ) : null}
+                <div className="form-actions full">
+                  <Button type="button" variant="ghost" disabled={busy !== ''} onClick={() => setShowCreateConnector(false)}>Cancel</Button>
+                  <Button loading={busy === 'create-connector'} disabled={busy !== ''} type="submit">Create connector</Button>
+                </div>
+              </fieldset>
+            </form>
+          </FormModal>
+          <FormModal
+            open={showManualSnapshot}
+            title="Manual metadata snapshot"
+            description="Use this when provider polling is unavailable or encryption is not configured locally."
+            wide
+            onClose={() => setShowManualSnapshot(false)}
+          >
+            <form className="product-form" onSubmit={handleManualSnapshot}>
+              <label className="full">
+                <span>Connector</span>
+                <select value={effectiveConnectorId} onChange={(event) => setSelectedConnectorId(event.target.value)}>
+                  {activeConnectors.map((connector) => (
+                    <option key={getString(connector, ['id'])} value={getString(connector, ['id'])}>
+                      {getString(connector, ['name'])} - {getString(connector, ['provider'])}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>Snapshot kind</span>
+                <select name="snapshot_kind" defaultValue="waf_policy">
+                  {CONNECTOR_SNAPSHOT_KIND_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>Display ref</span>
+                <input name="display_ref" placeholder="zone-a" required />
+              </label>
+              <label>
+                <span>Resource hash</span>
+                <input name="resource_ref_hash" placeholder="res_hash_1" required />
+              </label>
+              <label>
+                <span>Config hash</span>
+                <input name="config_hash" placeholder="cfg_hash_1" required />
+              </label>
+              <label>
+                <span>Policy mode</span>
+                <select name="policy_mode" defaultValue="monitor">
+                  <option value="block">Block</option>
+                  <option value="monitor">Monitor</option>
+                  <option value="unknown">Unknown</option>
+                </select>
+              </label>
+              <label>
+                <span>Rule count</span>
+                <input name="rule_count" type="number" min="0" defaultValue="0" />
+              </label>
+              <label className="full">
+                <span>Hostnames</span>
+                <input name="hostnames" placeholder="app.example.com, api.example.com" />
+              </label>
+              <div className="form-actions full">
+                <Button type="button" variant="ghost" disabled={busy !== ''} onClick={() => setShowManualSnapshot(false)}>Cancel</Button>
+                <Button disabled={busy !== '' || !effectiveConnectorId} type="submit">Ingest snapshot</Button>
+              </div>
+            </form>
+          </FormModal>
         </>
       )}
     </div>
@@ -4297,18 +4301,25 @@ export function SupportPage({ data, session }: { data: PortalData; session: Sess
             <CardTitle>Recent support evidence</CardTitle>
             <CardDescription>Latest tenant audit events exposed as metadata-only support context.</CardDescription>
           </CardHeader>
-          <CardContent className="queue-list">
+          <CardContent className="queue-list support-evidence-list">
             {recentAudit.length === 0 ? (
               <EmptyState icon={FileCheck2} title="No recent support evidence." body="Tenant audit entries will appear here after support-relevant actions are recorded." />
-            ) : recentAudit.map((entry) => (
-              <div key={getString(entry, ['id', 'created_at', 'action'])} className="stack-tight">
-                <div className="row-actions">
-                  <Badge tone="info">{getString(entry, ['resource_type'], 'audit')}</Badge>
-                  <AnchorButton size="sm" variant="ghost" href="#audit">{getString(entry, ['action'])}</AnchorButton>
+            ) : recentAudit.map((entry) => {
+              const action = getString(entry, ['action'], '—');
+              const resourceType = getString(entry, ['resource_type'], 'audit');
+              return (
+                <div key={getString(entry, ['id', 'created_at', 'action'])} className="support-evidence-item">
+                  <div className="support-evidence-main">
+                    <span className="support-evidence-type">{formatResourceTypeLabel(resourceType)}</span>
+                    <span className="support-evidence-action">{formatAuditAction(action, action)}</span>
+                  </div>
+                  <div className="support-evidence-meta">
+                    <span className="muted">{formatDate(entry.created_at)}</span>
+                    <AnchorButton size="sm" variant="ghost" href="#audit">View</AnchorButton>
+                  </div>
                 </div>
-                <span className="muted">{formatDate(entry.created_at)}</span>
-              </div>
-            ))}
+              );
+            })}
           </CardContent>
         </Card>
       </div>

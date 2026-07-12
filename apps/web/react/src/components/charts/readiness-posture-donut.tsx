@@ -39,7 +39,7 @@ export function ReadinessPostureDonut({
 }) {
   const { segments, total, score } = resolveReadinessPostureSegments(state, runs, checks);
   const correlatedCount = segments.reduce((sum, segment) => sum + segment.count, 0);
-  const gradient = buildConicGradient(segments);
+  const gradient = buildConicGradient(segments, score);
   const ariaLabel = segments
     .filter((segment) => segment.count > 0)
     .map((segment) => `${segment.label} ${segment.count} checks ${segment.pct} percent`)

@@ -1,6 +1,6 @@
 import { buildDetailHref } from '../../lib/route-params';
 import type { DataItem } from '../../lib/types';
-import { formatDate } from '../../lib/utils';
+import { formatDate, formatSeverityLabel } from '../../lib/utils';
 import { findingSlaDueAt, isFindingSlaBreach } from '../../lib/findings-helpers';
 import { Badge } from '../ui/badge';
 
@@ -108,9 +108,9 @@ export function FindingCard({
       }}
     >
       <div className="fc-top">
-        <Badge tone={severityTone(severity)} title={`Severity ${severity} from finding API`}>{severity}</Badge>
+        <Badge tone={severityTone(severity)} title={`Severity ${severity} from finding API`}>{formatSeverityLabel(severity)}</Badge>
         {verdict ? <Badge tone="info" title={`Verdict ${verdict} from finding API`}>{verdict}</Badge> : null}
-        <span className="fc-meta mono">{id}</span>
+        <span className="fc-meta mono" title={id}>{id}</span>
       </div>
       <div className="fc-body">
         <div className="fc-headline">

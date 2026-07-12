@@ -1549,7 +1549,7 @@ export function ValidationSurfacePage({
         render: (item) => {
           const desc = getString(item, ['description', 'summary'], '');
           return desc
-            ? <span className="cell-truncate" title={desc}>{desc}</span>
+            ? <span className="cell-truncate cell-truncate--desc" title={desc} aria-label={desc}>{desc}</span>
             : <span className="muted">—</span>;
         }
       },
@@ -1565,13 +1565,6 @@ export function ValidationSurfacePage({
             : <span className="muted">—</span>;
         }
       },
-      {
-        key: 'check',
-        label: 'Check ID',
-        render: (item) => (
-          <code className="traffic-path-label" title={getString(item, ['check_id'])}>{getString(item, ['check_id'])}</code>
-        )
-      }
     ];
     return (
       <div className="content">
@@ -1664,14 +1657,14 @@ export function ValidationSurfacePage({
           const inProgress = isInProgressRunStatus(status);
           const startedAgo = inProgress ? formatStartedAgo(item.started_at ?? item.created_at) : '';
           return (
-            <span style={{ display: 'inline-flex', flexDirection: 'column', gap: '2px', alignItems: 'flex-start' }}>
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+            <span className="run-status-cell">
+              <span className="run-status-line">
                 {inProgress ? <span className="run-live-dot" aria-hidden="true" /> : null}
                 <Badge tone={runStatusBadgeTone(status)} title="Run lifecycle status from API">
-                  {inProgress ? `In progress · ${formatRunStatusLabel(status)}` : formatRunStatusLabel(status)}
+                  {formatRunStatusLabel(status)}
                 </Badge>
               </span>
-              {startedAgo ? <span className="muted" style={{ fontSize: 'var(--text-xs)' }}>{startedAgo}</span> : null}
+              {startedAgo ? <span className="muted run-status-sub">{startedAgo}</span> : null}
             </span>
           );
         }

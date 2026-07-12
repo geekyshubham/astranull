@@ -137,7 +137,7 @@ export function WafSummaryPanel({ summary }: { summary: DataItem | null }) {
     : 'healthy';
 
   return (
-    <div className="dash-waf-grid">
+    <div className={`dash-waf-grid${vendors.length === 0 ? ' dash-waf-grid--solo' : ''}`}>
       <div className="dash-waf-kpis">
         <WafKpi label="Protected" value={protectedCount} note="from WAF coverage summary API" />
         <WafKpi
@@ -154,14 +154,18 @@ export function WafSummaryPanel({ summary }: { summary: DataItem | null }) {
         />
         <WafKpi label="Connectors" value={connectorsActive} note={connectorNote} />
       </div>
-      <div className="dash-waf-vendors">
-        <div className="dw-vendor-head">Coverage by vendor</div>
-        {vendors.length === 0 ? (
-          <p className="muted small">No vendor breakdown returned by coverage summary API.</p>
-        ) : vendors.map((row) => (
-          <VendorCoverageRow key={row.vendor} {...row} />
-        ))}
-      </div>
+      {vendors.length > 0 ? (
+        <div className="dash-waf-vendors">
+          <div className="dw-vendor-head">Coverage by vendor</div>
+          {vendors.map((row) => (
+            <VendorCoverageRow key={row.vendor} {...row} />
+          ))}
+        </div>
+      ) : (
+        <p className="dash-waf-vendors--empty">
+          Vendor coverage breakdown appears when connectors publish per-vendor asset metadata.
+        </p>
+      )}
     </div>
   );
 }

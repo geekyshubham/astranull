@@ -52,13 +52,17 @@ function classifyRunVerdict(verdict: string): 'pass' | 'review' | 'gap' | null {
 
 const TREND_WIDTH = 320;
 const TREND_HEIGHT = 120;
-const TREND_PADDING = 12;
+const TREND_PAD_LEFT = 28;
+const TREND_PAD_RIGHT = 12;
+const TREND_PAD_Y = 12;
 
 function trendCoordinates(values: number[]) {
   const maxValue = Math.max(100, ...values, 1);
+  const plotWidth = TREND_WIDTH - TREND_PAD_LEFT - TREND_PAD_RIGHT;
+  const plotHeight = TREND_HEIGHT - TREND_PAD_Y * 2;
   return values.map((value, index) => {
-    const x = TREND_PADDING + (index * (TREND_WIDTH - TREND_PADDING * 2)) / Math.max(1, values.length - 1);
-    const y = TREND_HEIGHT - TREND_PADDING - (value / maxValue) * (TREND_HEIGHT - TREND_PADDING * 2);
+    const x = TREND_PAD_LEFT + (index * plotWidth) / Math.max(1, values.length - 1);
+    const y = TREND_HEIGHT - TREND_PAD_Y - (value / maxValue) * plotHeight;
     return { x, y };
   });
 }
@@ -94,20 +98,30 @@ export function ScoreTrend({ runs, currentScore, tone }: ScoreTrendProps) {
   const maxValue = Math.max(100, ...chartValues);
   const coords = trendCoordinates(chartValues);
   const polylinePoints = coords.map(({ x, y }) => `${x},${y}`).join(' ');
-  const baselineY = TREND_HEIGHT - TREND_PADDING;
+  const baselineY = TREND_HEIGHT - TREND_PAD_Y;
   const areaPoints = `${coords[0].x},${baselineY} ${polylinePoints} ${coords[coords.length - 1].x},${baselineY}`;
   const gridLevels = [0, 50, 100];
+  const plotHeight = TREND_HEIGHT - TREND_PAD_Y * 2;
   const gridYs = gridLevels.map(
-    (level) => TREND_HEIGHT - TREND_PADDING - (level / maxValue) * (TREND_HEIGHT - TREND_PADDING * 2)
+    (level) => TREND_HEIGHT - TREND_PAD_Y - (level / maxValue) * plotHeight
   );
 
   const ariaLabel = `Readiness verdict trend across ${points.length} verdicted run${points.length === 1 ? '' : 's'}; current score ${end}`;
 
   return (
     <div className="score-trend" role="img" aria-label={ariaLabel}>
-      <svg className="score-trend-svg" viewBox={`0 0 ${TREND_WIDTH} ${TREND_HEIGHT}`} width="100%" preserveAspectRatio="xMidYMid meet">
+      <div className="score-trend-header">
+        <span className="score-trend-title">Readiness verdict band</span>
+        <span className="score-trend-subtitle muted">Each point is a verdicted run · higher is stronger posture</span>
+      </div>
+      <svg className="score-trend-svg" viewBox={`0 0 ${TREND_WIDTH} ${TREND_HEIGHT}`} width="100%" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
         {gridYs.map((gy, index) => (
-          <line key={gridLevels[index]} className="score-trend-grid" x1={TREND_PADDING} x2={TREND_WIDTH - TREND_PADDING} y1={gy} y2={gy} />
+          <g key={gridLevels[index]}>
+            <line className="score-trend-grid" x1={TREND_PAD_LEFT} x2={TREND_WIDTH - TREND_PAD_RIGHT} y1={gy} y2={gy} />
+            <text className="score-trend-axis-label" x={TREND_PAD_LEFT - 6} y={gy + 3} textAnchor="end">
+              {gridLevels[index]}
+            </text>
+          </g>
         ))}
         <polygon className={cn('score-trend-area', `score-trend-stroke--${strokeTone}`)} points={areaPoints} />
         <polyline
@@ -119,18 +133,20 @@ export function ScoreTrend({ runs, currentScore, tone }: ScoreTrendProps) {
           vectorEffect="non-scaling-stroke"
         />
         {coords.map(({ x, y }, index) => (
-          <circle
-            key={`${points[index].label}-${index}`}
-            className={cn('score-trend-point', `score-trend-stroke--${strokeTone}`)}
-            cx={x}
-            cy={y}
-            r={3}
-            fill={strokeColor}
-          />
+          <g key={`${points[index].label}-${index}`}>
+            <circle
+              className={cn('score-trend-point', `score-trend-stroke--${strokeTone}`)}
+              cx={x}
+              cy={y}
+              r={4}
+              fill={strokeColor}
+            />
+            <title>{`Run …${points[index].label} · band ${points[index].value}`}</title>
+          </g>
         ))}
       </svg>
       <span className="muted score-trend-caption">
-        {points.length} verdicted run{points.length === 1 ? '' : 's'} · current {end}
+        {points.length} verdicted run{points.length === 1 ? '' : 's'} · current score {end}/100
       </span>
     </div>
   );

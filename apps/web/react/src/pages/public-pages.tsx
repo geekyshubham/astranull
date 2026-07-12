@@ -213,18 +213,31 @@ function usePageMeta({ title, robots }: { title: string; robots?: string }) {
   }, [title, robots]);
 }
 
+function enterDemoPortal(portalPath: string) {
+  saveSession({
+    mode: 'dev-headers',
+    principal: 'customer',
+    tenant_id: 'ten_demo',
+    user_id: 'usr_admin',
+    role: 'admin'
+  });
+  window.location.href = portalPath;
+}
+
 function PublicShell({
   children,
   eyebrow = 'No-access-first · Evidence-backed · SOC-gated',
   activeNav,
   loginHref = '/login',
-  signupEnabled = true
+  signupEnabled = true,
+  showEyebrow = true
 }: {
   children: React.ReactNode;
   eyebrow?: string;
   activeNav?: 'login' | 'signup';
   loginHref?: string;
   signupEnabled?: boolean;
+  showEyebrow?: boolean;
 }) {
   return (
     <div className="public-app">
@@ -234,7 +247,7 @@ function PublicShell({
             <BrandMark />
             <span>AstraNull</span>
           </a>
-          {eyebrow ? <span className="public-topnav-eyebrow eyebrow">{eyebrow}</span> : null}
+          {showEyebrow && eyebrow ? <span className="public-topnav-eyebrow eyebrow">{eyebrow}</span> : null}
           <nav className="public-topnav-actions" aria-label="Account access">
             <AnchorButton href={loginHref} variant={activeNav === 'login' ? 'default' : 'ghost'} size="sm">Log in</AnchorButton>
             {signupEnabled ? (
@@ -392,12 +405,13 @@ function ReadinessConsolePreview() {
               strokeDashoffset={dashOffset}
             />
           </svg>
-          <div style={{ position: 'absolute', textAlign: 'center' }}>
-            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-2xl)', lineHeight: 1, color: 'var(--fg)' }}>{readiness}</div>
-            <div className="muted" style={{ fontSize: 'var(--text-xs)', textTransform: 'uppercase', letterSpacing: 'var(--tracking-caps)' }}>Readiness</div>
-            <div style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: 'var(--text-xs)', color: 'var(--fg-2)' }}>
-              <TrendingUp size={12} aria-hidden="true" style={{ color: 'var(--success)' }} />
-              6 vs last cycle
+            <div className="public-preview-gauge-center">
+            <div className="public-preview-score">{readiness}</div>
+            <div className="public-preview-label muted">Readiness</div>
+            <div className="public-preview-delta">
+              <TrendingUp size={12} aria-hidden="true" />
+              <span>+6</span>
+              <span className="public-preview-delta-sub">vs last cycle</span>
             </div>
           </div>
         </div>
@@ -544,10 +558,10 @@ export function PublicLandingPage({ config }: PublicPageProps) {
           </div>
         </section>
 
-        <section className="public-section" id="how">
-          <p className="eyebrow">The loop</p>
+        <section className="public-section public-section--spaced" id="how">
+          <p className="eyebrow">How it works</p>
           <h2>Declare. Validate. Evidence. Govern.</h2>
-          <p className="public-section-lead">A four-stage loop that turns a declared scope into a defensible readiness posture.</p>
+          <p className="public-section-lead">Four stages that turn a declared scope into a defensible readiness posture.</p>
           <div className="public-flow">
             {LANDING_FLOW.map((item) => (
               <article className="public-flow-step" key={item.step}>
@@ -561,7 +575,7 @@ export function PublicLandingPage({ config }: PublicPageProps) {
 
         <ProofChainSection />
 
-        <section className="public-section public-section--narrow" id="compare">
+        <section className="public-section public-section--compare" id="compare">
           <h2>Built for teams that can&apos;t hand over the keys.</h2>
           <div className="public-compare table-wrap">
             <table>
@@ -702,7 +716,7 @@ export function LoginPage({ config }: PublicPageProps) {
   }
 
   return (
-    <PublicShell eyebrow="Customer portal" activeNav="login">
+    <PublicShell activeNav="login" showEyebrow={false}>
       <AuthPageLayout
         aside={(
           <>
@@ -778,9 +792,12 @@ export function LoginPage({ config }: PublicPageProps) {
                   </div>
                 ) : null}
                 {error ? <p className="form-error" role="alert">{error}</p> : null}
-                <div className="auth-form-actions">
+                <div className="auth-form-actions row-actions">
                   <Button type="submit" loading={loading} disabled={loginDisabled}>
                     Continue to portal
+                  </Button>
+                  <Button type="button" variant="secondary" disabled={loginDisabled} onClick={() => enterDemoPortal(config.portalPath)}>
+                    Try demo
                   </Button>
                 </div>
               </form>
@@ -962,7 +979,7 @@ export function SignupPage({ config }: PublicPageProps) {
   }
 
   return (
-    <PublicShell eyebrow="Approval-gated account intake" activeNav="signup">
+    <PublicShell activeNav="signup" showEyebrow={false}>
       <AuthPageLayout
         wide
         aside={(
@@ -1050,8 +1067,9 @@ export function SignupPage({ config }: PublicPageProps) {
                 <label className="auth-field-full" htmlFor="signup-intended-use"><span>Intended use</span><textarea id="signup-intended-use" name="intended_use" required rows={4} placeholder="Defensive readiness for declared production origins." disabled={loading} /></label>
                 <label className="auth-field-full auth-check-row" htmlFor="signup-high-scale"><input id="signup-high-scale" name="high_scale_interest" type="checkbox" disabled={loading} /><span>Interested in governed high-scale rehearsal programs.</span></label>
                 {error ? <p className="form-error auth-field-full" role="alert">{error}</p> : null}
-                <div className="auth-form-actions auth-field-full">
+                <div className="auth-form-actions auth-field-full row-actions">
                   <Button type="submit" loading={loading}>Submit request</Button>
+                  <Button type="button" variant="secondary" onClick={() => enterDemoPortal(config.portalPath)}>Try demo</Button>
                 </div>
               </form>
             )}

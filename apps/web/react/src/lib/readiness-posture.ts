@@ -106,15 +106,30 @@ function buildSegments(pass: number, review: number, gap: number, total: number)
   ];
 }
 
-export function buildConicGradient(segments: ReadinessPostureSegment[]) {
-  const gapSize = segments.reduce((sum, segment) => sum + segment.count, 0) > 0 ? 0.6 : 0;
-  let cursor = 0;
-  const stops: string[] = [];
+function scoreRingTone(score: number): 'pass' | 'review' | 'gap' {
+  if (score >= 80) return 'pass';
+  if (score >= 55) return 'review';
+  return 'gap';
+}
+
+export function buildConicGradient(segments: ReadinessPostureSegment[], score?: number | null) {
   const colorByKey: Record<string, string> = {
     pass: 'var(--success)',
     review: 'var(--warn)',
     gap: 'var(--danger)'
   };
+  const track = 'color-mix(in oklab, var(--bg), var(--fg) 6%)';
+
+  // Published readiness score drives ring fill + tone; segment legend stays separate.
+  if (typeof score === 'number' && Number.isFinite(score)) {
+    const fill = Math.min(100, Math.max(0, Math.round(score)));
+    const tone = scoreRingTone(fill);
+    return `conic-gradient(from -90deg, ${colorByKey[tone]} 0% ${fill}%, ${track} ${fill}% 100%)`;
+  }
+
+  const gapSize = segments.reduce((sum, segment) => sum + segment.count, 0) > 0 ? 0.6 : 0;
+  let cursor = 0;
+  const stops: string[] = [];
   for (const segment of segments) {
     if (segment.count <= 0) continue;
     const end = cursor + segment.pct;
@@ -127,7 +142,7 @@ export function buildConicGradient(segments: ReadinessPostureSegment[]) {
     }
   }
   if (stops.length === 0) {
-    return 'conic-gradient(from -90deg, color-mix(in oklab, var(--bg), var(--fg) 6%) 0% 100%)';
+    return `conic-gradient(from -90deg, ${track} 0% 100%)`;
   }
   return `conic-gradient(from -90deg, ${stops.join(', ')})`;
 }

@@ -332,7 +332,7 @@ function TimelinePanel({ items }: { items: Array<{ label: string; at?: unknown }
     <div className="timeline-list">
       {items.map((item, index) => (
         <div key={`${item.label}-${index}`}>
-          <span>{index + 1}</span>
+          <span aria-hidden="true" />
           <div>
             <strong>{item.label}</strong>
             <p>{formatDate(item.at)}</p>
@@ -726,9 +726,10 @@ function DetailKvHintField({ label, value, hint }: { label: string; value: React
 
 function DetailKvMonoField({ label, value, compact }: { label: string; value: string; compact?: boolean }) {
   return (
-    <DetailKvField label={label}>
-      <code className={compact ? 'small' : undefined}>{value}</code>
-    </DetailKvField>
+    <div className="kv-stack kv-mono-field">
+      <span>{label}</span>
+      <code className={compact ? 'mono-hash small' : 'mono-hash'} title={value}>{value}</code>
+    </div>
   );
 }
 
@@ -2323,13 +2324,20 @@ function AgentDetailView({
               <CardTitle>Lifecycle</CardTitle>
               <CardDescription>Revoke stops heartbeat until re-registered with a new bootstrap token from the fleet page.</CardDescription>
             </CardHeader>
-            <CardContent className="row-actions">
-              {getString(entity, ['status']) !== 'revoked' ? (
-                <Button size="sm" variant="danger" loading={busy === `revoke-${entityId}`} disabled={busy !== ''} onClick={() => setRevokeConfirmOpen(true)}>Revoke agent</Button>
-              ) : (
-                <p className="muted">This agent is revoked. Issue a new bootstrap token on <AnchorButton size="sm" variant="ghost" href="#agents">Agents</AnchorButton> to re-register.</p>
-              )}
-              <AnchorButton size="sm" variant="secondary" href="#agents">Open fleet install &amp; upgrades</AnchorButton>
+            <CardContent className="stack-tight">
+              <div className="kv-list">
+                <div><span>Installed</span><strong>{formatDate(entity.installed_at ?? entity.registered_at ?? entity.created_at)}</strong></div>
+                <div><span>Last heartbeat</span><strong>{formatDate(entity.last_heartbeat_at ?? entity.updated_at)}</strong></div>
+                <div><span>Status</span><StatusBadge value={getString(entity, ['status'], 'unknown')} tone={agentStatusBadgeTone(getString(entity, ['status'], 'unknown'))} fallback="unknown" /></div>
+              </div>
+              <div className="row-actions">
+                {getString(entity, ['status']) !== 'revoked' ? (
+                  <Button size="sm" variant="danger" loading={busy === `revoke-${entityId}`} disabled={busy !== ''} onClick={() => setRevokeConfirmOpen(true)}>Revoke agent</Button>
+                ) : (
+                  <p className="muted">This agent is revoked. Issue a new bootstrap token on <AnchorButton size="sm" variant="ghost" href="#agents">Agents</AnchorButton> to re-register.</p>
+                )}
+                <AnchorButton size="sm" variant="secondary" href="#agents">Open fleet install &amp; upgrades</AnchorButton>
+              </div>
             </CardContent>
           </Card>
         </div>
@@ -3685,7 +3693,7 @@ function EnvironmentDetailPage({ entityId, data }: { entityId: string; data: Por
     .map((run) => {
       const checkName = checkDisplayName(data.checks, getString(run, ['check_id'], ''));
       const verdict = runVerdictValue(run) || getString(run, ['status'], 'pending');
-      return { label: `${checkName} · ${formatStatusLabel(verdict)}`, at: run.updated_at ?? run.created_at };
+      return { label: `${checkName} — ${formatStatusLabel(verdict)}`, at: run.updated_at ?? run.created_at };
     });
 
   const groupColumns: TableColumn<DataItem>[] = [
@@ -3850,7 +3858,7 @@ function CheckDetailPage({ entityId, data }: { entityId: string; data: PortalDat
         title={title}
         actions={<AnchorButton size="sm" variant="secondary" href="#checks">← Checks</AnchorButton>}
       />
-      {description ? <p className="muted small">{description}</p> : null}
+      <p className="check-detail-lead">{description}</p>
       <div className="metric-grid four">
         <MetricCard label="Family" value={formatCheckFamilyLabel(family)} sub="Vector family" icon={Network} tone="info" />
         <MetricCard label="Mode" value={formatCheckModeLabel(safetyClass)} sub={safetyClass === 'soc_gated' ? 'SOC request-only' : 'Customer-runnable'} icon={ShieldCheck} tone={safetyClass === 'soc_gated' ? 'warn' : 'success'} />
@@ -3871,8 +3879,8 @@ function CheckDetailPage({ entityId, data }: { entityId: string; data: PortalDat
       {verdictLogic || explanation || expectedBehavior ? (
         <Card>
           <CardHeader>
-            <CardTitle>How this check reaches a verdict</CardTitle>
-            <CardDescription>Correlation logic and expected behavior for this vector.</CardDescription>
+            <CardTitle>Detection logic and verdict path</CardTitle>
+            <CardDescription>How outside probes and inside agents are correlated before this check asserts a verdict.</CardDescription>
           </CardHeader>
           <CardContent className="stack">
             {verdictLogic ? (

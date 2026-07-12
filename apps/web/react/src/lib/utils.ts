@@ -40,6 +40,36 @@ export function clamp(value: number, min = 0, max = 100) {
   return Math.min(max, Math.max(min, value));
 }
 
+const SEVERITY_LABELS: Record<string, string> = {
+  s1: 'Severity 1 · Critical',
+  s2: 'Severity 2 · High',
+  s3: 'Severity 3 · Medium',
+  s4: 'Severity 4 · Low',
+  critical: 'Critical',
+  high: 'High',
+  medium: 'Medium',
+  low: 'Low',
+  info: 'Info'
+};
+
+export function formatSeverityLabel(severity: string, fallback = 'Unknown') {
+  const key = severity.trim().toLowerCase();
+  if (!key) return fallback;
+  return SEVERITY_LABELS[key] ?? severity.replace(/_/g, ' ');
+}
+
+export function formatAuditAction(action: string, fallback = 'Unknown action') {
+  const key = action.trim();
+  if (!key) return fallback;
+  return key.replace(/\./g, ' · ').replace(/_/g, ' ');
+}
+
+export function formatResourceTypeLabel(resourceType: string, fallback = 'Record') {
+  const key = resourceType.trim().toLowerCase();
+  if (!key) return fallback;
+  return key.replace(/_/g, ' ');
+}
+
 const EXPECTED_BEHAVIOR_LABELS: Record<string, string> = {
   must_block_before_origin: 'Must be blocked before origin',
   must_allow_baseline_health: 'Must allow baseline health',

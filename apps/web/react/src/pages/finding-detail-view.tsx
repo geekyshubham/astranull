@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { HTMLAttributes, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent } from 'react';
-import { FileCheck2, ShieldCheck, Target, TriangleAlert, UserCog } from 'lucide-react';
+import { FileCheck2, ShieldCheck, Target, TriangleAlert, UserCog, Wrench } from 'lucide-react';
 import { FindingExplanationPanel } from '../components/findings/finding-explanation-panel';
 import { populateFindingAffectedTargets, populateFindingEvidence, readFindingRemediationFields } from '../lib/finding-detail';
 import { VerifyChip } from '../lib/verify-chip';
@@ -177,6 +177,12 @@ export function FindingDetailView({
 
   const remediation = readFindingRemediationFields(entity, data.wafActionItems);
   const remSteps = remediation.remSteps.split('|').map((step) => step.trim()).filter(Boolean);
+  const hasRemediationPlaybook = Boolean(
+    remediation.remAction ||
+    remediation.remDescription ||
+    remediation.remSteps ||
+    remediation.actionItemId
+  );
   const title = getString(entity, ['title', 'summary'], entityId);
   const slaDueAt = findingSlaDueAt(entity);
 
@@ -330,7 +336,7 @@ export function FindingDetailView({
   ].join('\n');
 
   return (
-    <div className="content stack-tight">
+    <div className="content stack finding-detail-page">
       <div className="page-head">
         <div>
           <p className="eyebrow">Evidence-backed finding</p>
@@ -377,14 +383,14 @@ export function FindingDetailView({
               <div><span>Assignee</span><strong>{getString(entity, ['assignee'], 'unassigned')}</strong></div>
               <div><span>SLA due</span><strong title="SLA derived from severity hours and created_at">{slaDueAt ? formatDate(slaDueAt) : '—'}{isFindingSlaBreach(entity) ? ' (breach)' : ''}</strong></div>
             </div>
-            <form className="product-form" onSubmit={(event) => {
+            <form className="product-form product-form--compact" onSubmit={(event) => {
               event.preventDefault();
               const form = new FormData(event.currentTarget);
               void patchFinding({ assignee: String(form.get('assignee') ?? '').trim(), notes: String(form.get('notes') ?? '').trim() }, 'Triage updated.');
             }}>
-              <label><span>Assignee</span><input name="assignee" defaultValue={getString(entity, ['assignee'], '')} /></label>
+              <label className="full"><span>Assignee</span><input name="assignee" defaultValue={getString(entity, ['assignee'], '')} /></label>
               <label className="full"><span>Notes</span><textarea name="notes" rows={3} defaultValue={getString(entity, ['notes'], '')} /></label>
-              <div className="row-actions">
+              <div className="row-actions action-bar-compact full">
                 <Button type="submit" size="sm" variant="secondary" loading={busy === `finding-${entityId}`}>Save triage</Button>
                 <Button size="sm" variant="ghost" onClick={() => void patchFinding({ status: 'accepted_risk' }, 'Finding accepted risk.')}>Accept risk</Button>
                 <Button size="sm" variant="ghost" onClick={() => void patchFinding({ status: 'closed' }, 'Finding closed.')}>Close finding</Button>
@@ -422,41 +428,55 @@ export function FindingDetailView({
         </CardContent>
       </Card>
 
-      <Card data-od-id="finding-remediation">
-        <CardHeader><CardTitle>Remediation</CardTitle></CardHeader>
-        <CardContent>
-          <div className="rem-grid">
-            <div className="rem-cell"><span className="rem-label">Action</span><span className="rem-value mono">{remediation.remAction || '—'}</span></div>
-            <div className="rem-cell"><span className="rem-label">Owner</span><span className="rem-value">{remediation.remOwner || '—'}</span></div>
-            <div className="rem-cell"><span className="rem-label">State</span><Badge tone={remStateTone(remediation.remStateClass, remediation.remState)} title={`Remediation state ${remediation.remState} from finding API`}>{remediation.remState || '—'}</Badge></div>
-            <div className="rem-cell"><span className="rem-label">SLA</span><span className="rem-value">{remediation.remSla || '—'}</span></div>
+      <Card data-od-id="finding-remediation" className="finding-remediation-card">
+        <CardHeader>
+          <div>
+            <CardTitle>Remediation</CardTitle>
+            <CardDescription>WAF action tracking and owner assignment when a playbook is linked to this finding.</CardDescription>
           </div>
-          <p className="muted">{remediation.remDescription || getString(entity, ['description', 'summary'], 'No remediation description returned by API.')}</p>
-          {remSteps.length > 0 ? (
-            <ol className="rem-steps">
-              {remSteps.map((step, index) => (
-                <li key={`${index}-${step}`}><span className="mono">{String(index + 1).padStart(2, '0')}</span> {step}</li>
-              ))}
-            </ol>
-          ) : null}
-          <form className="product-form" onSubmit={(event) => {
-            event.preventDefault();
-            const form = new FormData(event.currentTarget);
-            const owner = String(form.get('rem_owner') ?? '').trim();
-            // Persist the remediation owner. The finding record backs the owner via `assignee`
-            // (readFindingRemediationFields falls back to it), so send rem_owner alongside
-            // assignee to keep the PATCH honest and make the reassignment survive refresh.
-            void patchFinding({ rem_owner: owner, assignee: owner }, 'Remediation owner reassigned.');
-          }}>
-            <label>
-              <span>Remediation owner</span>
-              <input key={remediation.remOwner} name="rem_owner" defaultValue={remediation.remOwner} placeholder="team or user" />
-            </label>
-            <div className="row-actions">
-              <Button type="submit" size="sm" variant="secondary" loading={busy === `finding-${entityId}`}>Reassign owner</Button>
-              <Button size="sm" variant="secondary" disabled={!remediation.actionItemId} loading={busy === `deliver-${entityId}`} onClick={() => void markDelivered()}>Mark delivered</Button>
-            </div>
-          </form>
+        </CardHeader>
+        <CardContent className="finding-remediation-body">
+          {hasRemediationPlaybook ? (
+            <>
+              <div className="finding-remediation-meta">
+                <div className="rem-cell"><span className="rem-label">Action</span><span className="rem-value mono">{remediation.remAction || '—'}</span></div>
+                <div className="rem-cell"><span className="rem-label">Owner</span><span className="rem-value">{remediation.remOwner || '—'}</span></div>
+                <div className="rem-cell"><span className="rem-label">State</span><Badge tone={remStateTone(remediation.remStateClass, remediation.remState)} title={`Remediation state ${remediation.remState} from finding API`}>{formatFindingLabel(remediation.remState) || '—'}</Badge></div>
+                <div className="rem-cell"><span className="rem-label">SLA</span><span className="rem-value">{remediation.remSla || '—'}</span></div>
+              </div>
+              {remediation.remDescription ? (
+                <p className="finding-remediation-desc">{remediation.remDescription}</p>
+              ) : null}
+              {remSteps.length > 0 ? (
+                <ol className="rem-steps">
+                  {remSteps.map((step, index) => (
+                    <li key={`${index}-${step}`}><span className="mono">{String(index + 1).padStart(2, '0')}</span> {step}</li>
+                  ))}
+                </ol>
+              ) : null}
+              <form className="product-form product-form--compact" onSubmit={(event) => {
+                event.preventDefault();
+                const form = new FormData(event.currentTarget);
+                const owner = String(form.get('rem_owner') ?? '').trim();
+                void patchFinding({ rem_owner: owner, assignee: owner }, 'Remediation owner reassigned.');
+              }}>
+                <label className="full">
+                  <span>Remediation owner</span>
+                  <input key={remediation.remOwner} name="rem_owner" defaultValue={remediation.remOwner} placeholder="team or user" />
+                </label>
+                <div className="row-actions action-bar-compact full">
+                  <Button type="submit" size="sm" variant="secondary" loading={busy === `finding-${entityId}`}>Reassign owner</Button>
+                  <Button type="button" size="sm" variant="ghost" disabled={!remediation.actionItemId} loading={busy === `deliver-${entityId}`} onClick={() => void markDelivered()}>Mark delivered</Button>
+                </div>
+              </form>
+            </>
+          ) : (
+            <EmptyState
+              icon={Wrench}
+              title="No remediation playbook linked"
+              body="This finding has no WAF action item or remediation steps yet. Use triage above to assign an owner, or link a playbook when your integration provides one."
+            />
+          )}
         </CardContent>
       </Card>
 

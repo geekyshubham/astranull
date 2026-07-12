@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
-import { TriangleAlert } from 'lucide-react';
+import { Search, TriangleAlert } from 'lucide-react';
 import { FindingCard } from './finding-card';
 import { Button } from '../ui/button';
 import { EmptyState } from '../ui/empty-state';
 import { Select } from '../ui/select';
 import type { DataItem } from '../../lib/types';
+import { formatSeverityLabel } from '../../lib/utils';
 
 type StatusFilter = 'open' | 'closed' | 'accepted' | 'all';
 type SortKey = 'severity' | 'recent' | 'oldest' | 'sla' | 'title';
@@ -183,13 +184,14 @@ export function FindingsListView({
         <div className="ft-controls">
           <label className="field ft-field ft-search">
             <span className="ft-label">Search</span>
+            <Search className="ft-search-icon" size={15} aria-hidden="true" />
             <input
               className="input"
               type="search"
               value={search}
               aria-label="Filter findings by id, title, check, owner, or group"
               onChange={(event) => setSearch(event.target.value)}
-              placeholder="Filter findings"
+              placeholder="Search findings by title, owner, or group…"
             />
           </label>
           <Select
@@ -198,7 +200,7 @@ export function FindingsListView({
             value={severityFilter}
             options={[
               { value: 'all', label: 'All severities' },
-              ...severities.map((severity) => ({ value: severity, label: severity }))
+              ...severities.map((severity) => ({ value: severity, label: formatSeverityLabel(severity) }))
             ]}
             onChange={(value) => setSeverityFilter(value)}
           />

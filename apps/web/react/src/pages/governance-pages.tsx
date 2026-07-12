@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
-import { Activity, Bell, CalendarClock, CheckCircle2, ClipboardList, Copy, FileText, Info, Lock, ShieldCheck, Siren, Users } from 'lucide-react';
+import { Activity, Bell, CalendarClock, CheckCircle2, ClipboardList, Copy, FileText, Info, Lock, Search, ShieldCheck, Siren, Users } from 'lucide-react';
 import { Badge } from '../components/ui/badge';
 import { AnchorButton, Button } from '../components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
@@ -951,8 +951,7 @@ export function NotificationsPage({
 
 export function AuditPage({ data, session }: { data: PortalData; session: Session }) {
   const [filter, setFilter] = useState('');
-  // Prototype defaults the custody-chain-only filter ON so the audit view opens on the sealed provenance trail.
-  const [custodyOnly, setCustodyOnly] = useState(true);
+  const [custodyOnly, setCustodyOnly] = useState(false);
   const [actorFilter, setActorFilter] = useState('all');
   const [actionFilter, setActionFilter] = useState('all');
   const [selectedId, setSelectedId] = useState('');
@@ -1024,7 +1023,7 @@ export function AuditPage({ data, session }: { data: PortalData; session: Sessio
           <EmptyState
             icon={ClipboardList}
             title="No custody-sealed entries in this view."
-            body="Custody-chain only is on, so this view lists export, report, and custody actions. Turn it off to see all security-relevant actions."
+            body="Custody chain filter is on, so this view lists export, report, and custody actions. Turn it off to see all security-relevant actions."
             actionLabel="Show all entries"
             onAction={() => setCustodyOnly(false)}
           />
@@ -1094,38 +1093,34 @@ export function AuditPage({ data, session }: { data: PortalData; session: Sessio
         <EmptyState icon={ClipboardList} title="Audit access required." body="Switch to owner, admin, SOC, or auditor role to read the tenant audit log." />
       ) : (
         <>
-          <Card>
-            <CardHeader>
-              <CardTitle>Filters</CardTitle>
-            </CardHeader>
-            <CardContent className="stack-tight">
-              <div className="page-toolbar-labeled">
-                <label className="check-row">
-                  <input
-                    type="checkbox"
-                    name="custody_only"
-                    checked={custodyOnly}
-                    onChange={(event) => setCustodyOnly(event.target.checked)}
-                    aria-label="Custody-chain only"
-                  />
-                  <span>Custody-chain only</span>
-                </label>
-                <Select label="Actor" name="audit_actor" value={actorFilter} options={actorOptions} onChange={setActorFilter} />
-                <Select label="Action" name="audit_action" value={actionFilter} options={actionOptions} onChange={setActionFilter} />
-              </div>
-              <div className="product-form">
-                <label className="full">
-                  <span>Search</span>
-                  <input
-                    value={filter}
-                    onChange={(event) => setFilter(event.target.value)}
-                    placeholder="action, resource type, or id"
-                    aria-label="Search audit log by action, resource type, or id"
-                  />
-                </label>
-              </div>
-            </CardContent>
-          </Card>
+          <div className="audit-filter-toolbar">
+            <div className="audit-filter-chips">
+              <button
+                type="button"
+                className={`filter-chip${custodyOnly ? ' is-active' : ''}`}
+                aria-pressed={custodyOnly}
+                onClick={() => setCustodyOnly((current) => !current)}
+              >
+                Custody chain
+              </button>
+              {filtersActive ? (
+                <button type="button" className="filter-chip" onClick={clearAuditFilters}>Clear filters</button>
+              ) : null}
+            </div>
+            <div className="audit-filter-fields">
+              <Select label="Actor" name="audit_actor" value={actorFilter} options={actorOptions} onChange={setActorFilter} />
+              <Select label="Action" name="audit_action" value={actionFilter} options={actionOptions} onChange={setActionFilter} />
+            </div>
+            <label className="audit-search-pill">
+              <Search size={15} aria-hidden="true" />
+              <input
+                value={filter}
+                onChange={(event) => setFilter(event.target.value)}
+                placeholder="Search action, resource, or id"
+                aria-label="Search audit log by action, resource type, or id"
+              />
+            </label>
+          </div>
           <Card>
             <CardHeader>
               <CardTitle>Events</CardTitle>

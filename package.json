@@ -18,6 +18,9 @@
   },
   "scripts": {
     "start": "node src/index.mjs",
+    "dev": "vite --host 127.0.0.1",
+    "dev:api": "PORT=3001 ASTRANULL_WAF_POSTURE_ENABLED=1 ASTRANULL_EXTERNAL_DISCOVERY_ENABLED=1 ASTRANULL_CONNECTORS_ENABLED=1 node src/index.mjs",
+    "seed:dev-demo": "node scripts/seed-dev-portal-demo.mjs",
     "railway:staging:start": "node scripts/railway-staging-start.mjs",
     "do:app:spec": "doctl apps spec validate ops/digitalocean/app.yaml",
     "do:bootstrap": "node scripts/digitalocean-bootstrap.mjs",
