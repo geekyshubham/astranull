@@ -13,6 +13,15 @@ const DEMO_ROLE = 'admin';
 const SESSION_VERSION = 'asn1';
 
 export function authContextFromHeaders(headers) {
+  // Staff principal headers must not silently become customer admin@ten_demo.
+  // Staff SOC impersonation strips x-principal-type and sets tenant + soc role instead.
+  const principalType = String(headers['x-principal-type'] ?? '').trim().toLowerCase();
+  if (principalType === 'staff') {
+    return {
+      error: 'staff_tenant_context_required',
+      message: 'Staff sessions must use tenant impersonation headers for customer API routes.',
+    };
+  }
   const tenantId = headers['x-tenant-id'] ?? DEMO_TENANT;
   const userId = headers['x-user-id'] ?? DEMO_USER;
   let role = (headers['x-role'] ?? DEMO_ROLE).toLowerCase();
@@ -157,7 +166,15 @@ export async function resolveHumanApiAuth(headers, pathname, method, runtimeConf
   }
 
   if (runtimeConfig.authMode === 'dev-headers') {
-    return { ok: true, ctx: authContextFromHeaders(headers) };
+    const ctx = authContextFromHeaders(headers);
+    if (ctx?.error) {
+      return {
+        ok: false,
+        status: 401,
+        body: { error: ctx.error, message: ctx.message ?? 'Unauthorized.' },
+      };
+    }
+    return { ok: true, ctx };
   }
 
   if (!token) {

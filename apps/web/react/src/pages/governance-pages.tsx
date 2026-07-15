@@ -6,7 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../co
 import { EmptyState } from '../components/ui/empty-state';
 import { Select } from '../components/ui/select';
 import { DataTable, type TableColumn } from '../components/ui/table';
-import { isStaffSocRole, requestJson, requestSocJson } from '../lib/api';
+import { isStaffSocRole, requestJson, requestSocJson, saveSession } from '../lib/api';
 import {
   computeReleaseEvidenceCoverage,
   pickReleaseEvidenceCustodyUri,
@@ -601,7 +601,8 @@ function buildSocCrossTenantRows(approvals: DataItem[]): SocCrossTenantRow[] {
   return approvals
     .filter((item) => isHighScaleApprovalKind(getString(item, ['kind'], '')))
     .map((item) => ({
-      id: getString(item, ['id'], '—'),
+      // Prefer linked high-scale request id over the internal approval record id.
+      id: getString(item, ['high_scale_request_id', 'subject_id', 'resource_id', 'request_id', 'id'], '—'),
       tenantId: getString(item, ['tenant_id'], '—'),
       kind: getString(item, ['kind'], '—'),
       state: getString(item, ['state'], '—'),
@@ -624,7 +625,15 @@ const socCrossTenantColumns: TableColumn<SocCrossTenantRow>[] = [
     key: 'actions',
     label: 'Actions',
     render: (item) => (
-      <AnchorButton size="sm" variant="secondary" href={buildDetailHref('queue-detail', item.id)}>Open</AnchorButton>
+      <AnchorButton
+        size="sm"
+        variant="secondary"
+        href={buildDetailHref('queue-detail', item.id, {
+          tenantId: item.tenantId !== '—' ? item.tenantId : undefined
+        })}
+      >
+        Open
+      </AnchorButton>
     )
   }
 ];
@@ -1395,6 +1404,7 @@ export function SocConsolePage({
   const [outputSummary, setOutputSummary] = useState('');
   const [showActionTechnicalDetails, setShowActionTechnicalDetails] = useState(false);
   const [lastActionRequestId, setLastActionRequestId] = useState('');
+  const [executionTenantId, setExecutionTenantId] = useState(() => String(session.tenant_id ?? '').trim());
 
   function setActionOutput(payload: unknown, requestId = '') {
     setOutput(JSON.stringify(payload, null, 2));
@@ -1405,9 +1415,36 @@ export function SocConsolePage({
   const isSoc = staffSocSurface
     ? session.principal === 'staff' && isStaffSocRole(session)
     : session.role === 'soc' && session.principal !== 'staff';
+  const effectiveSocTenant = executionTenantId || String(session.tenant_id ?? '').trim();
 
-  async function socRequest(path: string, options: { method?: string; body?: unknown } = {}) {
-    if (staffSocSurface) return requestSocJson(config, session, path, options);
+  async function applyExecutionTenant(tenantId: string) {
+    const nextTenant = tenantId.trim();
+    setExecutionTenantId(nextTenant);
+    if (!staffSocSurface) return;
+    const nextSession = { ...session, tenant_id: nextTenant || undefined };
+    saveSession(nextSession);
+    setError('');
+    setMessage(nextTenant ? `Execution tenant set to ${nextTenant}.` : 'Execution tenant cleared.');
+    setQueueRefreshing(true);
+    try {
+      await onRefresh();
+    } finally {
+      setQueueRefreshing(false);
+    }
+  }
+
+  async function socRequest(path: string, options: { method?: string; body?: unknown; tenantId?: string } = {}) {
+    if (staffSocSurface) {
+      const tenantId = options.tenantId ?? effectiveSocTenant;
+      if (!tenantId) {
+        throw new Error('Select an execution tenant before running staff SOC actions.');
+      }
+      return requestSocJson(config, session, path, {
+        method: options.method,
+        body: options.body,
+        tenantId
+      });
+    }
     return requestJson(config, session, path, options);
   }
   const requestColumns: TableColumn<DataItem>[] = [
@@ -1524,8 +1561,32 @@ export function SocConsolePage({
     }
   }
 
+  const killSwitchActive = Boolean(data.state?.kill_switch?.active ?? data.state?.kill_switch?.enabled);
+  const killSwitchReason = getString(data.state?.kill_switch as DataItem, ['reason'], 'tenant-scoped emergency stop');
+  const scheduledCount = data.highScale.filter((item) => SOC_SCHEDULED_STATES.includes(normalizeHighScaleState(item))).length;
+  const inReviewCount = data.highScale.filter((item) => SOC_REVIEW_STATES.includes(normalizeHighScaleState(item))).length;
+  const runningCount = data.highScale.filter((item) => SOC_RUNNING_STATES.includes(normalizeHighScaleState(item))).length;
+  const openFindingsCount = Number(data.state?.open_findings ?? data.findings.length) || 0;
+  const goNoGoGates = buildSocGoNoGoGates(data.highScale, { killSwitchActive, runningCount, openFindings: openFindingsCount });
+  const providerContactRows = buildProviderContactRows(data.highScale);
+  const executionTimeline = buildSocExecutionTimeline(data.highScale);
+  const crossTenantHighScale = staffSocSurface ? buildSocCrossTenantRows(data.internalApprovalRequests) : [];
+  const activeTenantCount = new Set(
+    crossTenantHighScale.map((row) => row.tenantId).filter((id) => id && id !== '—')
+  ).size;
+  const tenantSelectOptions = useMemo(() => {
+    const fromInternal = data.internalTenants
+      .map((item) => getString(item, ['tenant_id', 'id'], ''))
+      .filter(Boolean);
+    const fromCross = crossTenantHighScale.map((row) => row.tenantId).filter((id) => id && id !== '—');
+    const ids = [...new Set([...fromInternal, ...fromCross, effectiveSocTenant].filter(Boolean))];
+    return [
+      { value: '', label: 'Select execution tenant…' },
+      ...ids.map((id) => ({ value: id, label: id }))
+    ];
+  }, [data.internalTenants, crossTenantHighScale, effectiveSocTenant]);
+
   if (!isSoc) {
-    const killSwitchActive = Boolean(data.state?.kill_switch?.active ?? data.state?.kill_switch?.enabled);
     return (
       <div className="content">
         <PageHeader
@@ -1544,26 +1605,12 @@ export function SocConsolePage({
           />
           <KillSwitchReadOnlyCard
             active={killSwitchActive}
-            reason={getString(data.state?.kill_switch as DataItem, ['reason'], 'tenant-scoped emergency stop')}
+            reason={killSwitchReason}
           />
         </div>
       </div>
     );
   }
-
-  const killSwitchActive = Boolean(data.state?.kill_switch?.active ?? data.state?.kill_switch?.enabled);
-  const killSwitchReason = getString(data.state?.kill_switch as DataItem, ['reason'], 'tenant-scoped emergency stop');
-  const scheduledCount = data.highScale.filter((item) => SOC_SCHEDULED_STATES.includes(normalizeHighScaleState(item))).length;
-  const inReviewCount = data.highScale.filter((item) => SOC_REVIEW_STATES.includes(normalizeHighScaleState(item))).length;
-  const runningCount = data.highScale.filter((item) => SOC_RUNNING_STATES.includes(normalizeHighScaleState(item))).length;
-  const openFindingsCount = Number(data.state?.open_findings ?? data.findings.length) || 0;
-  const goNoGoGates = buildSocGoNoGoGates(data.highScale, { killSwitchActive, runningCount, openFindings: openFindingsCount });
-  const providerContactRows = buildProviderContactRows(data.highScale);
-  const executionTimeline = buildSocExecutionTimeline(data.highScale);
-  const crossTenantHighScale = staffSocSurface ? buildSocCrossTenantRows(data.internalApprovalRequests) : [];
-  const activeTenantCount = new Set(
-    crossTenantHighScale.map((row) => row.tenantId).filter((id) => id && id !== '—')
-  ).size;
 
   return (
     <div className="content">
@@ -1576,6 +1623,29 @@ export function SocConsolePage({
           </>
         }
       />
+      {staffSocSurface ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Execution tenant</CardTitle>
+            <CardDescription>
+              Staff SOC actions are tenant-scoped. Select a tenant before kill switch or queue mutations, or open a cross-tenant request with ?tenant=.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Select
+              label="Tenant"
+              value={effectiveSocTenant}
+              options={tenantSelectOptions}
+              onChange={(value) => void applyExecutionTenant(value)}
+            />
+            {!effectiveSocTenant ? (
+              <p className="muted" style={{ marginTop: '0.5rem' }}>
+                No execution tenant selected — queue hydrate and kill switch stay disabled until you choose one.
+              </p>
+            ) : null}
+          </CardContent>
+        </Card>
+      ) : null}
       <div className={killSwitchActive ? 'callout warn' : 'callout info'}>
         {killSwitchActive ? <Siren size={18} aria-hidden="true" /> : <ShieldCheck size={18} aria-hidden="true" />}
         <span>
@@ -1730,7 +1800,7 @@ export function SocConsolePage({
           <CardHeader>
             <CardTitle>
               {lastActionRequestId
-                ? <>Action output — <code className="traffic-path-label">{lastActionRequestId}</code></>
+                ? <>Action output — <code className="traffic-path-label" title={lastActionRequestId}>{lastActionRequestId}</code></>
                 : 'Action output — tenant controls'}
             </CardTitle>
             {lastActionRequestId ? (

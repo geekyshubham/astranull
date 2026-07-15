@@ -14,7 +14,7 @@ import {
   SupportPage,
   TargetGroupsPage
 } from './page-components';
-import { AuditPage, NotificationsPage, SocConsolePage } from './governance-pages';
+import { AuditPage, NotificationsPage, ReleaseEvidencePage, SocConsolePage } from './governance-pages';
 
 const DETAIL_ROUTES = new Set<RouteId>([
   'target-group-detail',
@@ -71,6 +71,7 @@ export function RouteView({ route, data, config, session, onRefresh }: RouteView
     return <NotificationsPage data={data} config={config} session={session} onRefresh={onRefresh} />;
   }
   if (route === 'audit') return <AuditPage data={data} session={session} />;
+  if (route === 'release-evidence') return <ReleaseEvidencePage data={data} session={session} />;
   if (route === 'support') return <SupportPage data={data} session={session} />;
   if (route === 'subscription') return <SubscriptionPage data={data} />;
   if (route === 'internal-soc') {

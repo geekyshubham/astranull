@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AppShell } from './components/layout/app-shell';
 import { EMPTY_PORTAL_DATA, ensurePortalSession, fetchPortalData, loadSession, portalSurface, saveSession, sessionIdentity } from './lib/api';
 import { getRouteFromLocation } from './lib/navigation';
@@ -125,10 +125,26 @@ export default function App() {
     }
   }, [loading, config, route, activeSession.principal, activeSession.role, activeSession.staff_role]);
 
+  // Re-hydrate when the hash route changes so staff SOC / queue-detail get SOC tenant headers
+  // after navigating from Admin (or other surfaces that skipped customer /v1 hydrate).
+  // Skip the first observation to avoid duplicating the boot-time fetch.
+  const routeHydratePrimed = useRef(false);
+  useEffect(() => {
+    if (loading || !config || !session) return;
+    if (isPublicOnlyPath(path)) return;
+    if (!routeHydratePrimed.current) {
+      routeHydratePrimed.current = true;
+      return;
+    }
+    void refresh(config, session, route);
+  }, [route, loading, config, session, path, refresh]);
+
   function handleRoleChange(role: string) {
+    // Role switcher is a local dev-headers convenience only — never elevate OIDC sessions.
+    if (config?.authMode !== 'dev-headers') return;
     const next = {
       ...activeSession,
-      mode: activeSession.mode ?? 'dev-headers',
+      mode: 'dev-headers',
       principal: 'customer',
       role
     };
@@ -136,6 +152,16 @@ export default function App() {
     setSession(next);
     void refresh(config, next);
   }
+
+  /** Always re-read sessionStorage so SOC execution-tenant updates are not stale. */
+  const handleRefresh = useCallback(async () => {
+    if (!config) return;
+    const stored = loadSession() ?? activeSession;
+    if (sessionIdentity(stored) !== sessionIdentity(session)) {
+      setSession(stored);
+    }
+    await refresh(config, stored, route);
+  }, [config, activeSession, session, refresh, route]);
 
   if (loading || !config) return <LoadingScreen />;
 
@@ -152,9 +178,10 @@ export default function App() {
       data={data}
       onRouteChange={setRoute}
       onRoleChange={handleRoleChange}
-      onRefresh={() => void refresh(config, activeSession, route)}
+      onRefresh={() => void handleRefresh()}
+      showRoleSwitcher={config.authMode === 'dev-headers' && activeSession.principal !== 'staff'}
     >
-      <RouteView route={route} data={data} config={config} session={activeSession} onRefresh={() => refresh(config, activeSession, route)} />
+      <RouteView route={route} data={data} config={config} session={activeSession} onRefresh={handleRefresh} />
     </AppShell>
   );
 }

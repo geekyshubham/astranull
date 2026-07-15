@@ -25,6 +25,7 @@ export type RouteId =
   | 'integrations'
   | 'notifications'
   | 'audit'
+  | 'release-evidence'
   | 'settings'
   | 'support'
   | 'subscription'

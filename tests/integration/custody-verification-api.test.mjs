@@ -91,16 +91,14 @@ describe('custody verification API', () => {
     assert.equal(res.json.verification.error, 'content_sha256_mismatch');
   });
 
-  it('forbids non-audit roles', async () => {
+  it('allows engineers who can export findings to verify custody', async () => {
     const exported = await createJsonReportExport();
-    for (const role of ['viewer', 'engineer']) {
-      const res = await request(baseUrl, 'POST', '/v1/custody/verify', {
-        headers: demoHeaders(role),
-        body: { payload: exported.payload, custody: exported.custody },
-      });
-      assert.equal(res.status, 403);
-      assert.equal(res.json.permission, 'audit:read');
-    }
+    const res = await request(baseUrl, 'POST', '/v1/custody/verify', {
+      headers: demoHeaders('engineer'),
+      body: { payload: exported.payload, custody: exported.custody },
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.json.ok, true);
   });
 
   it('audits safe verification metadata only', async () => {

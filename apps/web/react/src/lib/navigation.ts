@@ -116,6 +116,13 @@ export const NAV_ITEMS: NavItem[] = [
     icon: ClipboardList
   },
   {
+    id: 'release-evidence',
+    label: 'Release evidence',
+    group: 'governance',
+    description: 'Production release evidence coverage, gap ledger, and staging attestation.',
+    icon: FileText
+  },
+  {
     id: 'settings',
     label: 'Settings',
     group: 'governance',

@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronRight, Menu, Moon, Search, Sun, X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Menu, Moon, Sun, X } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { useMemo, useState } from 'react';
 import { clearSession } from '../../lib/api';
@@ -17,6 +17,8 @@ type AppShellProps = {
   onRouteChange: (route: RouteId) => void;
   onRoleChange: (role: string) => void;
   onRefresh: () => void;
+  /** Dev-headers only: show role switcher for local RBAC previews. */
+  showRoleSwitcher?: boolean;
   children: ReactNode;
 };
 
@@ -81,7 +83,16 @@ function ThemeToggle({ theme, onToggle }: { theme: 'light' | 'dark'; onToggle: (
   );
 }
 
-export function AppShell({ route, session, data, onRouteChange, onRoleChange, children }: AppShellProps) {
+export function AppShell({
+  route,
+  session,
+  data,
+  onRouteChange,
+  onRoleChange,
+  onRefresh,
+  showRoleSwitcher = false,
+  children
+}: AppShellProps) {
   const [theme, setTheme] = useState<'light' | 'dark'>(() =>
     document.documentElement.dataset.theme === 'light' ? 'light' : 'dark'
   );
@@ -123,8 +134,13 @@ export function AppShell({ route, session, data, onRouteChange, onRoleChange, ch
   }
 
   function logout() {
+    const staff = session.principal === 'staff';
     clearSession();
-    window.location.href = '/login';
+    window.location.href = staff
+      ? (typeof window !== 'undefined' && session.staff_login_path
+        ? session.staff_login_path
+        : '/internal/admin/login')
+      : '/login';
   }
 
   function toggleTheme() {
@@ -193,13 +209,15 @@ export function AppShell({ route, session, data, onRouteChange, onRoleChange, ch
             {environment ? <> · {environment}</> : null}
           </span>
           <span>safe-by-default · SOC-gated</span>
-          <Select
-            label="Role"
-            className="sidebar-role"
-            value={session.role ?? 'admin'}
-            options={roles}
-            onChange={onRoleChange}
-          />
+          {showRoleSwitcher ? (
+            <Select
+              label="Role (dev)"
+              className="sidebar-role"
+              value={session.role ?? 'admin'}
+              options={roles}
+              onChange={onRoleChange}
+            />
+          ) : null}
           <div className="sidebar-foot-actions">
             <a href="/" aria-label="Public site">
               Public site
@@ -224,12 +242,19 @@ export function AppShell({ route, session, data, onRouteChange, onRoleChange, ch
             <b>{current.label}</b>
           </div>
           <div className="topbar-spacer" aria-hidden="true" />
-          <label className="search">
-            <Search size={15} aria-hidden="true" focusable="false" />
-            <input type="search" placeholder="Search runs, findings, agents…" aria-label="Search portal" />
-          </label>
           <ThemeToggle theme={theme} onToggle={toggleTheme} />
         </header>
+        {data.error ? (
+          <div className="portal-load-error" role="alert">
+            <div className="portal-load-error-body">
+              <strong>Could not load some workspace data</strong>
+              <p>{data.error}</p>
+            </div>
+            <Button type="button" variant="secondary" size="sm" onClick={onRefresh}>
+              Retry
+            </Button>
+          </div>
+        ) : null}
         {children}
       </main>
     </div>

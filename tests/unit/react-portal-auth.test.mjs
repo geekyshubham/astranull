@@ -144,4 +144,23 @@ describe('react portal route access', () => {
     assert.equal(canAccessRoute('viewer', 'findings'), true);
     assert.equal(canAccessRoute('viewer', 'settings'), true);
   });
+
+  it('aligns staff SOC route gate with operational SOC roles only', () => {
+    assert.equal(canAccessRoute('admin', 'internal-soc', { principal: 'staff', staffRole: 'admin' }), false);
+    assert.equal(canAccessRoute('admin', 'internal-soc', { principal: 'staff', staffRole: 'internal_admin' }), false);
+    assert.equal(canAccessRoute('admin', 'internal-soc', { principal: 'staff', staffRole: 'soc_lead' }), true);
+  });
+
+  it('allows customers to open queue-detail for authorization pack completion', () => {
+    assert.equal(canAccessRoute('engineer', 'queue-detail', { principal: 'customer' }), true);
+    assert.equal(canAccessRoute('viewer', 'queue-detail', { principal: 'customer' }), true);
+    assert.equal(canAccessRoute('admin', 'queue-detail', { principal: 'staff', staffRole: 'support_engineer' }), true);
+  });
+
+  it('gates release-evidence by release_evidence:read', () => {
+    assert.equal(canAccessRoute('viewer', 'release-evidence'), false);
+    assert.equal(canAccessRoute('engineer', 'release-evidence'), false);
+    assert.equal(canAccessRoute('auditor', 'release-evidence'), true);
+    assert.equal(canAccessRoute('admin', 'release-evidence'), true);
+  });
 });

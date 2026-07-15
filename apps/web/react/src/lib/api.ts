@@ -165,7 +165,8 @@ export async function ensurePortalSession(surface: 'customer' | 'staff' = 'custo
   return { config, session, redirectToLogin: false };
 }
 
-const STAFF_SOC_ROLES = new Set(['soc_analyst', 'soc_lead']);
+/** Operational staff SOC roles — must match route-access STAFF_SOC_ROLES. */
+export const STAFF_SOC_ROLES = new Set(['soc_analyst', 'soc_lead']);
 
 export function isStaffSocRole(session: Session) {
   return STAFF_SOC_ROLES.has(String(session.staff_role ?? '').trim().toLowerCase());
@@ -193,23 +194,79 @@ export function buildApiHeaders(config: PortalConfig, session: Session) {
   return headers;
 }
 
-/** Staff SOC surface impersonates tenant SOC role for governed execution routes in dev-headers mode. */
-export function buildSocCustomerHeaders(config: PortalConfig, session: Session, tenantId = 'ten_demo') {
+/**
+ * Staff SOC surface impersonates tenant SOC role for governed execution routes.
+ * - dev-headers: rewrite to tenant + x-role:soc (never silent ten_demo for staff without tenant).
+ * - oidc-jwt: staff cannot spoof SOC claims; require an explicit tenant SOC path (throws).
+ */
+export function buildSocCustomerHeaders(
+  config: PortalConfig,
+  session: Session,
+  tenantId?: string
+) {
+  const resolvedTenant = String(tenantId ?? session.tenant_id ?? '').trim();
   const headers = buildApiHeaders(config, session);
   if (config.authMode === 'dev-headers') {
+    if (session.principal === 'staff' && !resolvedTenant) {
+      throw new Error(
+        'Select an execution tenant before running staff SOC actions. Cross-tenant Open links pass ?tenant=…, or set a tenant on the SOC console.'
+      );
+    }
+    const tenant = resolvedTenant || 'ten_demo';
     delete headers['x-principal-type'];
     delete headers['x-staff-id'];
     delete headers['x-staff-role'];
-    headers['x-tenant-id'] = tenantId;
+    headers['x-tenant-id'] = tenant;
     headers['x-user-id'] = String(session.staff_id ?? session.user_id ?? 'staff_soc');
     headers['x-role'] = 'soc';
+    return headers;
+  }
+  if (session.principal === 'staff') {
+    throw new Error(
+      'Staff SOC tenant impersonation is not available in oidc-jwt mode. Use a tenant SOC session or local dev-headers for governed execution.'
+    );
   }
   return headers;
 }
 
+function friendlyHttpError(path: string, status: number, payload: unknown): string {
+  if (status === 429) {
+    return 'Too many requests right now. Wait a moment and try again.';
+  }
+  if (status === 503) {
+    return 'Service is temporarily unavailable. Try again shortly.';
+  }
+  if (status === 404) {
+    return 'That record was not found, or you do not have access to it.';
+  }
+  if (payload && typeof payload === 'object') {
+    const msg = (payload as { message?: unknown }).message;
+    if (typeof msg === 'string' && msg.trim()) return msg.trim();
+    const err = (payload as { error?: unknown }).error;
+    if (typeof err === 'string' && err.trim()) {
+      if (err === 'rate_limited') return 'Too many requests right now. Wait a moment and try again.';
+      if (err === 'not_found') return 'That record was not found, or you do not have access to it.';
+      // snake_case API codes → readable words
+      if (/^[a-z][a-z0-9_]+$/.test(err)) return err.replace(/_/g, ' ');
+      return err.trim();
+    }
+  }
+  if (status >= 500) return 'Something went wrong on the server. Try again.';
+  return `Request failed (${status}).`;
+}
+
 async function getJson(path: string, headers: Record<string, string>) {
   const response = await fetch(path, { headers });
-  if (!response.ok) throw new Error(`${path} returned ${response.status}`);
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    const error = new Error(friendlyHttpError(path, response.status, payload)) as Error & {
+      status?: number;
+      payload?: unknown;
+    };
+    error.status = response.status;
+    error.payload = payload;
+    throw error;
+  }
   return response.json();
 }
 
@@ -225,11 +282,10 @@ async function requestWithHeaders(
   });
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
-    const message =
-      payload && typeof payload === 'object' && 'message' in payload
-        ? String((payload as { message?: unknown }).message)
-        : `${path} returned ${response.status}`;
-    const error = new Error(message) as Error & { status?: number; payload?: unknown };
+    const error = new Error(friendlyHttpError(path, response.status, payload)) as Error & {
+      status?: number;
+      payload?: unknown;
+    };
     error.status = response.status;
     error.payload = payload;
     throw error;
@@ -255,10 +311,21 @@ export async function requestSocJson(
   return requestWithHeaders(path, buildSocCustomerHeaders(config, session, options.tenantId), options);
 }
 
-async function getJsonOptional(path: string, headers: Record<string, string>, fallback: unknown) {
+async function getJsonOptional(
+  path: string,
+  headers: Record<string, string>,
+  fallback: unknown,
+  errors?: string[]
+) {
   try {
     return await getJson(path, headers);
-  } catch {
+  } catch (err) {
+    const status = (err as { status?: number } | null)?.status;
+    // Treat missing records as empty; surface auth/server/network failures.
+    if (errors && status !== 404) {
+      const message = err instanceof Error ? err.message : `Request failed for ${path}`;
+      if (!errors.includes(message)) errors.push(message);
+    }
     return fallback;
   }
 }
@@ -279,10 +346,31 @@ export async function fetchPortalData(
 ): Promise<PortalData> {
   const headers = buildApiHeaders(config, session);
   const isStaffSession = session.principal === 'staff';
-  const useStaffSocTenantHeaders =
-    isStaffSession && isStaffSocRole(session) && options.route === 'internal-soc';
-  const tenantHeaders = useStaffSocTenantHeaders ? buildSocCustomerHeaders(config, session) : headers;
-  const deploymentFeatures = await getJsonOptional('/v1/tenant/deployment-features', headers, null);
+  const wantsStaffSocHydrate =
+    isStaffSession && isStaffSocRole(session) && (options.route === 'internal-soc' || options.route === 'queue-detail');
+  const hydrateErrors: string[] = [];
+  let useStaffSocTenantHeaders = wantsStaffSocHydrate;
+  let tenantHeaders: Record<string, string> = headers;
+  if (wantsStaffSocHydrate) {
+    try {
+      tenantHeaders = buildSocCustomerHeaders(config, session);
+    } catch (err) {
+      useStaffSocTenantHeaders = false;
+      hydrateErrors.push(err instanceof Error ? err.message : 'Staff SOC needs an execution tenant.');
+    }
+  }
+  // Staff customer-API calls only when impersonating (SOC headers). Otherwise skip /v1/* hydrate.
+  // When SOC impersonating, ALL customer /v1 hydrate calls must use tenantHeaders — not raw staff headers.
+  const customerHeaders = useStaffSocTenantHeaders
+    ? tenantHeaders
+    : isStaffSession
+      ? null
+      : headers;
+  const opt = (path: string, h: Record<string, string> | null, fallback: unknown, track = false) => {
+    if (!h) return Promise.resolve(fallback);
+    return getJsonOptional(path, h, fallback, track ? hydrateErrors : undefined);
+  };
+  const deploymentFeatures = await opt('/v1/tenant/deployment-features', customerHeaders, null, true);
   const connectorsEnabled =
     deploymentFeatures !== null &&
     typeof deploymentFeatures === 'object' &&
@@ -338,47 +426,47 @@ export async function fetchPortalData(
     internalApprovalRequests,
     internalAudit
   ] = await Promise.all([
-    getJsonOptional('/v1/state', tenantHeaders, null),
-    getJsonOptional('/v1/tenants/current', headers, null),
-    getJsonOptional('/v1/target-groups', headers, { items: [] }),
-    getJsonOptional('/v1/agents', headers, { items: [] }),
-    getJsonOptional('/v1/checks', headers, { items: [] }),
-    getJsonOptional('/v1/test-policies', headers, { items: [] }),
-    getJsonOptional('/v1/test-runs', headers, { items: [] }),
-    getJsonOptional('/v1/findings', tenantHeaders, { items: [] }),
-    getJsonOptional('/v1/evidence', headers, { items: [] }),
-    getJsonOptional('/v1/high-scale-requests', tenantHeaders, { items: [] }),
-    getJsonOptional('/v1/reports', headers, { items: [] }),
-    getJsonOptional('/v1/notifications', headers, { rules: [], events: [] }),
-    getJsonOptional('/v1/production-release-evidence', headers, { items: [] }),
-    getJsonOptional('/v1/production-release-evidence/attestation', headers, null),
-    getJsonOptional('/v1/audit-log', headers, { items: [] }),
-    connectorsEnabled ? getJsonOptional('/v1/connectors', headers, { items: [] }) : Promise.resolve({ items: [] }),
-    getJsonOptional('/v1/secrets', headers, { items: [] }),
-    getJsonOptional('/v1/bootstrap-tokens', headers, { items: [] }),
-    getJsonOptional('/v1/service-accounts', headers, { items: [] }),
-    wafEnabled ? getJsonOptional('/v1/waf/assets', headers, { items: [] }) : Promise.resolve({ items: [] }),
-    wafEnabled ? getJsonOptional('/v1/waf/coverage', headers, null) : Promise.resolve(null),
-    wafEnabled ? getJsonOptional('/v1/waf/coverage/summary', headers, null) : Promise.resolve(null),
-    wafEnabled ? getJsonOptional('/v1/waf/coverage/risk-roadmap', headers, null) : Promise.resolve(null),
-    wafEnabled ? getJsonOptional('/v1/waf/validations', headers, { items: [] }) : Promise.resolve({ items: [] }),
-    wafEnabled ? getJsonOptional('/v1/waf/drift-events', headers, { items: [] }) : Promise.resolve({ items: [] }),
-    wafEnabled ? getJsonOptional('/v1/waf/exceptions', headers, { items: [] }) : Promise.resolve({ items: [] }),
-    wafEnabled ? getJsonOptional('/v1/waf/validation-plans', headers, { items: [] }) : Promise.resolve({ items: [] }),
-    wafEnabled ? getJsonOptional('/v1/waf/retests', headers, { items: [] }) : Promise.resolve({ items: [] }),
-    wafEnabled ? getJsonOptional('/v1/waf/action-items', headers, { items: [] }) : Promise.resolve({ items: [] }),
-    wafEnabled ? getJsonOptional('/v1/waf/cve-pipeline', headers, { items: [] }) : Promise.resolve({ items: [] }),
-    wafEnabled ? getJsonOptional('/v1/waf/supply-chain/risks', headers, { items: [] }) : Promise.resolve({ items: [] }),
-    discoveryEnabled ? getJsonOptional('/v1/discovery/entities', headers, { items: [] }) : Promise.resolve({ items: [] }),
-    discoveryEnabled ? getJsonOptional('/v1/discovery/candidates', headers, { items: [] }) : Promise.resolve({ items: [] }),
-    discoveryEnabled ? getJsonOptional('/v1/discovery/inbox', headers, { items: [] }) : Promise.resolve({ items: [] }),
-    discoveryEnabled ? getJsonOptional('/v1/discovery/reports/summary', headers, null) : Promise.resolve(null),
-    isStaffSession ? Promise.resolve(null) : getJsonOptional('/v1/subscription/current', headers, null),
-    isStaffSession ? getJsonOptional('/internal/admin/overview', headers, null) : Promise.resolve(null),
-    isStaffSession ? getJsonOptional('/internal/admin/signup-requests', headers, { items: [] }) : Promise.resolve({ items: [] }),
-    isStaffSession ? getJsonOptional('/internal/admin/tenants', headers, { items: [] }) : Promise.resolve({ items: [] }),
-    isStaffSession ? getJsonOptional('/internal/admin/approval-requests', headers, { items: [] }) : Promise.resolve({ items: [] }),
-    isStaffSession ? getJsonOptional('/internal/admin/audit-log?limit=20', headers, { items: [] }) : Promise.resolve({ items: [] })
+    opt('/v1/state', useStaffSocTenantHeaders ? tenantHeaders : customerHeaders, null, true),
+    opt('/v1/tenants/current', customerHeaders, null, true),
+    opt('/v1/target-groups', customerHeaders, { items: [] }, true),
+    opt('/v1/agents', customerHeaders, { items: [] }, true),
+    opt('/v1/checks', customerHeaders, { items: [] }),
+    opt('/v1/test-policies', customerHeaders, { items: [] }),
+    opt('/v1/test-runs', customerHeaders, { items: [] }, true),
+    opt('/v1/findings', useStaffSocTenantHeaders ? tenantHeaders : customerHeaders, { items: [] }, true),
+    opt('/v1/evidence', customerHeaders, { items: [] }),
+    opt('/v1/high-scale-requests', useStaffSocTenantHeaders ? tenantHeaders : customerHeaders, { items: [] }, true),
+    opt('/v1/reports', customerHeaders, { items: [] }, true),
+    opt('/v1/notifications', customerHeaders, { rules: [], events: [] }),
+    opt('/v1/production-release-evidence', customerHeaders, { items: [] }),
+    opt('/v1/production-release-evidence/attestation', customerHeaders, null),
+    opt('/v1/audit-log', customerHeaders, { items: [] }),
+    connectorsEnabled ? opt('/v1/connectors', customerHeaders, { items: [] }) : Promise.resolve({ items: [] }),
+    opt('/v1/secrets', customerHeaders, { items: [] }),
+    opt('/v1/bootstrap-tokens', customerHeaders, { items: [] }),
+    opt('/v1/service-accounts', customerHeaders, { items: [] }),
+    wafEnabled ? opt('/v1/waf/assets', customerHeaders, { items: [] }) : Promise.resolve({ items: [] }),
+    wafEnabled ? opt('/v1/waf/coverage', customerHeaders, null) : Promise.resolve(null),
+    wafEnabled ? opt('/v1/waf/coverage/summary', customerHeaders, null) : Promise.resolve(null),
+    wafEnabled ? opt('/v1/waf/coverage/risk-roadmap', customerHeaders, null) : Promise.resolve(null),
+    wafEnabled ? opt('/v1/waf/validations', customerHeaders, { items: [] }) : Promise.resolve({ items: [] }),
+    wafEnabled ? opt('/v1/waf/drift-events', customerHeaders, { items: [] }) : Promise.resolve({ items: [] }),
+    wafEnabled ? opt('/v1/waf/exceptions', customerHeaders, { items: [] }) : Promise.resolve({ items: [] }),
+    wafEnabled ? opt('/v1/waf/validation-plans', customerHeaders, { items: [] }) : Promise.resolve({ items: [] }),
+    wafEnabled ? opt('/v1/waf/retests', customerHeaders, { items: [] }) : Promise.resolve({ items: [] }),
+    wafEnabled ? opt('/v1/waf/action-items', customerHeaders, { items: [] }) : Promise.resolve({ items: [] }),
+    wafEnabled ? opt('/v1/waf/cve-pipeline', customerHeaders, { items: [] }) : Promise.resolve({ items: [] }),
+    wafEnabled ? opt('/v1/waf/supply-chain/risks', customerHeaders, { items: [] }) : Promise.resolve({ items: [] }),
+    discoveryEnabled ? opt('/v1/discovery/entities', customerHeaders, { items: [] }) : Promise.resolve({ items: [] }),
+    discoveryEnabled ? opt('/v1/discovery/candidates', customerHeaders, { items: [] }) : Promise.resolve({ items: [] }),
+    discoveryEnabled ? opt('/v1/discovery/inbox', customerHeaders, { items: [] }) : Promise.resolve({ items: [] }),
+    discoveryEnabled ? opt('/v1/discovery/reports/summary', customerHeaders, null) : Promise.resolve(null),
+    isStaffSession ? Promise.resolve(null) : opt('/v1/subscription/current', customerHeaders, null),
+    isStaffSession ? getJsonOptional('/internal/admin/overview', headers, null, hydrateErrors) : Promise.resolve(null),
+    isStaffSession ? getJsonOptional('/internal/admin/signup-requests', headers, { items: [] }, hydrateErrors) : Promise.resolve({ items: [] }),
+    isStaffSession ? getJsonOptional('/internal/admin/tenants', headers, { items: [] }, hydrateErrors) : Promise.resolve({ items: [] }),
+    isStaffSession ? getJsonOptional('/internal/admin/approval-requests', headers, { items: [] }, hydrateErrors) : Promise.resolve({ items: [] }),
+    isStaffSession ? getJsonOptional('/internal/admin/audit-log?limit=20', headers, { items: [] }, hydrateErrors) : Promise.resolve({ items: [] })
   ]);
 
   return {
@@ -434,7 +522,11 @@ export async function fetchPortalData(
     internalAudit: asArray(internalAudit),
     deploymentFeatures,
     loaded: true,
-    error: null
+    error: hydrateErrors.length > 0
+      ? (hydrateErrors.length === 1
+        ? hydrateErrors[0]
+        : `${hydrateErrors[0]} (+${hydrateErrors.length - 1} more load issues)`)
+      : null
   };
 }
 

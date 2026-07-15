@@ -1,15 +1,19 @@
 import { roleHasPermission } from '../../../../../src/contracts/roles.mjs';
 
-const STAFF_SOC_ROLES = new Set(['soc_analyst', 'soc_lead', 'admin']);
+/** Align with isStaffSocRole in api.ts — operational SOC staff only. */
+const STAFF_SOC_ROLES = new Set(['soc_analyst', 'soc_lead']);
 
 /** Customer portal routes gated by backend RBAC keys in `src/contracts/roles.mjs`. */
 const ROUTE_PERMISSION = Object.freeze({
   notifications: 'notification:read',
   audit: 'audit:read',
+  reports: 'report:read',
+  'release-evidence': 'release_evidence:read',
 });
 
 const STAFF_ONLY_ROUTES = new Set(['admin', 'tenant-detail']);
-const STAFF_SOC_ROUTES = new Set(['internal-soc', 'queue-detail']);
+/** Staff-only SOC execution console. queue-detail is shared for customer pack completion. */
+const STAFF_SOC_ROUTES = new Set(['internal-soc']);
 
 /**
  * @param {string | undefined} role

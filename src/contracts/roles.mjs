@@ -24,6 +24,7 @@ export const PERMISSIONS = {
   'test_run:read': ['owner', 'admin', 'engineer', 'soc', 'auditor', 'viewer'],
   'finding:read': ['owner', 'admin', 'engineer', 'soc', 'auditor', 'viewer'],
   'finding:write': ['owner', 'admin', 'engineer'],
+  'report:read': ['owner', 'admin', 'engineer', 'soc', 'auditor', 'viewer'],
   'report:create': ['owner', 'admin', 'engineer', 'soc', 'auditor'],
   'audit:read': ['owner', 'admin', 'soc', 'auditor'],
   'high_scale:request': ['owner', 'admin', 'engineer'],

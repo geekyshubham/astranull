@@ -2289,7 +2289,8 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
   }
   const runFinalize = path.match(/^\/v1\/test-runs\/([^/]+)\/finalize$/);
   if (runFinalize && method === 'POST') {
-    const gate = requirePermission(ctx, 'test_run:read');
+    // Finalize mutates run state — require start/write ACL, not read-only roles.
+    const gate = requirePermission(ctx, 'test_run:start');
     if (!gate.ok) return json(res, gate.status, gate.body);
     const result = await serviceDeps.testRuns.finalizeTestRun(ctx, runFinalize[1]);
     if (!result) return json(res, 404, { error: 'not_found' });
@@ -2354,7 +2355,7 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
     return json(res, 201, await serviceDeps.reports.createReport(ctx, body));
   }
   if (path === '/v1/reports' && method === 'GET') {
-    const gate = requirePermission(ctx, 'report:create');
+    const gate = requirePermission(ctx, 'report:read');
     if (!gate.ok) return json(res, gate.status, gate.body);
     if (blockPostgresReportRoute(runtimeConfig, serviceDeps, path, method, res)) return;
     return json(res, 200, {
@@ -2365,7 +2366,7 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
   }
   const rptMatch = path.match(/^\/v1\/reports\/([^/]+)$/);
   if (rptMatch && method === 'GET') {
-    const gate = requirePermission(ctx, 'report:create');
+    const gate = requirePermission(ctx, 'report:read');
     if (!gate.ok) return json(res, gate.status, gate.body);
     if (blockPostgresReportRoute(runtimeConfig, serviceDeps, path, method, res)) return;
     const r = await serviceDeps.reports.getReport(ctx, rptMatch[1]);
@@ -2374,7 +2375,7 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
   }
   const rptExport = path.match(/^\/v1\/reports\/([^/]+)\/export$/);
   if (rptExport && method === 'GET') {
-    const gate = requirePermission(ctx, 'report:create');
+    const gate = requirePermission(ctx, 'report:read');
     if (!gate.ok) return json(res, gate.status, gate.body);
     if (blockPostgresReportRoute(runtimeConfig, serviceDeps, path, method, res)) return;
     const format = url.searchParams.get('format') || 'json';
@@ -2407,7 +2408,8 @@ async function handleApi(req, res, url, ctx, runtimeConfig, options = {}) {
   }
 
   if (path === '/v1/custody/verify' && method === 'POST') {
-    const gate = requirePermission(ctx, 'audit:read');
+    // Engineers who can export findings need to verify custody; align with evidence:read.
+    const gate = requirePermission(ctx, 'evidence:read');
     if (!gate.ok) return json(res, gate.status, gate.body);
     const body = await readJsonBody(req, runtimeConfig.maxJsonBodyBytes);
     const result = await serviceDeps.custodyVerification.verifyCustodyExport(ctx, body);

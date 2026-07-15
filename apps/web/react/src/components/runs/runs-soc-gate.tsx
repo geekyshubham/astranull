@@ -326,18 +326,16 @@ export function RunsSocGatePanel({
       render: (item) => {
         const id = getString(item, ['id'], '');
         const pack = getNestedString(item, ['authorization_pack_status', 'overall'], 'missing').toLowerCase();
-        if (pack === 'missing') {
+        if (pack === 'missing' || pack === 'incomplete' || pack === 'partial') {
           return (
-            <Button
+            <AnchorButton
               size="sm"
               variant="ghost"
-              loading={busy === `pack-${id}`}
-              disabled={busy !== '' && busy !== `pack-${id}`}
+              href={buildDetailHref('queue-detail', id)}
               aria-label={`Complete authorization pack for request ${id}`}
-              onClick={() => setPackRequestId(id)}
             >
               Complete pack
-            </Button>
+            </AnchorButton>
           );
         }
         return <span className="muted mono">awaiting SOC</span>;

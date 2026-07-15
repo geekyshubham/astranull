@@ -595,6 +595,32 @@ th {
   border-color: var(--border-strong);
 }
 
+.portal-load-error {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin: var(--space-3) clamp(var(--space-4), 3vw, var(--space-8)) 0;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid color-mix(in oklab, var(--danger), transparent 55%);
+  border-radius: var(--radius-md);
+  background: color-mix(in oklab, var(--danger), transparent 92%);
+  color: var(--fg);
+}
+
+.portal-load-error-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.portal-load-error-body p {
+  margin: 0;
+  color: var(--fg-2);
+  font-size: var(--text-sm);
+}
+
 .menu-btn {
   display: none !important;
 }

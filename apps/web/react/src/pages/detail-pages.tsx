@@ -11,7 +11,7 @@ import { Select } from '../components/ui/select';
 import { Tabs } from '../components/ui/tabs';
 import { buildApiHeaders, isStaffSocRole, requestJson, requestSocJson } from '../lib/api';
 import { ROUTE_BY_ID } from '../lib/navigation';
-import { buildDetailHref, getRouteEntityId } from '../lib/route-params';
+import { buildDetailHref, getRouteEntityId, getRouteTenantId } from '../lib/route-params';
 import { buildEvidenceCustodyManifest, CUSTODY_CONTENT_CANONICALIZATION } from '../lib/custody';
 import type { DataItem, PortalConfig, PortalData, RouteId, Session } from '../lib/types';
 import { formatDate, scoreTone } from '../lib/utils';
@@ -872,11 +872,14 @@ function useListBackedDetail<T extends DataItem>(
   session: Session,
   listPath: string,
   entityId: string,
-  fallback: T | null
+  fallback: T | null,
+  options: { tenantId?: string; staffSoc?: boolean } = {}
 ) {
   const [detail, setDetail] = useState<T | null>(fallback);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(enabled && Boolean(entityId));
+  const tenantId = options.tenantId;
+  const staffSoc = Boolean(options.staffSoc);
 
   useEffect(() => {
     if (!enabled || !entityId) {
@@ -887,7 +890,10 @@ function useListBackedDetail<T extends DataItem>(
     let cancelled = false;
     setLoading(true);
     setError('');
-    requestJson(config, session, listPath)
+    const fetchList = staffSoc
+      ? requestSocJson(config, session, listPath, { tenantId })
+      : requestJson(config, session, listPath);
+    fetchList
       .then((payload) => {
         if (cancelled) return;
         const items = Array.isArray((payload as { items?: unknown }).items)
@@ -911,18 +917,32 @@ function useListBackedDetail<T extends DataItem>(
     return () => {
       cancelled = true;
     };
-  }, [config, session, listPath, enabled, entityId, fallback]);
+  }, [config, session, listPath, enabled, entityId, fallback, staffSoc, tenantId]);
 
   return { detail, error, loading };
 }
 
 function formatRunDuration(entity: DataItem) {
   const start = entity.started_at ?? entity.created_at;
-  const end = getNestedString(entity, ['verdict', 'finalized_at'], '') || entity.completed_at || entity.updated_at;
-  if (!start || !end) return '—';
+  const end = getNestedString(entity, ['verdict', 'finalized_at'], '') || entity.completed_at;
+  if (!start) return '—';
+  if (!end) {
+    const status = String(entity.status ?? entity.state ?? '').toLowerCase();
+    if (status === 'running' || status === 'collecting' || status === 'in_progress') return 'In progress';
+    return '—';
+  }
   const ms = new Date(String(end)).getTime() - new Date(String(start)).getTime();
   if (!Number.isFinite(ms) || ms < 0) return '—';
   const totalSeconds = Math.round(ms / 1000);
+  if (totalSeconds > 24 * 60 * 60) {
+    const hours = Math.round(totalSeconds / 3600);
+    return hours >= 48 ? `${Math.round(hours / 24)}d` : `${hours}h`;
+  }
+  if (totalSeconds >= 3600) {
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+  }
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
@@ -1229,7 +1249,13 @@ function TenantDetailView({
       .catch((err) => {
         if (!cancelled) {
           setSubscriptionSnapshot(null);
-          setSubscriptionError(err instanceof Error ? err.message : 'Could not load subscription entitlements.');
+          // Soft-missing subscription is common for demo tenants; avoid raw API codes in the banner.
+          const msg = err instanceof Error ? err.message : 'Could not load subscription entitlements.';
+          setSubscriptionError(
+            /not found|not_found/i.test(msg)
+              ? 'No subscription entitlements recorded for this tenant yet.'
+              : msg
+          );
         }
       });
     return () => { cancelled = true; };
@@ -3189,13 +3215,16 @@ function SocRequestDetailView({
   entityId,
   config,
   session,
-  onRefresh
+  onRefresh,
+  tenantId: tenantIdProp
 }: {
   entity: DataItem;
   entityId: string;
   config: PortalConfig;
   session: Session;
   onRefresh: () => Promise<void>;
+  /** Cross-tenant staff SOC scope (from Open link query or entity.tenant_id). */
+  tenantId?: string;
 }) {
   const [tab, setTab] = useState('workspace');
   const [busy, setBusy] = useState('');
@@ -3208,9 +3237,20 @@ function SocRequestDetailView({
   const [reportBusy, setReportBusy] = useState(false);
   const staffSocSurface = session.principal === 'staff' && isStaffSocRole(session);
   const isSoc = staffSocSurface || (session.role === 'soc' && session.principal !== 'staff');
+  const actionTenantId =
+    String(tenantIdProp ?? '').trim()
+    || getString(entity, ['tenant_id'], '')
+    || session.tenant_id
+    || undefined;
 
-  async function socFetch(path: string, options: { method?: string; body?: unknown } = {}) {
-    if (staffSocSurface) return requestSocJson(config, session, path, options);
+  async function socFetch(path: string, options: { method?: string; body?: unknown; tenantId?: string } = {}) {
+    if (staffSocSurface) {
+      return requestSocJson(config, session, path, {
+        method: options.method,
+        body: options.body,
+        tenantId: options.tenantId ?? actionTenantId
+      });
+    }
     return requestJson(config, session, path, options);
   }
 
@@ -3965,7 +4005,7 @@ function CheckDetailPage({ entityId, data }: { entityId: string; data: PortalDat
               <div>
                 <p className="check-fact-label">Probe profile</p>
                 <div className="row-actions">
-                  <code className="traffic-path-label">{probeKind}</code>
+                  <code className="traffic-path-label" title={probeKind}>{probeKind}</code>
                   {probeRequests ? <Badge tone="muted">{probeRequests} request{probeRequests === 1 ? '' : 's'}</Badge> : null}
                 </div>
               </div>
@@ -4099,7 +4139,16 @@ export function DetailRoutePage({
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [runEvents, setRunEvents] = useState<DataItem[]>([]);
-  const entityId = useMemo(() => getRouteEntityId(''), [route]);
+  // Re-read id when hash changes even if route id stays the same (e.g. queue-detail?id=A → id=B).
+  const [routeQueryTick, setRouteQueryTick] = useState(0);
+  useEffect(() => {
+    function onHashChange() {
+      setRouteQueryTick((n) => n + 1);
+    }
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
+  const entityId = useMemo(() => getRouteEntityId(''), [route, routeQueryTick]);
 
   const targetGroupFallback = data.targetGroups.find((item) => getString(item, ['id'], '') === entityId) ?? null;
   const agentFallback = data.agents.find((item) => getString(item, ['id'], '') === entityId) ?? null;
@@ -4148,13 +4197,21 @@ export function DetailRoutePage({
     entityId,
     agentFallback
   );
+  const queueTenantId = useMemo(
+    () => getRouteTenantId(session.tenant_id ?? '') || undefined,
+    [route, entityId, session.tenant_id]
+  );
   const highScaleDetail = useListBackedDetail(
     route === 'queue-detail' && Boolean(entityId),
     config,
     session,
     '/v1/high-scale-requests',
     entityId,
-    highScaleFallback
+    highScaleFallback,
+    {
+      staffSoc: session.principal === 'staff' && isStaffSocRole(session),
+      tenantId: queueTenantId
+    }
   );
   const detailState =
     route === 'target-group-detail' ? targetGroupDetail
@@ -4316,29 +4373,69 @@ export function DetailRoutePage({
   }
 
   if (route === 'queue-detail') {
+    const staffSocWorkspace = session.principal === 'staff' && isStaffSocRole(session);
     if (!entityId) {
       return (
         <div className="content">
-          <DetailPageIntro route={route} eyebrow="SOC execution workspace" />
-          <EmptyState icon={ShieldCheck} title="No SOC request selected." body="Open a queue item from Test runs or the SOC console with ?id=." actionLabel="Open SOC console" actionHref="#internal-soc" />
+          <DetailPageIntro route={route} eyebrow={staffSocWorkspace ? 'SOC execution workspace' : 'High-scale authorization pack'} />
+          <EmptyState
+            icon={ShieldCheck}
+            title="No high-scale request selected."
+            body={staffSocWorkspace
+              ? 'Open a queue item from the SOC console with ?id=.'
+              : 'Open a request from Test runs with Complete pack or the request id link.'}
+            actionLabel={staffSocWorkspace ? 'Open SOC console' : 'Open test runs'}
+            actionHref={staffSocWorkspace ? '#internal-soc' : '#runs'}
+          />
         </div>
       );
     }
-    if (!highScaleFallback) {
+    const queueEntity = highScaleDetail.detail ?? highScaleFallback;
+    if (!queueEntity && highScaleDetail.loading) {
       return (
         <div className="content">
-          <DetailPageIntro route={route} eyebrow="SOC execution workspace" />
-          <EmptyState icon={ShieldCheck} title="SOC request not found." body="The requested high-scale item is missing or outside this tenant scope." actionLabel="Open SOC console" actionHref="#internal-soc" />
+          <DetailPageIntro route={route} eyebrow={staffSocWorkspace ? 'SOC execution workspace' : 'High-scale authorization pack'} />
+          <DetailLoadingPlaceholder label="Loading high-scale request…" />
         </div>
+      );
+    }
+    if (!queueEntity) {
+      return (
+        <div className="content">
+          <DetailPageIntro route={route} eyebrow={staffSocWorkspace ? 'SOC execution workspace' : 'High-scale authorization pack'} />
+          <EmptyState
+            icon={ShieldCheck}
+            title="High-scale request not found."
+            body={highScaleDetail.error || 'The requested high-scale item is missing or outside this tenant scope.'}
+            actionLabel={staffSocWorkspace ? 'Open SOC console' : 'Open test runs'}
+            actionHref={staffSocWorkspace ? '#internal-soc' : '#runs'}
+          />
+        </div>
+      );
+    }
+    // Staff SOC: lifecycle / kill-switch workspace. Customer: multi-type authorization pack.
+    if (staffSocWorkspace) {
+      return (
+        <SocRequestDetailView
+          entity={queueEntity}
+          entityId={entityId}
+          config={config}
+          session={session}
+          onRefresh={onRefresh}
+          tenantId={queueTenantId || getString(queueEntity, ['tenant_id'], '') || undefined}
+        />
       );
     }
     return (
-      <SocRequestDetailView
-        entity={highScaleFallback}
+      <HighScaleDetailView
+        entity={queueEntity}
         entityId={entityId}
+        data={data}
         config={config}
         session={session}
         onRefresh={onRefresh}
+        loading={highScaleDetail.loading}
+        loadError={highScaleDetail.error}
       />
     );
   }
@@ -4568,7 +4665,15 @@ export function ReportDetailPage({
   const [preview, setPreview] = useState<ReportExportPreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const previewLockedRef = useRef(false);
-  const entityId = useMemo(() => getRouteEntityId(''), []);
+  const [reportQueryTick, setReportQueryTick] = useState(0);
+  useEffect(() => {
+    function onHashChange() {
+      setReportQueryTick((n) => n + 1);
+    }
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
+  const entityId = useMemo(() => getRouteEntityId(''), [reportQueryTick]);
   const reportFallback = data.reports.find((item) => getString(item, ['id'], '') === entityId) ?? null;
   const reportDetail = useEntityDetail(
     Boolean(entityId),
@@ -4804,7 +4909,7 @@ export function ReportDetailPage({
         <DetailLoadingPlaceholder label={reportDetail.loading ? 'Loading report detail…' : 'Loading custody preview…'} variant="layout" />
       ) : (
       <>
-      <div className="metric-grid">
+      <div className="metric-grid five">
         <MetricCard label="Readiness" value={readinessScore} sub="Score out of 100" icon={ShieldCheck} tone={scoreTone(readinessScore)} />
         <MetricCard label="Status" value={formatStatusLabel(getString(report, ['status'], 'ready'))} sub="Delivery status" icon={FileCheck2} tone={reportStatusBadgeTone(getString(report, ['status'], 'ready')) === 'success' ? 'success' : 'muted'} />
         <MetricCard label="Open findings" value={openFindings} sub="Unresolved gaps at generation" icon={TriangleAlert} tone={openFindings > 0 ? 'danger' : 'muted'} />

@@ -26,6 +26,7 @@ const PORTAL_ROUTES = Object.freeze([
   'integrations',
   'notifications',
   'audit',
+  'release-evidence',
   'settings',
   'support',
   'subscription',
@@ -35,7 +36,7 @@ const PORTAL_ROUTES = Object.freeze([
   'queue-detail',
 ]);
 
-/** Fifteen customer + two staff sidebar entries from navigation.ts NAV_ITEMS. */
+/** Customer + staff sidebar entries from navigation.ts NAV_ITEMS. */
 const SIDEBAR_ROUTE_IDS = Object.freeze([
   'dashboard',
   'environments',
@@ -51,20 +52,25 @@ const SIDEBAR_ROUTE_IDS = Object.freeze([
   'support',
   'notifications',
   'audit',
+  'release-evidence',
   'subscription',
   'admin',
   'internal-soc',
 ]);
 
 const STAFF_ONLY_ROUTES = new Set(['admin', 'tenant-detail']);
-const STAFF_SOC_ROUTES = new Set(['internal-soc', 'queue-detail']);
+/** Staff-only SOC execution console. queue-detail is shared for customer pack completion. */
+const STAFF_SOC_ROUTES = new Set(['internal-soc']);
 const PERMISSION_GATED_ROUTES = Object.freeze({
   notifications: 'notification:read',
   audit: 'audit:read',
+  reports: 'report:read',
+  'release-evidence': 'release_evidence:read',
 });
 
 const CUSTOMER_ROLES = ['owner', 'engineer', 'viewer', 'auditor', 'admin', 'soc'];
-const STAFF_SOC_ROLES = ['soc_analyst', 'soc_lead', 'admin'];
+/** Operational SOC staff roles only (matches isStaffSocRole / route-access). */
+const STAFF_SOC_ROLES = ['soc_analyst', 'soc_lead'];
 
 function expectedCustomerAccess(role, routeId) {
   if (STAFF_ONLY_ROUTES.has(routeId) || STAFF_SOC_ROUTES.has(routeId)) {
