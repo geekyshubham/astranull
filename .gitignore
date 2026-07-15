@@ -47,10 +47,15 @@ debug.log
 
 # AI orchestration skills (local dev only, not product source)
 .kiro/
+.kiro-vibe-review-prompt.md
 .agents/
 grokorches-skill.md
 .grok-prompts/
 .grok/
+
+# Local npm install artifact (not tracked in this repo)
+package-lock.json
+
 
 # Railway / deployment CLI state (local operator only)
 .railway/
